@@ -383,8 +383,9 @@ What this changes:
    model-written text, therefore no fabricated-evidence risk and no new authority surface. Because a
    retained ChatGPT conversation physically keeps old output, Tier 0 still needs epoch rotation; the
    fresh epoch is simply compiled from the masked view.
-2. **Tier 1 only on evidence.** A model-written checkpoint is built only if S0.6 shows Tier 0 fails the
-   pre-written bar. If it is built, it uses the structured schema, never free-form prose alone.
+2. **Tier 1 is out of V1 (5.11).** A model-written checkpoint returns only if the owner later reverses
+   that decision after reading in-use logs. If it ever returns, it uses the structured schema, never
+   free-form prose alone.
 3. **Artifact trail comes from the bridge, not from model recall.** The bridge holds canonical tool
    calls and can extract files touched, commands run, and test outcomes with refs. This targets the
    one dimension every compression system did worst on.
@@ -401,6 +402,46 @@ vendor's own benchmark; Mem0/Letta conversational-memory benchmarks do not measu
 traces and are services, so they are not used. Reusable assets: the JetBrains repo (strategies, MIT),
 Factory's published rubric and judge prompts, and Codex's open-source local compaction handoff prompt
 as a starting point for Tier 1 (verify against the Codex source before use).
+
+### 5.11 Scope reduction: observe in real use instead of heavy testing (owner decision, 2026-10-07)
+
+The owner decided that expensive validation is not worth its cost: tests that need many real browser
+submissions, a hand-calibrated judge, or long multi-epoch live runs are dropped. Quality is judged by
+using the feature and reading logs. This section **supersedes** every conflicting statement elsewhere
+in this document.
+
+Dropped:
+
+- the live five-arm S0.6 evaluation, judge calibration, and probe scoring on the real account;
+- S7 multi-epoch quality evaluation and the 15.2 corpus run against a real account;
+- S8 end-to-end scenarios that need a real account or a real installed Codex (S8 items 4-13 as live
+  acceptance), and the pre-written quality/elongation bars that depended on them;
+- Tier 1 (the model-written structured checkpoint, S3, 9.1 payload, 11.x capture) from V1. It returns
+  only if the owner later decides, from logs and experience, that Tier 0 loses needed information.
+
+Kept, because they are cheap and protect correctness:
+
+- deterministic unit tests: pure masking and ledger functions, digest/provenance, authority
+  preservation, store fencing, the physical-resolver isolation test, single-message fit, and the
+  rejection-observer tests;
+- fake-driven in-process harness tests (the existing `tests/chatgpt-web-harness.test.ts` style) that
+  need no account;
+- `bun run typecheck`, `git diff --check`, and focused suites per slice; `bun run verify` at a
+  milestone only when the owner asks.
+
+Consequences:
+
+- **V1 = Tier 0 only.** Masked view + bridge-computed artifact ledger + inter-turn epoch rotation. No
+  model-written memory, so no summary-quality risk and no added browser submission.
+- **No pass bar is claimed.** The design rests on published studies (5.10), not on a measured result
+  here. Say so wherever behavior is described; do not report quality as verified.
+- **The safety net is a kill switch and logs.** The flag stays default-off and is switched off the
+  moment behavior looks wrong. Rotation caps and cooldowns (14.1) bound the damage; the in-use log
+  schema (14.2) is how the owner decides.
+- **The logical window is not raised on a schedule.** The ~240k catalog value is changed only by the
+  owner, by hand, after reading in-use logs for a while. No automated gate stands in for that.
+- **M2 (S5, S6) is justified by logs only**: build it when logs show repeated active-turn pressure
+  stops, not before.
 
 ## 6. Non-negotiable invariants
 
@@ -740,7 +781,7 @@ Luna-specific, so changes are required in the actual stream/worker path, not onl
 
 **Tier 0 needs no capture.** A Tier 0 epoch is built entirely by the bridge from canonical history at
 rotation time (10.4); it adds no tail and no submission. Everything below in 11.1-11.3 concerns Tier 1
-only and is implemented only if S0.6 requires it. Rotation to a Tier 0 epoch still follows 11.3's
+only and is **out of V1 scope** (5.11). Rotation to a Tier 0 epoch still follows 11.3's
 boundary rules (between completed native turns, never with outstanding tools).
 
 **Which turns request a checkpoint (Tier 1).** The tail lengthens a normal completion, so it is the
@@ -1167,6 +1208,33 @@ Caps, all with conservative defaults chosen from the S7 measurements rather than
 Acceptance requires the measured extra-work ratio to be written down before S8 and the DEV account
 spend of the evaluation itself (S0.6/S7 are real submissions) to be recorded, not assumed free.
 
+### 14.2 In-use log schema and report
+
+All events go to the existing local log (daemon stdout, so they land in `launcher.jsonl`) as one
+JSON object per line with the prefix `semantic_`. A stock install emits none. Content is never logged
+(invariant 18); identifiers are hashed thread/epoch ids and canonical refs.
+
+| Event | Fields |
+| --- | --- |
+| `semantic_turn` | threadHash, epoch, tier, canonicalTokens, nextWireTokens, estimatedEpochOccupancy, occupancyConfidence, physicalLimit |
+| `semantic_rotation` | threadHash, fromEpoch, toEpoch, reason, firstMessageTokens, firstMessageChars, fitsSingleMessage, maskedResults, maskedTokensEst, ledgerFiles, ledgerCommands, windowSize |
+| `semantic_skip` | threadHash, reason (`ineligible`, `no_fit`, `cooldown`, `cap_hit`, `outstanding_tools`, `unknown_occupancy`) |
+| `semantic_validation_failed` | threadHash, reason (`digest_mismatch`, `anchor_missing`, `schema`, `corrupt_store`), fellBackTo |
+| `semantic_reject` | threadHash, kind (`http_413`, `sse_input_too_large`), mode, effort, estimatedMessageTokens, messageChars, ledgerValue, class (A/B/C/D when known) |
+| `semantic_fallback` | threadHash, to (`legacy`, `compaction_required`, `recovery_error`), reason |
+
+Add a read-only script, `scripts/semantic-log-report.ts`, that reads a `launcher.jsonl` path given on
+the command line and prints counts and simple ratios: rotations per thread, masked tokens saved, skips
+by reason, rejections by class and whether any occurred after a rotation, fallbacks, and the slowest
+steps-per-turn threads. It makes no network or model call and prints no content. This report is the
+owner's acceptance tool.
+
+Optional local trace (default off, own flag, name `experimentalSemanticMemoryTrace`): writes the exact
+masked view that was sent to a mode-0600 file under `<config-dir>/diagnostics/semantic-trace/`, with a
+short TTL and a size cap, so the owner can read what the model actually saw when something looks
+wrong. It is the only place content may be written, it never goes to `launcher.jsonl`, and it is
+excluded from the safe export. It stays off unless the owner turns it on.
+
 ## 15. Semantic quality and evidence policy
 
 ### 15.1 Exact evidence rehydration policy
@@ -1280,10 +1348,10 @@ measured and a decision to continue is recorded in this document.
 
 | Milestone | Slices | Question it answers | Continue only if |
 | --- | --- | --- | --- |
-| **M0** | S0.5, S0.5b, S0.6 | Is the idea worth building at all, and which tier? | At least one S0.6 arm meets the pre-written bar on real transcripts, and real threads actually hit the physical limit often enough to matter |
-| **M1** | S1, S2, S4 (Tier 0); S3 only if S0.6 requires | Does inter-turn rotation with a masked view work safely under a hidden flag, without raising any window? | Authority/provenance gates pass; measured extra-work ratio (14.1) is acceptable; elongation (steps to completion) is no worse than the pre-written bound |
+| **M0** | S0.5, S0.5b, S0.6-lite (optional) | Do real threads hit the limit often enough, and why do "message too long" errors happen? | Owner reads the S0.5b diagnostics and, if run, the S0.6-lite report. No pass bar; owner judgment |
+| **M1** | S1, S2, S4 (Tier 0 only), plus the 14.2 log events and report script | Does inter-turn rotation with a masked view work safely under a hidden flag, without raising any window? | Cheap unit and fake-harness tests pass; the owner uses it and reads `semantic-log-report`; kill switch available |
 | **M2** | S5-S6 | Is long-task pressure handling needed, given M1 data? | M1 shows long single-turn pressure is a real, frequent failure, not a hypothetical one |
-| **M3** | S7-S8 (S9 separate) | Can the logical window be raised? | Full quality eval and end-to-end acceptance pass |
+| **M3** | S8 only as a manual window change (S7 dropped; S9 separate) | Should the logical window be raised? | Owner decision after reading in-use logs for a while |
 
 S5/S6 are the most invasive slices (server routing, `previous_response_id`, live broker guard) and
 the largest rebase burden. They are justified only by evidence from M1, not by the design alone.
@@ -1317,6 +1385,13 @@ Exit gate: both rejection shapes produce a log line from which class A/B/C/D can
 stock behavior otherwise unchanged.
 
 ### S0.6 — offline memory-quality spike with five arms (M0, no runtime changes)
+
+> **Superseded by 5.11.** The live five-arm evaluation below is dropped. What remains is
+> **S0.6-lite**: an optional read-only script over the owner's local Codex session files that makes
+> no model call and uses no account. It reports, per session, the share of tokens that are old
+> tool-result bodies (an upper bound on what Tier 0 saves) and how often a thread would have crossed
+> the physical limit. It runs only after the owner confirms which sessions it may read. Everything
+> below this note is kept as design history for a possible later evaluation.
 
 Before any runtime work, test the assumptions the design depends on (section 5.10) on this project's
 own transcripts and model, outside the bridge runtime, as scripts.
@@ -1395,9 +1470,9 @@ Exit gate includes delayed older completion, replayed commit, corrupt file (orig
 `*.corrupt-<uuid>`, never overwritten), unsupported schema, changed prefix, wrong thread/model
 family, and missing pin ref.
 
-### S3 — private Sol checkpoint capture (Tier 1 only; conditional on S0.6)
+### S3 — private Sol checkpoint capture (Tier 1 only; **out of V1 scope per 5.11**)
 
-Built only if the S0.6 decision rule requires Tier 1. Extend the real `BrowserTurn`/worker stream path, prompt contract, and adapter callback. Capture is
+Out of V1 scope (5.11). If the owner later reverses that, extend the real `BrowserTurn`/worker stream path, prompt contract, and adapter callback. Capture is
 optional and only on selected normal Sol turns. Keep Luna behavior unchanged.
 
 Exit gate:
@@ -1520,7 +1595,7 @@ Exit gate:
   launcher chat may physically survive;
 - flag-off/downgrade is tested after canonical history has exceeded legacy budget.
 
-### S7 — semantic quality/evidence evaluation
+### S7 — semantic quality/evidence evaluation (**dropped per 5.11**; replaced by in-use logs, 14.2)
 
 Build the multi-epoch corpus from section 15 and record full-context baseline vs semantic projection.
 S0.6 is the cheap early version of this (single cut, real transcripts, offline, five arms); S7 is the
@@ -1532,7 +1607,7 @@ change the logical catalog limit in this slice.
 Exit gate: documented thresholds pass, with zero authority violations and zero fabricated exact
 evidence in the acceptance corpus.
 
-### S8 — guarded ~240k logical window + end-to-end acceptance
+### S8 — guarded ~240k logical window + end-to-end acceptance (**live scenarios dropped per 5.11**; the logical-window change is a manual owner decision from in-use logs, covered by fake-harness tests only)
 
 Only now allow `resolveChatGptWebContextLimits()` to diverge under the experimental feature.
 
@@ -1732,11 +1807,11 @@ conservative option:
 | 5 | Guard reserve starts conservative and is tuned only from DEV harness evidence including the `input_too_large` signal | No guessed percentages |
 | 6 | Compactor stays hard-pinned to GPT-5.6 Sol Web Medium for all of V1, behind its own hidden setting | Avoids silent model drift |
 | 7 | Restart + lost semantic state + oversized canonical stays **permanently fail-closed** in V1 | A persisted retained-epoch locator is a separate project |
-| 8 | Quality bar is written in S0.6 before measuring and reused in S7; zero authority violations and zero fabricated exact evidence regardless of aggregate score | Prevents moving the target after seeing results |
+| 8 | No quality bar is pre-written (5.11); quality is judged from use and logs. Authority preservation and zero model-written content remain structural guarantees of Tier 0 | Owner chose observation over costly evaluation |
 | 9 | Read-only Sol follows Full/local-tools after it passes S8 | Smaller first surface |
 | 10 | After a successful canonical compact, retain the old epoch record marked non-applicable until a new checkpoint commits | Safer for recovery and audit |
 | 11 | Decide at S9 from storage-growth measurements; not before M3 | S9 is out of scope until then |
-| 12 | Tier 0 (masked view + bridge ledger) is the default memory mechanism; Tier 1 exists only if S0.6 proves Tier 0 insufficient, and is always structured and iteratively updated | Published studies (5.10): masking is as good as summaries at about half the cost; free-form summaries can hurt |
+| 12 | Tier 0 (masked view + bridge ledger) is the only V1 mechanism; Tier 1 is out of scope unless the owner later reverses 5.11, and would then be structured and iteratively updated | Published studies (5.10): masking is as good as summaries at about half the cost; free-form summaries can hurt |
 
 ## 24. Acceptance definition
 
@@ -1745,8 +1820,9 @@ The ~240k experiment is ready only when all of these are proven:
 - default-off small/legacy behavior remains equivalent to baseline;
 - canonical Responses history remains lossless;
 - pre-anchor active developer and selected-skill instructions remain exact under projection;
-- the chosen memory arm met the pre-written S0.6 and S7 bars on real transcripts with the Sol path,
-  including the elongation bound; no result is inherited from another model's published numbers;
+- (5.11) no quality bar is claimed. Cheap deterministic and fake-harness tests pass, the `semantic_*`
+  log events and report script exist, and the owner has used the feature with logs on; published
+  numbers from other models are cited as motivation only, never as results here;
 - Tier 0 placeholders and ledger entries are deterministic across restart and replay, never mask
   current-turn or open-call evidence, and never present omitted content as available;
 - changing any covered historical evidence invalidates the checkpoint;
@@ -1793,12 +1869,12 @@ The ~240k experiment is ready only when all of these are proven:
 ```text
 M0  S0.5 merge v6.1.5 + physical-resolver seam fix + isolation test
       -> S0.5b message-too-long diagnostics on the legacy path
-      -> S0.6 five-arm offline memory-quality spike + real-thread pressure measurement
-      -- decision gate: build at all, and Tier 0 only or Tier 0 + Tier 1? --
+      -> S0.6-lite optional no-model measurement script (5.11)
+      -- owner reads diagnostics; decides whether to build M1 --
 M1  S1 provenance + covered digest + pin policy + masking function + artifact ledger
       -> S2 epoch store + idempotent commit (durable, 6.1.5 corruption policy)
       -> S4 authority-safe Tier 0 projection + inter-turn rotation
-      -> S3 private Sol capture, Tier 1 only (conditional on S0.6; threshold-gated, cost counters)
+      -> 14.2 log events + scripts/semantic-log-report.ts (S3 / Tier 1 is out of V1 scope)
       -- decision gate: is long-turn pressure a measured, frequent problem? --
 M2  S5 dedicated compaction router + pre-routing previous_response_id normalization
       -> S6 live occupancy guard + canonical pressure transition + recovery/rollback

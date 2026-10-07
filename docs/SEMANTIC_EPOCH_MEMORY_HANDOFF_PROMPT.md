@@ -42,32 +42,40 @@ tests and docs in English.
   canonical request; only a browser-facing clone is projected.
 - Follow upstream's fail-closed style: an unclear case returns an explicit error, never a silent
   fallback. Do not add a model/effort fallback.
-- No live ChatGPT account actions, no real browser submissions, and no use of the owner's real Codex
-  transcripts unless the owner explicitly confirms the account and the transcript set in this
-  conversation. Use the DEV harness, fixtures and fakes.
+- No live ChatGPT account actions and no real browser submissions. Do not read the owner's real Codex
+  transcripts unless the owner explicitly confirms the exact set in this conversation (S0.6-lite).
+  Use fixtures and fakes.
 - Do not read, commit, or print anything under `~/.codex-chatgpt-web`, the launcher data directory, or
   Codex history.
 
 ## How to work
 
-Execute the plan slice by slice, in the order of plan section 25, and **stop at every decision gate**.
-The plan is gated on purpose; skipping a gate is a failure even if the code would compile.
+The owner reduced scope (plan 5.11): **no expensive tests**. Do not run live evaluations, judge-scored
+probes, multi-epoch live runs, or anything needing many real browser submissions. Quality is judged by
+the owner using the feature and reading logs. V1 is **Tier 0 only** (masked view + bridge-computed
+artifact ledger + inter-turn rotation); the model-written checkpoint (Tier 1, S3) is out of scope.
 
-1. **S0.5b** (do this first, it is independent and small): make "message too long" diagnosable per plan
-   12.4 requirement 6 and section S0.5b. Cover both rejection shapes (HTTP 413 and SSE
-   `input_too_large`) with tests in `tests/browser-worker-contract.test.ts` style. No behavior change
-   beyond the added fields.
-2. **S0.6 harness only**: build the offline five-arm evaluation as scripts (under `scripts/` or
-   `tests/fixtures`-adjacent, clearly marked experimental, not wired into the shipped runtime). Include
-   the probe set, the judge-prompt scaffolding, the arm definitions, the submission counter, and a
-   synthetic redacted fixture so it runs without the owner's data. Do **not** run it against a real
-   account or real transcripts. Then **stop** and ask the owner: which account, which transcripts, and
-   what pass bar (write the bar into the plan before any real run).
-3. **After the owner records the S0.6 decision in the plan**: M1 in the order S1, S2, S4, and S3 only if
-   the decision rule requires Tier 1. S1 includes the pure masking function and artifact-ledger
-   extractor (plan 9.2, 10.4). Stop at the M1 -> M2 gate and report measured data.
-4. M2 (S5, S6) and M3 (S7, S8, S9) only when the owner says the gate passed. Do not start them to "be
-   complete".
+Execute in this order and stop at the stated gates:
+
+1. **S0.5b**: make "message too long" diagnosable (plan 12.4 requirement 6 and section S0.5b). Cover both
+   rejection shapes (HTTP 413 and SSE `input_too_large`) with cheap unit tests in the style of
+   `tests/browser-worker-contract.test.ts`. No behavior change beyond the added fields.
+2. **S0.6-lite (optional, ask first)**: a read-only script over the owner's local Codex session files
+   that makes no model call and uses no account, reporting the share of tokens that are old tool-result
+   bodies and how often a thread would cross the physical limit. Only after the owner confirms which
+   sessions it may read. Skip if the owner says so.
+3. **M1, Tier 0 only**: S1 (provenance sidecar, covered digest, pin policy, the pure masking function of
+   10.4, the pure artifact-ledger extractor of 9.2), then S2 (epoch store, durable, fenced), then S4
+   (authority-safe projection and inter-turn rotation with the single-message fit check of 12.4), then
+   the `semantic_*` log events and `scripts/semantic-log-report.ts` of plan 14.2. Optional local trace
+   (`experimentalSemanticMemoryTrace`, default off) only as specified in 14.2. **Stop** after M1 and ask
+   the owner to use it and read the report.
+4. **M2 (S5, S6)**: only if the owner says the logs show repeated active-turn pressure stops. Do not
+   start it to "be complete". S7 is dropped. S8 is a manual owner decision, not a task for you.
+
+Tests you write must be cheap: pure-function unit tests, fake-driven in-process harness tests, and the
+existing physical-resolver isolation test. Never add a test that needs a real account, a real browser
+session, or the owner's real transcripts.
 
 If real code contradicts the plan (a symbol moved, an assumption is false, an upstream change breaks a
 seam), stop, say so, and propose a plan edit. Edit the plan in the same commit as the code that forced
@@ -77,7 +85,7 @@ it. Never silently deviate.
 
 - Add focused tests first or alongside; new behavior needs a regression test (`CONTRIBUTING.md`).
 - Run `bun run typecheck`, `git diff --check`, and the focused suites for the files you touched. Run
-  `bun run verify` at each milestone gate. Report exact pass/fail counts; if something fails, say so with
+  `bun run verify` only if the owner asks. Report exact pass/fail counts; if something fails, say so with
   the output instead of working around it.
 - Keep diffs additive and small so upstream merges stay cheap: new files for new logic, minimal hooks
   into upstream files (`index.ts`, `prompt.ts`, `browser-worker.ts`, `parser.ts`).
