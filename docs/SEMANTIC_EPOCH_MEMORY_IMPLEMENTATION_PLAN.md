@@ -101,6 +101,13 @@ The review's line-number citations in `SEMANTIC_EPOCH_MEMORY_PLAN_REVIEW.md` ref
 `index.ts`, `prompt.ts` and `browser-worker.ts` have shifted. This plan cites symbols, not lines.
 Re-verify any symbol-level claim at the S0.5 merge before relying on it.
 
+S0.5 status (2026-10-07): merged as `96916aa`. Baseline verification after the merge, run with local
+Bun 1.3.5 (the repo pins `packageManager: bun@1.4.0`): typecheck and `git diff --check` clean; 424
+tests pass across the 11 affected suites. Four tests in `tests/retained-compaction.test.ts` fail
+identically on pristine `v6.1.5` because they call `mock.timers.enable`, which Bun 1.3.5 lacks. They are
+an environment mismatch, not a regression from this branch. Use Bun 1.4.0 before treating that file as a
+gate.
+
 ## 3. Why the current architecture consumes context quickly
 
 There are several different mechanisms that look like “cache” or “history reuse”, but they solve
@@ -1506,7 +1513,7 @@ Merge log:
 | Upstream | Merged into fork | Notes |
 | --- | --- | --- |
 | `v6.1.4` (`b6ca2d3`) | base of `fdb15ff` | scaffold only |
-| `v6.1.5` (`92a356f`) | pending (S0.5) | `git merge-tree` clean; staging-budget seam fix required |
+| `v6.1.5` (`92a356f`) | `96916aa` (S0.5) | Textually clean. Staging-budget seam fixed to the physical resolver; `tests/physical-limit-isolation.test.ts` added |
 
 ## 22. Explicitly separate optimizations
 

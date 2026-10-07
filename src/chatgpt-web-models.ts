@@ -248,7 +248,8 @@ export function resolveChatGptWebStagingTokenBudget(
   // A first near-maximum Instant message can succeed while the next is rejected (#777).
   // Reuse normal Instant's input headroom, including the existing platform reserve;
   // this changes staging allocation, not the selected model's advertised context window.
-  const { autoCompactTokenLimit } = resolveChatGptWebContextLimits(backendModel, effort, {
+  // Browser enforcement reads the physical resolver, never the logical Codex seam.
+  const { autoCompactTokenLimit } = resolveChatGptWebPhysicalContextLimits(backendModel, effort, {
     ...capabilities, experimentalBiggerContext: false,
   });
   return Math.min(messageBudget, Math.max(0, autoCompactTokenLimit - CHATGPT_WEB_PLATFORM_RESERVE_TOKENS - 1));
