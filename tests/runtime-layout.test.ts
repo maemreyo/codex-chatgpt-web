@@ -290,26 +290,38 @@ test("conversation preferences survive reload; saved chats also apply to Zero Ri
   const config: Record<string, unknown> = { ...defaultConfig("browser-only") };
   const persist = () => writeFileSync(join(root, "config.json"), JSON.stringify(config));
   expect(config.experimentalFreshConversationPerTurn).toBe(false);
+  expect(config.experimentalSemanticMemory).toBe(false);
   expect(config.useSavedChats).toBe(false);
   delete config.useSavedChats;
   delete config.experimentalFreshConversationPerTurn;
+  delete config.experimentalSemanticMemory;
   persist();
   expect(loadConfig()!.experimentalFreshConversationPerTurn).toBe(false);
+  expect(loadConfig()!.experimentalSemanticMemory).toBe(false);
   expect(loadConfig()!.useSavedChats).toBe(false);
   config.useSavedChats = true;
   config.experimentalFreshConversationPerTurn = true;
+  config.experimentalSemanticMemory = true;
   persist();
   const loaded = loadConfig()!;
   expect(providerConfig(loaded).chatgptWeb!.useSavedChats).toBe(true);
   expect(providerConfig({ ...loaded, browserInteractionMode: "manual" }).chatgptWeb!.useSavedChats).toBe(true);
   expect(providerConfig(loaded).chatgptWeb!.experimentalFreshConversationPerTurn).toBe(true);
+  expect(providerConfig(loaded).chatgptWeb!.experimentalSemanticMemory).toBe(true);
   expect(providerConfig({ ...loaded, browserInteractionMode: "manual" })
     .chatgptWeb!.experimentalFreshConversationPerTurn).toBe(false);
+  expect(providerConfig({ ...loaded, browserInteractionMode: "manual" })
+    .chatgptWeb!.experimentalSemanticMemory).toBe(false);
   expect(loaded.experimentalFreshConversationPerTurn).toBe(true);
+  expect(loaded.experimentalSemanticMemory).toBe(true);
   config.experimentalFreshConversationPerTurn = "true";
   persist();
   expect(() => loadConfig()).toThrow("experimentalFreshConversationPerTurn");
   config.experimentalFreshConversationPerTurn = false;
+  config.experimentalSemanticMemory = "true";
+  persist();
+  expect(() => loadConfig()).toThrow("experimentalSemanticMemory");
+  config.experimentalSemanticMemory = false;
   config.useSavedChats = "true";
   persist();
   expect(() => loadConfig()).toThrow("useSavedChats");

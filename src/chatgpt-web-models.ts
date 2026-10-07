@@ -110,7 +110,7 @@ function contextLimits(
 }
 
 /** Resolve the product limit for the selected visible ChatGPT mode. */
-export function resolveChatGptWebContextLimits(
+export function resolveChatGptWebPhysicalContextLimits(
   backendModel: ChatGptWebBackendModel,
   effort: ChatGptWebAdapterEffort,
   capabilities: ChatGptWebAccountCapabilities,
@@ -165,6 +165,19 @@ export function resolveChatGptWebContextLimits(
   );
 }
 
+/**
+ * Logical Codex context limits. This intentionally aliases the measured physical browser limits
+ * until Semantic Epoch Memory owns a tested projection + independent logical budget. Keeping the
+ * seam explicit prevents future logical-window changes from silently weakening browser preflight.
+ */
+export function resolveChatGptWebContextLimits(
+  backendModel: ChatGptWebBackendModel,
+  effort: ChatGptWebAdapterEffort,
+  capabilities: ChatGptWebAccountCapabilities,
+): ChatGptWebContextLimits {
+  return resolveChatGptWebPhysicalContextLimits(backendModel, effort, capabilities);
+}
+
 /** Resolve limits of one visible ChatGPT composer message, independently of model context. */
 export function resolveChatGptWebTransportLimits(
   backendModel: ChatGptWebBackendModel,
@@ -211,7 +224,7 @@ export function resolveChatGptWebMessageTokenBudget(
   capabilities: ChatGptWebAccountCapabilities,
   imageTokens = 0,
 ): number {
-  const { contextWindow } = resolveChatGptWebContextLimits(
+  const { contextWindow } = resolveChatGptWebPhysicalContextLimits(
     backendModel, effort, { ...capabilities, experimentalBiggerContext: false },
   );
   const { browserMessageTokenLimit } = resolveChatGptWebTransportLimits(backendModel, effort, capabilities);
@@ -257,6 +270,7 @@ export interface ChatGptWebAccountCapabilities {
   extraHighAvailable?: boolean;
   proAvailable: boolean;
   experimentalBiggerContext?: boolean;
+  experimentalSemanticMemory?: boolean;
   browserInteractionMode?: "automatic" | "manual";
   zeroRiskProEnabled?: boolean;
 }

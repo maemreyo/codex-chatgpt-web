@@ -311,6 +311,8 @@ export interface CodexProviderConfig {
     experimentalSkillAttachments?: boolean;
     /** Explicitly rebuild each automatic turn in a fresh browser conversation. */
     experimentalFreshConversationPerTurn?: boolean;
+    /** Experimental semantic projection/epoch memory. */
+    experimentalSemanticMemory?: boolean;
     /** Use ordinary ChatGPT history for task conversations. Default: Temporary Chat. */
     useSavedChats?: boolean;
   };

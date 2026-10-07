@@ -4,7 +4,7 @@ import {
   CHATGPT_WEB_BACKEND_MODEL,
   CHATGPT_WEB_BIGGER_CONTEXT_MULTIPLIER,
   isChatGptWebZeroRiskBackendModel,
-  resolveChatGptWebContextLimits,
+  resolveChatGptWebPhysicalContextLimits,
   resolveChatGptWebMessageTokenBudget,
   resolveChatGptWebTransportLimits,
 } from "../../chatgpt-web-models";
@@ -78,7 +78,7 @@ export function resolveBiggerContextMultipartParts(
   }
   const mode = resolveChatGptWebModelMode(parsed.modelId, parsed.options.reasoning, capabilities);
   if (parsed._compactionRequest) return CHATGPT_BIGGER_CONTEXT_PARTS;
-  const { contextWindow, autoCompactTokenLimit } = resolveChatGptWebContextLimits(
+  const { contextWindow, autoCompactTokenLimit } = resolveChatGptWebPhysicalContextLimits(
     CHATGPT_WEB_BACKEND_MODEL,
     mode.effort,
     { ...capabilities, experimentalBiggerContext: false },

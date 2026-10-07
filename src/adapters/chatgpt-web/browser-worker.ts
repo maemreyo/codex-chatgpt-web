@@ -76,7 +76,7 @@ import {
 } from "../../launcher-browser-host";
 import {
   CHATGPT_WEB_BIGGER_CONTEXT_MULTIPLIER,
-  resolveChatGptWebContextLimits,
+  resolveChatGptWebPhysicalContextLimits,
   resolveChatGptWebMessageTokenBudget,
   resolveChatGptWebTransportLimits,
 } from "../../chatgpt-web-models";
@@ -979,7 +979,7 @@ export function assertChatGptWebInputWithinLimits(
       { status: 400, errorType: "invalid_request_error", code: "context_length_exceeded", retryable: false },
     );
   }
-  const { contextWindow } = resolveChatGptWebContextLimits(modelId, effort, capabilities);
+  const { contextWindow } = resolveChatGptWebPhysicalContextLimits(modelId, effort, capabilities);
   const { browserMessageTokenLimit, browserComposerCharLimit } = resolveChatGptWebTransportLimits(
     modelId,
     effort,
@@ -1037,7 +1037,7 @@ export function assertChatGptWebMultipartInputWithinLimits(
   if (modelId !== CHATGPT_WEB_MODEL_ID) {
     throw new Error(`ChatGPT Bigger Context limit is not defined for model: ${modelId}`);
   }
-  const { contextWindow: baseContextWindow } = resolveChatGptWebContextLimits(
+  const { contextWindow: baseContextWindow } = resolveChatGptWebPhysicalContextLimits(
     modelId,
     effort,
     { ...capabilities, experimentalBiggerContext: false },
