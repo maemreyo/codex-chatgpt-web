@@ -22,7 +22,7 @@ import type { ProviderAdapter } from "../base";
 import { parseDataUrl } from "../image";
 import { ChatGptWebAdapterError, chatGptToolTimeoutError } from "./adapter-error";
 import { ChatGptBrowserWorker, type ChatGptSubmissionRejectionObservation } from "./browser-worker";
-import { extractChatGptTurnEnvironment, extractChatGptTurnIdentity, priorChatGptAbortedTurnIds } from "./environment";
+import { chatGptTurnUserRevisionHistory, extractChatGptTurnEnvironment, extractChatGptTurnIdentity, priorChatGptAbortedTurnIds } from "./environment";
 import { CHATGPT_WEB_LUNA_MODEL_ID, CHATGPT_WEB_MODEL_ID, resolveChatGptWebModelMode, type ChatGptWebCapabilities, type ChatGptWebModelMode } from "./model";
 import { chatGptReadOnlyContextWarning, compileChatGptWebPrompt } from "./prompt";
 import { createChatGptStructuredOutputValidator } from "./output-validation";
@@ -448,6 +448,23 @@ export function createChatGptWebAdapter(
     forceFresh?: boolean;
   }
 
+  const semanticRotationCooldownSatisfied = (
+    parsed: CodexParsedRequest,
+    active: StoredChatGptSemanticEpochV1,
+    candidate: StoredChatGptSemanticEpochV1,
+  ): boolean => {
+    const orderedTurnIds: string[] = [];
+    for (const revision of chatGptTurnUserRevisionHistory(parsed)) {
+      if (!revision.turnId || orderedTurnIds.at(-1) === revision.turnId) continue;
+      orderedTurnIds.push(revision.turnId);
+    }
+    const activeIndex = orderedTurnIds.indexOf(active.sourceTurnId);
+    const candidateIndex = orderedTurnIds.indexOf(candidate.sourceTurnId);
+    // V1 uses the smallest non-zero cooldown: one completed native turn must reuse the
+    // current epoch before another Tier 0 reseed. Missing ordering evidence fails closed.
+    return activeIndex >= 0 && candidateIndex >= 0 && candidateIndex - activeIndex >= 2;
+  };
+
   const prepareSemanticRuntimeInput = (
     parsed: CodexParsedRequest,
     environment: ReturnType<typeof extractChatGptTurnEnvironment> | undefined,
@@ -536,9 +553,16 @@ export function createChatGptWebAdapter(
       && active.sourceAnswerHash === candidate.sourceAnswerHash
       && active.sourceUserRevisionHash === candidate.sourceUserRevisionHash
       && active.modelFamily === candidate.modelFamily;
-    if (active && activeProjected && (sameActiveSource || !candidate)) {
+    const reuseForCooldown = Boolean(active && activeProjected && candidate
+      && active.modelFamily === candidate.modelFamily
+      && !semanticRotationCooldownSatisfied(parsed, active, candidate));
+    if (reuseForCooldown) {
+      emitSemanticLog({ event: "semantic_skip", threadHash, reason: "cooldown" });
+    }
+    if (active && activeProjected && (sameActiveSource || !candidate || reuseForCooldown)) {
+      const continuation = retainedConversationResumeRequest(activeProjected.parsed) ?? activeProjected.parsed;
       const preflight = preflightSemanticProjection(
-        activeProjected.parsed,
+        continuation,
         turnCapabilities,
         mode,
         experimentalSkillAttachments === true,

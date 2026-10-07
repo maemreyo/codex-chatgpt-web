@@ -44,6 +44,12 @@ function request(turnId: string, input: unknown[]): CodexParsedRequest {
   return parsed;
 }
 
+function rawInput(parsed: CodexParsedRequest): unknown[] {
+  const input = (parsed._rawBody as { input?: unknown } | undefined)?.input;
+  if (!Array.isArray(input)) throw new Error("semantic adapter fixture requires raw input");
+  return input;
+}
+
 test("hidden semantic mode rotates between completed native turns without an extra browser submission", async () => {
   const socketPath = brokerEndpoint(`semantic-adapter-${process.pid}-${Date.now()}`);
   const statePath = join(root, `semantic-epochs-${Date.now()}.json`);
@@ -75,7 +81,7 @@ test("hidden semantic mode rotates between completed native turns without an ext
     prompts.push(prepared.text);
     keys.push(turn.conversationKey ?? "missing");
     prepared.release();
-    const answer = browserSubmissions === 1 ? "First semantic answer" : "Second semantic answer";
+    const answer = `Semantic answer ${browserSubmissions}`;
     turn.onTextDelta(answer);
     return answer;
   };
@@ -90,27 +96,46 @@ test("hidden semantic mode rotates between completed native turns without an ext
   const first = request("turn_1", firstInput);
   const second = request("turn_2", [
     ...structuredClone(firstInput),
-    { type: "message", role: "assistant", content: [{ type: "output_text", text: "First semantic answer" }] },
+    { type: "message", role: "assistant", content: [{ type: "output_text", text: "Semantic answer 1" }] },
     { type: "message", role: "user", content: [{ type: "input_text", text: environmentXml }], ...turn("turn_2") },
     { type: "message", role: "user", id: "user_2", content: "Continue after the completed turn", ...turn("turn_2") },
+  ]);
+  const third = request("turn_3", [
+    ...structuredClone(rawInput(second)),
+    { type: "message", role: "assistant", content: [{ type: "output_text", text: "Semantic answer 2" }] },
+    { type: "message", role: "user", content: [{ type: "input_text", text: environmentXml }], ...turn("turn_3") },
+    { type: "message", role: "user", id: "user_3", content: "Continue through the cooldown", ...turn("turn_3") },
+  ]);
+  const fourth = request("turn_4", [
+    ...structuredClone(rawInput(third)),
+    { type: "message", role: "assistant", content: [{ type: "output_text", text: "Semantic answer 3" }] },
+    { type: "message", role: "user", content: [{ type: "input_text", text: environmentXml }], ...turn("turn_4") },
+    { type: "message", role: "user", id: "user_4", content: "Continue after the cooldown", ...turn("turn_4") },
   ]);
 
   try {
     const adapter = createChatGptWebAdapter(provider);
     await adapter.runTurn!(first, { headers: new Headers() }, () => {});
     await adapter.runTurn!(second, { headers: new Headers() }, () => {});
+    await adapter.runTurn!(third, { headers: new Headers() }, () => {});
+    await adapter.runTurn!(fourth, { headers: new Headers() }, () => {});
 
-    expect(browserSubmissions).toBe(2);
+    expect(browserSubmissions).toBe(4);
     expect(keys[0]).not.toBe("missing");
     expect(keys[1]).not.toBe("missing");
     expect(keys[1]).not.toBe(keys[0]);
-    expect(hasSizeRejectionHook).toEqual([true, true]);
+    expect(keys[2]).toBe(keys[1]);
+    expect(keys[3]).not.toBe(keys[2]);
+    expect(hasSizeRejectionHook).toEqual([true, true, true, true]);
     expect(prompts[0]).toContain("OLD-SECRET-BODY");
     expect(prompts[1]).toContain("[tool result omitted: tool=exec_command");
     expect(prompts[1]).not.toContain("OLD-SECRET-BODY");
     expect(prompts[1]).toContain("Keep repository policy exact.");
     expect(prompts[1]).toContain("Continue after the completed turn");
     expect(prompts[1]).toContain("<semantic_artifact_ledger");
+    expect(prompts[2]).toContain("Continue through the cooldown");
+    expect(prompts[2]).not.toContain("OLD-SECRET-BODY");
+    expect(prompts[3]).toContain("Continue after the cooldown");
   } finally {
     (worker as unknown as { run: (turn: BrowserTurn) => Promise<string> }).run = originalRun;
     chatGptTurnSessions.clear();

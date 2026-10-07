@@ -438,6 +438,10 @@ Consequences:
 - **The safety net is a kill switch and logs.** The flag stays default-off and is switched off the
   moment behavior looks wrong. Rotation caps and cooldowns (14.1) bound the damage; the in-use log
   schema (14.2) is how the owner decides.
+- Because S7 was dropped, V1 uses the smallest non-zero Tier 0 cooldown instead of inventing a
+  measured tuning constant: after a reseed, one completed native turn must reuse the current epoch
+  before another normal Tier 0 reseed. Model-family invalidation may reseed immediately. Logs can
+  justify a different cooldown later.
 - **The logical window is not raised on a schedule.** The ~240k catalog value is changed only by the
   owner, by hand, after reading in-use logs for a while. No automated gate stands in for that.
 - **M2 (S5, S6) is justified by logs only**: build it when logs show repeated active-turn pressure
@@ -1543,10 +1547,11 @@ identity to `semanticEpoch`. A new epoch is committed only after its first brows
 the unchanged physical preflight; exact retries/tool rounds reuse the existing native-turn session
 without re-projecting or preflighting a message that will not be sent. Current model-family mismatch
 invalidates the active projection so the next eligible turn reseeds instead of reusing stale family
-state. Numeric-only `semantic_*` events and the read-only `scripts/semantic-log-report.ts` are in
+state. Normal Tier 0 reseeds have a one-completed-turn cooldown, so the retained epoch is reused for
+at least one subsequent native turn before another normal rotation. Numeric-only `semantic_*` events and the read-only `scripts/semantic-log-report.ts` are in
 place; stock behavior remains silent while the experiment is off.
 
-Focused verification on Bun 1.3.5: 18 semantic M1 tests (111 assertions), 152 browser-worker contract
+Focused verification on Bun 1.3.5: 18 semantic M1 tests (116 assertions), 152 browser-worker contract
 tests (917 assertions), and 2 physical-limit isolation tests (3 assertions) pass; `bun run typecheck`
 and `git diff --check` pass. No real browser/account/model submission, real transcript, expensive
 evaluation, or `bun run verify` was used.
