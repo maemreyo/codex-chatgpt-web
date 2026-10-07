@@ -9,7 +9,8 @@ import { CHATGPT_BROWSER_OBSERVATION_PROBE_TIMEOUT_MS, CHATGPT_COMPLETION_SETTLE
 import { ensureChatGptPersonalizedConnectorAccess, chatGptUnavailableProDetail } from "../src/adapters/chatgpt-web/browser-worker";
 import { chatGptStoppedThinkingError } from "../src/adapters/chatgpt-web/adapter-error";
 import { CHATGPT_STOPPED_THINKING_LABELS } from "../src/adapters/chatgpt-web/ui-labels";
-import { CHATGPT_WEB_MODEL_ID } from "../src/adapters/chatgpt-web/model";
+import { CHATGPT_WEB_LUNA_MODEL_ID, CHATGPT_WEB_MODEL_ID, resolveChatGptWebModelMode } from "../src/adapters/chatgpt-web/model";
+import { chatGptSubmissionDiagnostics } from "../src/adapters/chatgpt-web/submission-diagnostics";
 import { CHATGPT_CONNECTOR_NAME, DEV_CHATGPT_CONNECTOR_NAME, defaultChromeExecutable, legacyChatGptConnectorMigrationMessage } from "../src/config";
 import { CHATGPT_SEND_BUTTON_SELECTOR, parseChatGptEffortSliderState } from "../src/chatgpt-session";
 import { ChatGptExternalTurnProgress, chatGptExternalToolCallsAreInFlight } from "../src/adapters/chatgpt-web/turn-progress";
@@ -2929,6 +2930,164 @@ test("completed SSE size errors reject only their current submission, not model 
     expect(page.listenerCount(event)).toBe(0);
   }
 });
+
+test("submission diagnostics report the actual static boundaries for staging, attachments and Luna", () => {
+  const capabilities = { localToolsEnabled: false, solAvailable: true, extraHighAvailable: false, proAvailable: false };
+  const input = {
+    modelId: CHATGPT_WEB_MODEL_ID, effort: "low" as const, capabilities,
+    estimatedMessageTokens: 100, messageChars: 400, imageTokens: 0,
+    submissionKind: "ordinary" as const, part: 1, totalParts: 1,
+    reuseConversation: false, acknowledgedStages: 0,
+  };
+  expect(chatGptSubmissionDiagnostics(input)).toMatchObject({
+    staticMessageTokenBudget: 32_807, physicalContextWindow: 41_000,
+    browserComposerCharLimit: 211_256, browserMessageTokenLimit: null, ledgerValue: null,
+  });
+  expect(chatGptSubmissionDiagnostics({ ...input, submissionKind: "stage" })).toMatchObject({
+    staticMessageTokenBudget: 23_807,
+  });
+  expect(chatGptSubmissionDiagnostics({ ...input, submissionKind: "final_part", effort: "high",
+    capabilities: { ...capabilities, proAvailable: true }, imageTokens: 765 })).toMatchObject({
+    accountTier: "pro", staticMessageTokenBudget: 102_235,
+    browserMessageTokenLimit: 103_000, browserComposerCharLimit: 500_000,
+  });
+  expect(chatGptSubmissionDiagnostics({ ...input, modelId: CHATGPT_WEB_LUNA_MODEL_ID,
+    capabilities: { ...capabilities, solAvailable: false } })).toMatchObject({
+    mode: "luna", accountTier: "luna", staticMessageTokenBudget: 19_808,
+    browserComposerCharLimit: null, browserMessageTokenLimit: null,
+  });
+});
+
+test("a pending size rejection keeps its Send-time diagnostic snapshot", async () => {
+  const frame = {};
+  const page = Object.assign(new EventEmitter(), { mainFrame: () => frame });
+  const observer = new ChatGptSubmissionRejectionObserver();
+  const input = {
+    modelId: CHATGPT_WEB_MODEL_ID, effort: "high" as const,
+    capabilities: { localToolsEnabled: false, solAvailable: true, extraHighAvailable: false, proAvailable: false },
+    estimatedMessageTokens: 123, messageChars: 456, imageTokens: 0,
+    submissionKind: "ordinary" as const, part: 1, totalParts: 1,
+    reuseConversation: true, acknowledgedStages: 0,
+    content: "SYNTHETIC_CONTENT_MUST_NOT_REACH_DIAGNOSTICS",
+  };
+  observer.begin(page as unknown as Page, input);
+  const request = { method: () => "POST", url: () => "https://chatgpt.com/backend-api/f/conversation", frame: () => frame };
+  page.emit("request", request);
+  let finish!: (body: unknown) => void;
+  page.emit("response", { request: () => request, status: () => 413,
+    headers: () => ({ "content-type": "application/json" }),
+    json: () => new Promise(resolve => { finish = resolve; }),
+  });
+  input.estimatedMessageTokens = 999;
+  input.capabilities.proAvailable = true;
+  finish({ detail: { code: "message_length_exceeds_limit" } });
+  const error = await observer.failure();
+  expect(JSON.parse(error!.message.split("Submission diagnostics: ")[1]!)).toMatchObject({
+    estimatedMessageTokens: 123, accountTier: "plus", reuseConversation: true,
+  });
+  expect(error!.message).not.toContain(input.content);
+  observer.dispose();
+});
+
+for (const rejectionKind of ["http_413", "sse_input_too_large"] as const) {
+  for (const scenario of ["ordinary", "retained", "stage", "final_part"] as const) {
+    test(`${rejectionKind} preserves safe Send diagnostics for ${scenario} without resubmitting`, async () => {
+      const root = mkdtempSync(join(tmpdir(), "size-rejection-"));
+      const capabilities = { localToolsEnabled: false, solAvailable: true, extraHighAvailable: false, proAvailable: false };
+      const multipart = scenario === "stage" || scenario === "final_part";
+      const syntheticContent = "SYNTHETIC_TASK_CONTENT_NOT_FOR_LOGS";
+      const prepared = { ...compileChatGptWebPrompt({ modelId: CHATGPT_WEB_MODEL_ID,
+        stream: true, options: { reasoning: "high" },
+        context: { systemPrompt: [], messages: [
+          { role: "user", content: syntheticContent, timestamp: 1 },
+          { role: "user", content: "Synthetic continuation.", timestamp: 2 },
+        ] },
+      }, capabilities, undefined, multipart ? { experimentalMultipartParts: 2 } : undefined), release() {} };
+      const resumed = { ...prepared, text: "Synthetic retained suffix." };
+      const worker: any = ChatGptBrowserWorker.forProvider({
+        adapter: "chatgpt-web", baseUrl: `browser://${root}`,
+        chatgptWeb: { browserDiagnosticsPath: root },
+      });
+      const frame = {};
+      const page = Object.assign(new EventEmitter(), {
+        mainFrame: () => frame, url: () => "https://chatgpt.com/?temporary-chat=true", isClosed: () => false,
+        evaluate: async () => { throw new Error("Synthetic transport has no DOM"); },
+      });
+      let sends = 0;
+      let message = "";
+      const logs: string[] = [];
+      const originalError = console.error;
+      console.error = (...args) => {
+        const line = args.join(" ");
+        if (line.includes("browser turn synthetic_rejection failed:")) logs.push(line);
+      };
+      Object.assign(worker, {
+        prepareChatSurface: async () => {}, assertSelectedEffort: async () => {},
+        selectModelAndEffort: async (_page: unknown, modelId: string, effort: string) => (
+          resolveChatGptWebModelMode(modelId, effort, capabilities)
+        ),
+        captureSubmissionBaseline: async () => ({}),
+        attachPrompt: async (_page: unknown, text: string) => { message = text; },
+        attachPromptWithCompactionRetry: async (_page: unknown, text: string) => { message = text; },
+        attachFiles: async () => {}, waitForNewAssistantTurn: async () => ({}),
+        waitForMultipartAcknowledgement: async () => ({ identity: "synthetic:stage:1" }),
+        sendAttachedPrompt: async (_page: unknown, _baseline: unknown, _capture: unknown, _signal: unknown,
+          _progress: unknown, lifecycle: { onSendActivated(): Promise<void> }) => {
+          await lifecycle.onSendActivated();
+          sends += 1;
+          if (scenario === "final_part" && sends === 1) return "user_turn";
+          const request = { method: () => "POST", url: () => "https://chatgpt.com/backend-api/f/conversation", frame: () => frame };
+          page.emit("request", request);
+          const body = { error: "SYNTHETIC_SERVICE_TEXT_NOT_FOR_LOGS", error_code: "input_too_large",
+            error_reason: "last_user_message" };
+          page.emit("response", { request: () => request,
+            status: () => rejectionKind === "http_413" ? 413 : 200,
+            headers: () => ({ "content-type": rejectionKind === "http_413" ? "application/json" : "text/event-stream" }),
+            json: async () => ({ detail: { code: "message_length_exceeds_limit", content: body.error } }),
+            text: async () => `data: ${JSON.stringify(body)}\n\ndata: [DONE]\n\n`,
+          });
+          if (rejectionKind === "sse_input_too_large") page.emit("requestfinished", request);
+          throw new Error("Synthetic Send interrupted");
+        },
+      });
+      try {
+        let failure: any;
+        try {
+          await worker.runBrowserTurn({ traceId: "synthetic_rejection", modelId: CHATGPT_WEB_MODEL_ID,
+            reasoning: "high", capabilities, prepare: async () => prepared, prepareResume: async () => resumed,
+            onTextDelta() {}, onReasoningSummary() {},
+          }, undefined, page, scenario === "retained");
+        } catch (error) { failure = error; }
+        expect(failure).toMatchObject({ status: 400, errorType: "invalid_request_error",
+          code: "context_length_exceeded", retryable: false });
+        const diagnostic = JSON.parse(failure.message.split("Submission diagnostics: ")[1]!);
+        expect(diagnostic).toMatchObject({ rejectionKind, mode: "sol", accountTier: "plus",
+          effort: scenario === "stage" ? "low" : "high",
+          estimatedMessageTokens: estimateTokens(message, CHATGPT_WEB_MODEL_ID), messageChars: message.length,
+          staticMessageTokenBudget: scenario === "stage" ? 23_807 : 81_807,
+          submissionKind: scenario === "retained" ? "ordinary" : scenario,
+          part: scenario === "final_part" ? 2 : 1, totalParts: multipart ? 2 : 1,
+          reuseConversation: scenario === "retained", acknowledgedStages: scenario === "final_part" ? 1 : 0,
+          ledgerValue: null,
+        });
+        if (scenario === "retained") expect(message).toBe(resumed.text);
+        expect(sends).toBe(scenario === "final_part" ? 2 : 1);
+        expect(logs).toHaveLength(1);
+        const { sanitizeForExport } = require("../launcher/electron/logging.cjs");
+        const exported = sanitizeForExport({ message: redactChatGptUiDiagnostic(logs[0]!) }).message;
+        expect(JSON.parse(exported.split("Submission diagnostics: ")[1]!)).toEqual(diagnostic);
+        expect(exported).not.toContain(syntheticContent);
+        expect(exported).not.toContain("SYNTHETIC_SERVICE_TEXT_NOT_FOR_LOGS");
+        for (const event of ["request", "response", "requestfinished", "requestfailed"]) {
+          expect(page.listenerCount(event)).toBe(0);
+        }
+      } finally {
+        console.error = originalError;
+        rmSync(root, { recursive: true, force: true });
+      }
+    });
+  }
+}
 
 test("effort readback rejects a changed selection or surface before activating Send", async () => {
   const selection = { url: "https://chatgpt.com/?temporary-chat=true", label: "Alto" };

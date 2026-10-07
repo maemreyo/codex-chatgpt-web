@@ -16,6 +16,7 @@ import {
   LEGACY_CHATGPT_CONNECTOR_NAMES,
 } from "../../config";
 import { estimateTokens } from "../../lib/token-estimate";
+import { chatGptSubmissionDiagnostics, type ChatGptSubmissionDiagnosticInput } from "./submission-diagnostics";
 import { CHATGPT_STOPPED_THINKING_LABELS } from "./ui-labels";
 import type { CodexProviderConfig } from "../../types";
 import { parseDataUrl } from "../image";
@@ -830,6 +831,7 @@ export class ChatGptSubmissionRejectionObserver {
   private readonly requests = new Set<Request>();
   private readonly streams = new Map<Request, Response>();
   private checks: Array<Promise<ChatGptWebAdapterError | undefined>> = [];
+  private diagnostics?: ReturnType<typeof chatGptSubmissionDiagnostics>;
 
   constructor(private readonly onRejected?: (error: ChatGptWebAdapterError) => void) {}
 
@@ -848,7 +850,7 @@ export class ChatGptSubmissionRejectionObserver {
       return;
     }
     if (response.status() !== 413 || !contentType?.includes("application/json")) return;
-    this.observeRejection(response.json().then(body => body?.detail?.code === "message_length_exceeds_limit"));
+    this.observeRejection(response.json().then(body => body?.detail?.code === "message_length_exceeds_limit"), "http_413");
   };
 
   private readonly onRequestFinished = (request: Request): void => {
@@ -872,7 +874,7 @@ export class ChatGptSubmissionRejectionObserver {
       } catch {
         return false;
       }
-    })));
+    })), "sse_input_too_large");
   };
 
   private readonly onRequestFailed = (request: Request): void => {
@@ -880,13 +882,15 @@ export class ChatGptSubmissionRejectionObserver {
     this.streams.delete(request);
   };
 
-  private observeRejection(check: Promise<boolean>): void {
+  private observeRejection(check: Promise<boolean>, rejectionKind: "http_413" | "sse_input_too_large"): void {
     const generation = this.generation;
+    const diagnostics = this.diagnostics;
     this.checks.push(withChatGptBrowserObservationTimeout(check, 3_000)
       .then(rejected => {
         if (generation !== this.generation || !rejected) return undefined;
         const error = new ChatGptWebAdapterError(
-          "ChatGPT rejected this message because it exceeds the selected mode's input-size limit. Compact the task before retrying.",
+          "ChatGPT rejected this message because it exceeds the selected mode's input-size limit. Compact the task before retrying."
+            + (diagnostics ? ` Submission diagnostics: ${JSON.stringify({ rejectionKind, ...diagnostics })}` : ""),
           { status: 400, errorType: "invalid_request_error", code: "context_length_exceeded", retryable: false },
         );
         this.onRejected?.(error);
@@ -897,9 +901,10 @@ export class ChatGptSubmissionRejectionObserver {
       .catch(() => undefined));
   }
 
-  begin(page: Page): void {
+  begin(page: Page, input?: ChatGptSubmissionDiagnosticInput): void {
     this.dispose();
     this.checks = [];
+    this.diagnostics = input ? chatGptSubmissionDiagnostics(input) : undefined;
     this.page = page;
     page.on("request", this.onRequest);
     page.on("response", this.onResponse);
@@ -918,6 +923,7 @@ export class ChatGptSubmissionRejectionObserver {
     this.page?.off("requestfinished", this.onRequestFinished);
     this.page?.off("requestfailed", this.onRequestFailed);
     this.page = undefined;
+    this.diagnostics = undefined;
     this.requests.clear();
     this.streams.clear();
   }
@@ -5267,7 +5273,13 @@ export class ChatGptBrowserWorker {
               undefined,
               { onSubmitted: recordStageUsage, onSendActivated: async () => {
                 await this.assertSelectedEffort(page, mode);
-                submissionRejection.begin(page);
+                submissionRejection.begin(page, {
+                  modelId: turn.modelId, effort: mode.effort, capabilities: browserCapabilities,
+                  estimatedMessageTokens: stageMessageTokens![index], messageChars: stage.text.length,
+                  imageTokens: 0, submissionKind: "stage", part: index + 1,
+                  totalParts: prepared.multipart!.parts.length, reuseConversation,
+                  acknowledgedStages: acknowledgedStages.length,
+                });
               } },
               undefined,
               launcherObservationRecovery
@@ -5436,7 +5448,17 @@ export class ChatGptBrowserWorker {
             return turn.onSubmitted?.();
           }, onSendActivated: async () => {
             await this.assertSelectedEffort(page, mode);
-            submissionRejection.begin(page);
+            submissionRejection.begin(page, {
+              modelId: turn.modelId, effort: mode.effort, capabilities: browserCapabilities,
+              estimatedMessageTokens: prepared.multipart
+                ? estimateTokens(finalPrompt, turn.modelId) + skillFileTokens(prepared.skillFiles, turn.modelId)
+                : estimatedMessageTokens,
+              messageChars: finalPrompt.length, imageTokens: estimateChatGptWebImageTokens(prepared),
+              submissionKind: prepared.multipart ? "final_part" : "ordinary",
+              part: prepared.multipart?.parts.length ?? 1,
+              totalParts: prepared.multipart?.parts.length ?? 1, reuseConversation,
+              acknowledgedStages: acknowledgedStages.length,
+            });
             await turn.onSendActivated?.();
           } },
           completionTracker,

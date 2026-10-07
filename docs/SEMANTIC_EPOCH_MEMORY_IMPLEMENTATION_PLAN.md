@@ -1384,6 +1384,18 @@ required to be.
 Exit gate: both rejection shapes produce a log line from which class A/B/C/D can be identified;
 stock behavior otherwise unchanged.
 
+S0.5b status (2026-10-07): completed in this change. The existing non-retryable size error now
+records a Send-time snapshot containing rejection shape, model mode, effort, account tier, estimated
+message tokens, message characters, the static token/character boundaries used by preflight,
+ordinary/stage/final-part identity, retained-conversation status, multipart position, and the number
+of acknowledged stages. The legacy path has no occupancy ledger, so `ledgerValue` is explicitly
+`null` rather than implying zero. HTTP 413 and SSE `input_too_large` fixtures cover ordinary,
+retained, stage, and final-part submissions; they verify no automatic resubmission and no prompt or
+service-error content in the failure log or privacy-safe export. With local Bun 1.3.5, typecheck and
+`git diff --check` pass; `tests/browser-worker-contract.test.ts` passes 152 tests and
+`tests/physical-limit-isolation.test.ts` passes 2 tests. The Bun-1.4.0-only retained-compaction suite
+was not run, per the known environment gate in section 2.
+
 ### S0.6 — offline memory-quality spike with five arms (M0, no runtime changes)
 
 > **Superseded by 5.11.** The live five-arm evaluation below is dropped. What remains is
@@ -1742,12 +1754,13 @@ Process:
 - keep the feature default-off and hidden until S8 acceptance is repeatable, and keep it hidden
   after (section 5.8).
 
-Merge log:
+Merge and implementation log:
 
-| Upstream | Merged into fork | Notes |
+| Baseline / slice | Fork commit | Notes |
 | --- | --- | --- |
 | `v6.1.4` (`b6ca2d3`) | base of `fdb15ff` | scaffold only |
 | `v6.1.5` (`92a356f`) | `96916aa` (S0.5) | Textually clean. Staging-budget seam fixed to the physical resolver; `tests/physical-limit-isolation.test.ts` added |
+| S0.5b size-rejection diagnostics | S0.5b change | Send-time numeric diagnostics for HTTP 413 and SSE `input_too_large`; no retry or budget change |
 
 ## 22. Explicitly separate optimizations
 
