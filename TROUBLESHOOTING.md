@@ -343,6 +343,28 @@ in 5.0.4 or earlier is a missing bridge route, not proof of an OpenAI plugin or 
 Upstream authentication and image-allowance errors remain unchanged; the ChatGPT browser connector
 does not provide credentials or additional allowance for native Image Gen.
 
+## Using a different ChatGPT account
+
+The launcher's ChatGPT sign-in, the Tunnel and API key, and the **Codex Native2** connector each belong
+to one account. When you move to another account you own, update all three; none of them follows
+the Codex login.
+
+1. Sign in to ChatGPT with the other account inside **Codex Web GPT**. This is separate from the
+   account signed in to Codex itself.
+2. Full harness only: use a Tunnel and an API key with **Tunnels Read + Use** that were created in the
+   same OpenAI organization and workspace as that ChatGPT account. A key from another organization is
+   rejected with `tunnel_active_organization_required`.
+3. Attach that Tunnel to **Codex Native2** in the new ChatGPT account.
+4. Fully quit and reopen the launcher. It reads the Tunnel profile when it starts, so the previous Tunnel
+   keeps running until then. Confirm with **Run doctor** and the Tunnel log.
+
+Changing accounts does not reset or increase ChatGPT Web account limits.
+
+If you switch between your own accounts often, the community tool
+[cgw](https://github.com/maemreyo/cgw) can save and restore each account's sign-in, Tunnel ID, and
+key. It is a separate, unofficial project by the author of this note, not maintained here, and it
+activates one account at a time on request.
+
 ## Update, repair, and remove
 
 To update, quit **Codex Web GPT** and run the same installer command from the README. The installer
