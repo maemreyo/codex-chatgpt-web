@@ -1536,6 +1536,21 @@ Exit gate:
 - masked results never include current-turn or open-call results, and the model is told, in the
   placeholder itself, that the body is omitted.
 
+S4 + 14.2 status (2026-10-08): implemented on `feat/semantic-epoch-memory`. Tier 0 projection keeps
+canonical `_rawBody` untouched, masks only settled covered tool-result bodies, renders the
+bridge-owned artifact ledger, preserves exact authority/suffix messages, and binds retained-chat
+identity to `semanticEpoch`. A new epoch is committed only after its first browser message passes
+the unchanged physical preflight; exact retries/tool rounds reuse the existing native-turn session
+without re-projecting or preflighting a message that will not be sent. Current model-family mismatch
+invalidates the active projection so the next eligible turn reseeds instead of reusing stale family
+state. Numeric-only `semantic_*` events and the read-only `scripts/semantic-log-report.ts` are in
+place; stock behavior remains silent while the experiment is off.
+
+Focused verification on Bun 1.3.5: 18 semantic M1 tests (111 assertions), 152 browser-worker contract
+tests (917 assertions), and 2 physical-limit isolation tests (3 assertions) pass; `bun run typecheck`
+and `git diff --check` pass. No real browser/account/model submission, real transcript, expensive
+evaluation, or `bun run verify` was used.
+
 ### S5 — dedicated compaction router + pre-routing continuation normalization
 
 Primary files: `src/server.ts`, `src/responses/state.ts`, `src/responses/parser.ts`,
@@ -1776,7 +1791,10 @@ Merge and implementation log:
 | --- | --- | --- |
 | `v6.1.4` (`b6ca2d3`) | base of `fdb15ff` | scaffold only |
 | `v6.1.5` (`92a356f`) | `96916aa` (S0.5) | Textually clean. Staging-budget seam fixed to the physical resolver; `tests/physical-limit-isolation.test.ts` added |
-| S0.5b size-rejection diagnostics | S0.5b change | Send-time numeric diagnostics for HTTP 413 and SSE `input_too_large`; no retry or budget change |
+| S0.5b size-rejection diagnostics | `1650e9c` | Send-time numeric diagnostics for HTTP 413 and SSE `input_too_large`; no retry or budget change |
+| S1 provenance + Tier 0 primitives | `b424a77` | Private provenance sidecar, covered digest, authority pins, deterministic masking, artifact ledger |
+| S2 durable epoch store | `453492f` | Durable/fenced bounded epoch state with fail-closed schema handling and verified-authority corrupt-JSON recovery |
+| S4 Tier 0 projection + 14.2 logs | S4 change | Authority-safe projection, inter-turn reseed identity, single-message preflight, numeric-only logs/report; no model-written memory |
 
 ## 22. Explicitly separate optimizations
 

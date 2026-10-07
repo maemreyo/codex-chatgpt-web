@@ -833,7 +833,10 @@ export class ChatGptSubmissionRejectionObserver {
   private checks: Array<Promise<ChatGptWebAdapterError | undefined>> = [];
   private diagnostics?: ReturnType<typeof chatGptSubmissionDiagnostics>;
 
-  constructor(private readonly onRejected?: (error: ChatGptWebAdapterError) => void) {}
+  constructor(private readonly onRejected?: (
+    error: ChatGptWebAdapterError,
+    observation: ChatGptSubmissionRejectionObservation,
+  ) => void) {}
 
   private readonly onRequest = (request: Request): void => {
     if (!this.page || request.method() !== "POST"
@@ -893,7 +896,7 @@ export class ChatGptSubmissionRejectionObserver {
             + (diagnostics ? ` Submission diagnostics: ${JSON.stringify({ rejectionKind, ...diagnostics })}` : ""),
           { status: 400, errorType: "invalid_request_error", code: "context_length_exceeded", retryable: false },
         );
-        this.onRejected?.(error);
+        this.onRejected?.(error, { rejectionKind, diagnostics });
         return error;
       })
       // Unreadable or unfamiliar responses do not establish a size rejection. The normal
@@ -927,6 +930,11 @@ export class ChatGptSubmissionRejectionObserver {
     this.requests.clear();
     this.streams.clear();
   }
+}
+
+export interface ChatGptSubmissionRejectionObservation {
+  rejectionKind: "http_413" | "sse_input_too_large";
+  diagnostics?: ReturnType<typeof chatGptSubmissionDiagnostics>;
 }
 
 type SelectedChatGptWebModelMode = ChatGptWebModelMode & {
@@ -1366,6 +1374,8 @@ export interface BrowserTurn {
   onSendActivated?: () => void | Promise<void>;
   /** Semantic submission evidence proved that ChatGPT accepted the prompt. */
   onSubmitted?: () => void | Promise<void>;
+  /** Numeric-only size-rejection observation from the owned browser submission. */
+  onSizeRejection?: (observation: ChatGptSubmissionRejectionObservation) => void;
   /** One inert Bigger Context stage completed its exact acknowledgement boundary. */
   onMultipartStageAcknowledged?: (stageIndex: number) => void | Promise<void>;
   /** Visible ChatGPT reasoning-summary step titles only; never hidden chain-of-thought. */
@@ -4961,7 +4971,10 @@ export class ChatGptBrowserWorker {
     const usageWrites: Promise<void>[] = [];
     const originalAbortSignal = turn.abortSignal;
     const rejectionAbort = new AbortController();
-    const submissionRejection = new ChatGptSubmissionRejectionObserver(error => rejectionAbort.abort(error));
+    const submissionRejection = new ChatGptSubmissionRejectionObserver((error, observation) => {
+      turn.onSizeRejection?.(observation);
+      rejectionAbort.abort(error);
+    });
     turn = { ...turn, abortSignal: originalAbortSignal
       ? AbortSignal.any([originalAbortSignal, rejectionAbort.signal])
       : rejectionAbort.signal };

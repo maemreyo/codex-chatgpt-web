@@ -2961,7 +2961,8 @@ test("submission diagnostics report the actual static boundaries for staging, at
 test("a pending size rejection keeps its Send-time diagnostic snapshot", async () => {
   const frame = {};
   const page = Object.assign(new EventEmitter(), { mainFrame: () => frame });
-  const observer = new ChatGptSubmissionRejectionObserver();
+  const observations: unknown[] = [];
+  const observer = new ChatGptSubmissionRejectionObserver((_error, observation) => observations.push(observation));
   const input = {
     modelId: CHATGPT_WEB_MODEL_ID, effort: "high" as const,
     capabilities: { localToolsEnabled: false, solAvailable: true, extraHighAvailable: false, proAvailable: false },
@@ -2985,6 +2986,10 @@ test("a pending size rejection keeps its Send-time diagnostic snapshot", async (
   expect(JSON.parse(error!.message.split("Submission diagnostics: ")[1]!)).toMatchObject({
     estimatedMessageTokens: 123, accountTier: "plus", reuseConversation: true,
   });
+  expect(observations).toEqual([expect.objectContaining({
+    rejectionKind: "http_413",
+    diagnostics: expect.objectContaining({ estimatedMessageTokens: 123, messageChars: 456, ledgerValue: null }),
+  })]);
   expect(error!.message).not.toContain(input.content);
   observer.dispose();
 });

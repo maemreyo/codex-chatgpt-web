@@ -160,7 +160,12 @@ function sameSource(left: StoredChatGptSemanticEpochV1, right: StoredChatGptSema
     && left.sourceTurnId === right.sourceTurnId
     && left.sourceAnswerHash === right.sourceAnswerHash
     && left.sourceUserRevisionHash === right.sourceUserRevisionHash
-    && left.coveredHistoryDigest === right.coveredHistoryDigest;
+    && left.coveredHistoryDigest === right.coveredHistoryDigest
+    && left.modelFamily === right.modelFamily
+    && left.tier === right.tier
+    && left.projectionPolicyVersion === right.projectionPolicyVersion
+    && left.digestPolicyVersion === right.digestPolicyVersion
+    && left.maskingPolicyVersion === right.maskingPolicyVersion;
 }
 
 export function validateSemanticEpochRecord(
