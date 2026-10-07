@@ -1490,6 +1490,14 @@ Exit gate includes delayed older completion, replayed commit, corrupt file (orig
 `*.corrupt-<uuid>`, never overwritten), unsupported schema, changed prefix, wrong thread/model
 family, and missing pin ref.
 
+S2 status (2026-10-07): implemented with `ChatGptSemanticEpochStore` and the internal
+`semanticCheckpointStatePath`, defaulting to `<config-dir>/runtime/semantic-epochs.json`. Commits are
+durable, bounded, idempotent on source identity + covered digest, and compare-before-commit fenced.
+Invalid JSON is preserved as `*.corrupt-<uuid>` only on a separately verified-authority load path;
+unsupported schema and invalid records remain non-overwriting failures. Focused verification on Bun
+1.3.5: 5 store tests (25 assertions), 21 config/runtime tests (125 assertions), `bun run typecheck`,
+and `git diff --check` pass.
+
 ### S3 — private Sol checkpoint capture (Tier 1 only; **out of V1 scope per 5.11**)
 
 Out of V1 scope (5.11). If the owner later reverses that, extend the real `BrowserTurn`/worker stream path, prompt contract, and adapter callback. Capture is
