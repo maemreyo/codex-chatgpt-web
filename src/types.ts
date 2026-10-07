@@ -22,6 +22,28 @@ export interface CodexParsedRequest {
    * before constructing the browser adapter.
    */
   _opaqueMultiAgentV2Payload?: boolean;
+  /** Proxy-private deterministic raw->parsed provenance for semantic browser projection. */
+  _semanticProvenance?: CodexSemanticProvenanceV1;
+}
+
+export interface CodexSemanticCanonicalItemV1 {
+  ref: string;
+  canonicalJson: string;
+  rawIndex: number;
+  type?: string;
+  role?: string;
+  turnId?: string;
+  itemId?: string;
+  callId?: string;
+}
+
+export interface CodexSemanticProvenanceV1 {
+  version: 1;
+  digestPolicyVersion: 1;
+  items: CodexSemanticCanonicalItemV1[];
+  /** Canonical raw source refs contributing to each parsed context.messages entry. */
+  messageSourceRefs: string[][];
+  replayPrefixLength: number;
 }
 
 export interface CodexContext {
@@ -313,6 +335,8 @@ export interface CodexProviderConfig {
     experimentalFreshConversationPerTurn?: boolean;
     /** Experimental semantic projection/epoch memory. */
     experimentalSemanticMemory?: boolean;
+    /** Persisted semantic epoch state path; internal override is used by focused tests. */
+    semanticCheckpointStatePath?: string;
     /** Use ordinary ChatGPT history for task conversations. Default: Temporary Chat. */
     useSavedChats?: boolean;
   };

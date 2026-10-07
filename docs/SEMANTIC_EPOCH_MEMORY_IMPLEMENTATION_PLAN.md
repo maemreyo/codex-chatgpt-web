@@ -1470,6 +1470,14 @@ Exit gate:
 - reasoning/tool-search/duplicate-text cases map correctly;
 - previous-response replay computes the same refs/digest as equivalent full input.
 
+S1 status (2026-10-07): implemented on `feat/semantic-epoch-memory`. The parser now carries a
+proxy-private v1 provenance sidecar with deterministic canonical raw-item refs and exact
+raw-to-parsed source mappings, including many-to-one assistant envelopes. Covered-range digests,
+authority/skill pin identification, deterministic Tier 0 tool-result masking, and the bridge-owned
+artifact ledger are implemented as pure helpers. Focused verification on Bun 1.3.5: 4 semantic
+provenance tests (33 assertions), 19 related parser/prompt tests (82 assertions), `bun run typecheck`,
+and `git diff --check` all pass. No browser/model submission is involved.
+
 ### S2 — epoch store + idempotent commit (both tiers)
 
 Implement the persisted epoch record of 9.2 (tier, ledger, and the optional Tier 1 structured payload
