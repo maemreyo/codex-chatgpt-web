@@ -1,4 +1,5 @@
 import { createHash, randomBytes } from "node:crypto";
+import { AsyncLocalStorage } from "node:async_hooks";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import * as z from "zod/v4";
@@ -7,7 +8,7 @@ import { VERSION } from "../../version";
 import type { ChatGptTurnEnvironment } from "./environment";
 import { CODEX_COMPACTION_CONTROL_WIRE_NAME } from "./native-compaction-control";
 import { callTurnBroker, TurnBrokerTimeoutError, type BrokerToolResult } from "./turn-broker";
-import { observeMcpToolCalls } from "./mcp-observation";
+import { emitNativeToolDiagnostic, mcpDiagnosticId, nativeToolSafetyMessage, observeMcpToolCalls, setNativeToolDiagnosticSink, type NativeToolDiagnosticFields } from "./mcp-observation";
 
 interface ClaimedTurn {
   bindingId: string;
@@ -257,6 +258,7 @@ function gatewayToolCatalogProgram(options: {
   offset: number;
   limit: number;
   excludedNames: string[];
+  marker: string;
 }): string {
   const needle = options.query?.trim().toLowerCase() ?? "";
   return [
@@ -271,14 +273,14 @@ function gatewayToolCatalogProgram(options: {
     "  .map(tool => ({ name: tool.name, description: typeof tool.description === \"string\" ? tool.description : \"\" }))",
     "  .filter(tool => !needle || (tool.name + \"\\n\" + tool.description).toLowerCase().includes(needle));",
     `const page = matches.slice(${options.offset}, ${options.offset + options.limit});`,
-    "text(JSON.stringify({ tools: page, total: matches.length }));",
+    `text(${JSON.stringify(options.marker)} + JSON.stringify({ tools: page, total: matches.length }));`,
   ].join("\n");
 }
 
 function gatewayToolCatalogPage(response: {
   content: unknown[];
   isError?: boolean;
-}, excludedNames: ReadonlySet<string>): GatewayToolCatalogPage {
+}, excludedNames: ReadonlySet<string>, marker: string): GatewayToolCatalogPage {
   const textBlocks = response.content
     .map(item => item && typeof item === "object" && !Array.isArray(item)
       ? item as Record<string, unknown>
@@ -288,12 +290,16 @@ function gatewayToolCatalogPage(response: {
   if (response.isError) {
     throw new Error(`Native nested tool inventory failed: ${textBlocks.join("\n") || "unknown error"}`);
   }
-  if (textBlocks.length !== 1) {
-    throw new Error("Native nested tool inventory returned an invalid text response");
+  // exec may wrap text() output with timing/status text. Only the single record
+  // emitted for this inventory request is a catalog, never arbitrary surrounding JSON.
+  const records = textBlocks.flatMap(text => text.split(/\r?\n/))
+    .filter(line => line.startsWith(marker));
+  if (records.length !== 1) {
+    throw new Error("Native nested tool inventory did not return one matching catalog record");
   }
   let parsed: unknown;
   try {
-    parsed = JSON.parse(textBlocks[0]!);
+    parsed = JSON.parse(records[0]!.slice(marker.length));
   } catch {
     throw new Error("Native nested tool inventory returned invalid JSON");
   }
@@ -446,10 +452,30 @@ export async function runChatGptMcpServer(options: {
   brokerSocketPath: string;
   contract?: ChatGptMcpContract;
 }): Promise<void> {
+  // The tunnel runs MCP in a separate process: its stdout/stderr is not
+  // guaranteed to be included in the launcher's daemon log. Relay only
+  // content-free metadata over the existing local broker socket, with a cap on
+  // concurrent best-effort writes. Lost diagnostics must never block MCP calls.
+  let pendingDiagnostics = 0;
+  setNativeToolDiagnosticSink((fields: NativeToolDiagnosticFields) => {
+    if (pendingDiagnostics >= 64) return;
+    pendingDiagnostics += 1;
+    void callTurnBroker(options.brokerSocketPath, {
+      method: "diagnostic_observe", observation: fields,
+    }, 750).catch(() => {}).finally(() => { pendingDiagnostics -= 1; });
+  });
   const contract = options.contract ?? "native";
   const server = new McpServer(
     { name: contract === "safe" ? "codex-safe" : "codex-native", version: VERSION },
     contract === "safe" ? { instructions: ZERO_RISK_MCP_INSTRUCTIONS } : undefined,
+  );
+  const invocationDiagnostics = new AsyncLocalStorage<{ diagnosticId: string; tool: string }>();
+
+  const failureCategory = (error: unknown): "timeout" | "aborted" | "unclassified_error" => (
+    error instanceof TurnBrokerTimeoutError ? "timeout"
+      : error instanceof Error && (error.name === "AbortError" || error.name === "CancelledError")
+        ? "aborted"
+        : "unclassified_error"
   );
 
   const claimTurn = async (
@@ -462,7 +488,7 @@ export async function runChatGptMcpServer(options: {
     try {
       const claimed = await callTurnBroker<Omit<ClaimedTurn, "activityId">>(
         options.brokerSocketPath,
-        { method: "claim", token: turnToken, activityId, contract },
+        { method: "claim", token: turnToken, activityId, contract, diagnosticId: mcpDiagnosticId(extra.requestId) },
         contract === "safe" ? null : 5_000,
         extra.signal,
       );
@@ -506,17 +532,34 @@ export async function runChatGptMcpServer(options: {
     turnToken: string,
     extra: McpRequestExtra,
     action: (claimed: ClaimedTurn) => Promise<T> | T,
-  ): Promise<T> => {
-    const claimed = await claimTurn(toolName, turnToken, extra);
+  ): Promise<T> => invocationDiagnostics.run({ diagnosticId: mcpDiagnosticId(extra.requestId), tool: toolName }, async () => {
+    const observation = invocationDiagnostics.getStore()!;
+    const started = performance.now();
+    emitNativeToolDiagnostic({ stage: "handler_entered", ...observation });
     try {
-      return await action(claimed);
-    } finally {
-      // The broker's terminal fence treats even a fully local inventory lookup as live MCP work.
-      // Settle the lease without the request AbortSignal: cancellation must not strand activity
-      // and silently prevent every later completion candidate from committing.
-      await settleTurnActivity(turnToken, claimed.activityId);
+      const claimed = await claimTurn(toolName, turnToken, extra);
+      emitNativeToolDiagnostic({ stage: "broker_claimed", ...observation });
+      try {
+        const response = await action(claimed);
+        const isError = Boolean(response && typeof response === "object" && "isError" in response && response.isError === true);
+        emitNativeToolDiagnostic({
+          stage: "handler_result", ...observation, outcome: isError ? "is_error" : "ok",
+          elapsedMs: Math.round(performance.now() - started),
+        });
+        return response;
+      } finally {
+        // Cancellation must not strand activity and prevent later completion.
+        await settleTurnActivity(turnToken, claimed.activityId);
+      }
+    } catch (error) {
+      emitNativeToolDiagnostic({
+        stage: "handler_failed", ...observation,
+        outcome: failureCategory(error), elapsedMs: Math.round(performance.now() - started),
+        ...(nativeToolSafetyMessage(error) ? { failureKind: nativeToolSafetyMessage(error) } : {}),
+      });
+      throw error;
     }
-  };
+  });
 
   if (contract === "safe") {
     server.registerTool(
@@ -552,16 +595,29 @@ export async function runChatGptMcpServer(options: {
     signal?: AbortSignal,
   ) => {
     const timeoutMs = chatGptMcpInvocationTimeout(bound);
+    const observation = invocationDiagnostics.getStore();
+    const started = performance.now();
+    if (observation) emitNativeToolDiagnostic({ stage: "broker_invoke_requested", ...observation });
     try {
       const response = await callTurnBroker<BrokerToolResult>(options.brokerSocketPath, {
         method: "invoke",
         bindingId,
+        ...(observation ? { diagnosticId: observation.diagnosticId } : {}),
         wireName: wireName(tool),
         freeform: tool.freeform === true,
         ...(tool.freeform ? { input: payload.input ?? "" } : { arguments: payload.arguments ?? {} }),
       }, timeoutMs, signal);
+      if (observation) emitNativeToolDiagnostic({
+        stage: "broker_invoke_settled", ...observation, outcome: response.isError ? "is_error" : "ok",
+        elapsedMs: Math.round(performance.now() - started),
+      });
       return asMcpResult(response);
     } catch (error) {
+      if (observation) emitNativeToolDiagnostic({
+        stage: "broker_invoke_failed", ...observation,
+        outcome: failureCategory(error), elapsedMs: Math.round(performance.now() - started),
+        ...(nativeToolSafetyMessage(error) ? { failureKind: nativeToolSafetyMessage(error) } : {}),
+      });
       // A cancelled/timed-out MCP request no longer has a consumer for the native result. Revoke
       // the whole turn capability so the broker drops the pending invocation and every later call
       // from that abandoned ChatGPT response fails explicitly against its retired binding.
@@ -814,6 +870,7 @@ export async function runChatGptMcpServer(options: {
         const gateway = execGateway(bound);
         if (gateway) {
           const excludedGatewayNames = bound.tools.map(wireName);
+          const marker = `codex-tool-catalog:${randomBytes(16).toString("hex")}:`;
           const nestedOffset = Math.max(0, offset - directMatches.length);
           const nestedLimit = Math.max(0, limit - directPage.length);
           const response = await invoke(claimed.bindingId, bound, gateway, {
@@ -825,9 +882,10 @@ export async function runChatGptMcpServer(options: {
               // duplicate or reopen an outer tool that this contract deliberately hid (including
               // our own MCP namespace in Zero Risk).
               excludedNames: excludedGatewayNames,
+              marker,
             }),
           }, extra.signal);
-          const catalog = gatewayToolCatalogPage(response, new Set(excludedGatewayNames));
+          const catalog = gatewayToolCatalogPage(response, new Set(excludedGatewayNames), marker);
           nestedTotal = catalog.total;
           nestedPage = catalog.tools.map(tool => ({
             wire_name: tool.name,
@@ -977,5 +1035,26 @@ export async function runChatGptMcpServer(options: {
     );
   }
 
-  await server.connect(observeMcpToolCalls(new StdioServerTransport(), BRIDGE_TOOL_NAMES));
+  await server.connect(observeMcpToolCalls(new StdioServerTransport(), BRIDGE_TOOL_NAMES, event => {
+    console.error(`[chatgpt-web-mcp] transport=${JSON.stringify(event)}`);
+    const diagnosticId = typeof event.diagnosticId === "string" ? event.diagnosticId : undefined;
+    if (!diagnosticId) return;
+    const tool = typeof event.tool === "string" && BRIDGE_TOOL_NAMES.has(event.tool) ? event.tool : "unknown";
+    if (event.event === "call_received") {
+      emitNativeToolDiagnostic({
+        stage: "mcp_ingress", diagnosticId, tool,
+        requestKind: event.requestKind as NativeToolDiagnosticFields["requestKind"],
+        requestStructure: event.requestStructure as NativeToolDiagnosticFields["requestStructure"],
+        requestChars: event.requestChars as number | undefined,
+        requestArgCount: event.requestArgCount as number | undefined,
+      });
+    } else if (event.event === "reply_sent") {
+      emitNativeToolDiagnostic({
+        stage: "mcp_reply_sent", diagnosticId, tool,
+        outcome: event.is_error === true || event.outcome === "protocol_error" ? "is_error" : "ok",
+      });
+    } else if (event.event === "reply_send_failed") {
+      emitNativeToolDiagnostic({ stage: "mcp_reply_send_failed", diagnosticId, tool, outcome: "unclassified_error" });
+    }
+  }));
 }

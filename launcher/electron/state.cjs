@@ -18,7 +18,7 @@ const DEFAULT_STATE = Object.freeze({
   autoApproveToolCalls: false,
   browserInteractionMode: "automatic",
   maxBrowserSessions: DEFAULT_MAX_BROWSER_SESSIONS,
-  experimentalBiggerContext: false,
+  experimentalBiggerContext: true,
   experimentalSkillAttachments: false,
   experimentalFreshConversationPerTurn: false,
   useSavedChats: false,

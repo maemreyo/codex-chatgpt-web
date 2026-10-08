@@ -20,6 +20,7 @@ export interface LauncherState {
   browserInteractionMode: BrowserInteractionMode;
   maxBrowserSessions: number;
   experimentalBiggerContext: boolean;
+  biggerContextAvailable?: boolean;
   experimentalSkillAttachments: boolean;
   experimentalFreshConversationPerTurn: boolean;
   useSavedChats: boolean;

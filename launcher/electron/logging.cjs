@@ -1,6 +1,13 @@
 const fs = require("node:fs");
 const path = require("node:path");
 const { renameAtomicFile, writePrivateFileAtomic } = require("./atomic-file.cjs");
+const {
+  appendObservation,
+  archiveDirectory,
+  observationPaths,
+  readObservations,
+  safeObservation,
+} = require("./diagnostic-archive.cjs");
 
 const MAX_LOG_BYTES = 4 * 1024 * 1024;
 const MAX_MEMORY_RECORDS = 300;
@@ -55,7 +62,11 @@ function exportSanitizedLogs({ filePath, destinationPath }) {
   const sourcePaths = [`${filePath}.1`, filePath];
   const destination = path.resolve(destinationPath);
   const destinationStat = fs.statSync(destination, { throwIfNoEntry: false });
-  if (sourcePaths.some(sourcePath => {
+  const archiveRoot = path.resolve(archiveDirectory(filePath));
+  // Never allow an exported file to replace a live observation archive, even
+  // when the caller chooses a path other than either rolling launcher log.
+  if (destination.startsWith(`${archiveRoot}${path.sep}`)
+    || [...sourcePaths, ...observationPaths(filePath)].some(sourcePath => {
     if (path.resolve(sourcePath) === destination) return true;
     if (!destinationStat) return false;
     const sourceStat = fs.statSync(sourcePath, { throwIfNoEntry: false });
@@ -66,7 +77,13 @@ function exportSanitizedLogs({ filePath, destinationPath }) {
   })) {
     throw new Error("Refusing to overwrite a launcher source log with an exported diagnostic");
   }
-  const records = [];
+  const archived = readObservations(filePath);
+  const archivedCopies = new Map();
+  for (const record of archived) {
+    const key = `${record.at}\n${record.detail.line}`;
+    archivedCopies.set(key, (archivedCopies.get(key) ?? 0) + 1);
+  }
+  const records = [...archived];
   for (const sourcePath of sourcePaths) {
     let lines;
     try {
@@ -82,6 +99,21 @@ function exportSanitizedLogs({ filePath, destinationPath }) {
           || typeof record.at !== "string"
           || !["debug", "info", "warning", "error"].includes(record.level)
           || typeof record.event !== "string") continue;
+        // The same observation is present in both the durable archive and the
+        // recent raw log. Count it once, including legitimately repeated events.
+        const observation = safeObservation(record);
+        if (observation) {
+          const key = `${observation.at}\n${observation.detail.line}`;
+          const copies = archivedCopies.get(key) ?? 0;
+          if (copies > 0) {
+            archivedCopies.set(key, copies - 1);
+            continue;
+          }
+          // Even if the daily archive was full, export the same validated
+          // schema, so correlations use identical (hashed) identifiers.
+          records.push(observation);
+          continue;
+        }
         records.push({
           at: record.at,
           level: record.level,
@@ -93,6 +125,8 @@ function exportSanitizedLogs({ filePath, destinationPath }) {
       } catch {}
     }
   }
+  // Event order matters for detecting a rejection after a semantic rotation.
+  records.sort((left, right) => left.at.localeCompare(right.at));
   // Replacing the directory entry also avoids following a link introduced after
   // the identity check. A failed write leaves the previous export intact.
   writePrivateFileAtomic(
@@ -172,6 +206,9 @@ function createLogger({ filePath, publish }) {
       }
       fs.appendFileSync(filePath, `${JSON.stringify(record)}\n`, { mode: 0o600 });
     } catch {}
+    try {
+      appendObservation(filePath, record);
+    } catch { /* Diagnostic retention must never break the launcher. */ }
     publish?.(record);
     return record;
   };

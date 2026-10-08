@@ -9,6 +9,7 @@ import {
 } from "./compaction-transaction";
 import type { ChatGptTurnEnvironment } from "./environment";
 import { chatGptToolTimeoutError } from "./adapter-error";
+import { emitNativeToolDiagnostic, nativeToolRequestShape, nativeToolSafetyFailure, subagentModelObservation, type NativeToolDiagnosticFields } from "./mcp-observation";
 
 interface BrokerRetirementFailure {
   code: "codex_tool_timeout";
@@ -46,6 +47,8 @@ export interface BrokerToolResult {
 
 interface PendingInvocation {
   request: BrokerToolRequest;
+  diagnosticId?: string;
+  started: number;
   resolve: (result: BrokerToolResult) => void;
   reject: (error: Error) => void;
 }
@@ -127,7 +130,8 @@ interface BrokerRequest {
     | "safe_start"
     | "safe_complete"
     | "activity_complete"
-    | "submit_compaction_handoff";
+    | "submit_compaction_handoff"
+    | "diagnostic_observe";
   token?: string;
   bindingId?: string;
   wireName?: string;
@@ -139,6 +143,9 @@ interface BrokerRequest {
   traceId?: string;
   callId?: string;
   activityId?: string;
+  /** Locally generated, diagnostic-only; never used for binding or authorization. */
+  diagnosticId?: string;
+  observation?: NativeToolDiagnosticFields;
   revision?: number;
   toolResult?: BrokerToolResult;
   handoffId?: string;
@@ -158,6 +165,11 @@ interface BrokerResponse {
 const brokers = new Map<string, TurnBroker>();
 const MAX_BROKER_LINE_CHARS = 67_108_864;
 const MAX_RETIRED_TURN_HANDLES = 64;
+const RELAY_DIAGNOSTIC_STAGES = new Set([
+  "mcp_ingress", "mcp_reply_sent", "mcp_reply_send_failed",
+  "handler_entered", "broker_claimed", "handler_result", "handler_failed",
+  "broker_invoke_requested", "broker_invoke_settled", "broker_invoke_failed",
+]);
 
 export async function closeTurnBrokers(): Promise<void> {
   const active = [...brokers.values()];
@@ -453,6 +465,14 @@ export class TurnBroker implements TurnBrokerOwner {
       throw new Error(`tool call was completed before it was delivered: ${callId}`);
     }
     channel.invocations.delete(callId);
+    const failureKind = nativeToolSafetyFailure(result);
+    if (invocation.diagnosticId) emitNativeToolDiagnostic({
+      stage: "codex_result_received", diagnosticId: invocation.diagnosticId,
+      traceId: channel.traceId, callId: callId.slice(0, 17),
+      outcome: result.isError ? "is_error" : "ok",
+      elapsedMs: Math.round(performance.now() - invocation.started),
+      ...(failureKind ? { failureKind } : {}),
+    });
     console.info(`[chatgpt-web] broker trace=${channel.traceId} completed call=${callId.slice(0, 17)} pending=${channel.invocations.size}`);
     invocation.resolve(result);
   }
@@ -920,13 +940,44 @@ export class TurnBroker implements TurnBrokerOwner {
     if (!request || typeof request !== "object" || typeof request.id !== "string" || request.id.length === 0 || request.id.length > 256) {
       throw new Error("turn broker request id is invalid");
     }
-    if (!["claim", "resolve", "release", "invoke", "owner_status", "owner_register", "owner_register_safe", "owner_update", "owner_safe_sent", "owner_next", "owner_complete", "owner_completion_fence_begin", "owner_completion_fence_commit", "owner_wait_retirement", "owner_revoke", "owner_safe_wait_start", "owner_safe_wait_completion", "owner_request_compaction", "owner_compaction_delivery_count", "safe_start", "safe_complete", "activity_complete", "submit_compaction_handoff"].includes(request.method)) {
+    if (!["claim", "resolve", "release", "invoke", "owner_status", "owner_register", "owner_register_safe", "owner_update", "owner_safe_sent", "owner_next", "owner_complete", "owner_completion_fence_begin", "owner_completion_fence_commit", "owner_wait_retirement", "owner_revoke", "owner_safe_wait_start", "owner_safe_wait_completion", "owner_request_compaction", "owner_compaction_delivery_count", "safe_start", "safe_complete", "activity_complete", "submit_compaction_handoff", "diagnostic_observe"].includes(request.method)) {
       throw new Error("turn broker method is invalid");
     }
   }
 
   private async dispatch(request: BrokerRequest, socketSignal?: AbortSignal): Promise<unknown> {
     this.prune();
+    if (request.method === "diagnostic_observe") {
+      const item = request.observation;
+      // This local transport is a diagnostic sink only. Drop malformed data
+      // without logging user-supplied payloads or conferring any authority.
+      if (!item || !RELAY_DIAGNOSTIC_STAGES.has(item.stage)
+        || typeof item.diagnosticId !== "string" || !/^diag_[a-f0-9]{16}$/.test(item.diagnosticId)
+        || (item.tool !== undefined && !/^codex_(?:turn_start|turn_complete|exec|write_stdin|apply_patch|view_image|tool_inventory|tool_call)$|^unknown$/.test(item.tool))
+        || (item.outcome !== undefined && !["ok", "is_error", "timeout", "aborted", "unclassified_error"].includes(item.outcome))
+        || (item.elapsedMs !== undefined && (!Number.isSafeInteger(item.elapsedMs) || item.elapsedMs < 0 || item.elapsedMs > 10_000_000))) {
+        return { observed: false };
+      }
+      emitNativeToolDiagnostic({
+        stage: item.stage, diagnosticId: item.diagnosticId,
+        ...(item.tool ? { tool: item.tool } : {}),
+        ...(item.outcome ? { outcome: item.outcome } : {}),
+        ...(item.elapsedMs !== undefined ? { elapsedMs: item.elapsedMs } : {}),
+        ...(["safety_status_unknown", "openai_safety_block"].includes(item.failureKind ?? "")
+          ? { failureKind: item.failureKind } : {}),
+        ...(["mcp_ingress"].includes(item.stage) ? {
+          ...(["shell", "patch", "freeform", "structured"].includes(item.requestKind ?? "")
+            ? { requestKind: item.requestKind } : {}),
+          ...(["single", "multiline", "pipeline", "inline_script", "redirection"].includes(item.requestStructure ?? "")
+            ? { requestStructure: item.requestStructure } : {}),
+          ...(Number.isSafeInteger(item.requestChars) && item.requestChars! >= 0 && item.requestChars! <= 1_000_000
+            ? { requestChars: item.requestChars } : {}),
+          ...(Number.isSafeInteger(item.requestArgCount) && item.requestArgCount! >= 0 && item.requestArgCount! <= 256
+            ? { requestArgCount: item.requestArgCount } : {}),
+        } : {}),
+      });
+      return { observed: true };
+    }
     if (request.method === "safe_start") {
       if (!request.token) throw new Error("Zero Risk request_id is required");
       return this.startSafeTurn(request.token);
@@ -1090,6 +1141,12 @@ export class TurnBroker implements TurnBrokerOwner {
         activeChannel.activities.add(activityId);
         activeChannel.activityRevision += 1;
       }
+      if (typeof request.diagnosticId === "string" && /^diag_[a-f0-9]{16}$/.test(request.diagnosticId)) {
+        emitNativeToolDiagnostic({
+          stage: "broker_claim_with_turn", diagnosticId: request.diagnosticId,
+          traceId: activeChannel.traceId,
+        });
+      }
       if (activeChannel.bindingId) {
         const existing = this.bindings.get(activeChannel.bindingId);
         if (!existing || existing.token !== token || existing.channel !== activeChannel) {
@@ -1165,6 +1222,8 @@ export class TurnBroker implements TurnBrokerOwner {
     const wireName = request.wireName?.trim();
     if (!wireName) throw new Error("wire tool name is required");
     const callId = opaqueId("call");
+    const diagnosticId = typeof request.diagnosticId === "string" && /^diag_[a-f0-9]{16}$/.test(request.diagnosticId)
+      ? request.diagnosticId : undefined;
     const toolRequest: BrokerToolRequest = {
       callId,
       wireName,
@@ -1172,11 +1231,23 @@ export class TurnBroker implements TurnBrokerOwner {
       ...(request.freeform === true ? { input: request.input ?? "" } : { arguments: request.arguments ?? {} }),
     };
     return new Promise<BrokerToolResult>((resolveInvoke, rejectInvoke) => {
-      binding.channel.invocations.set(callId, { request: toolRequest, resolve: resolveInvoke, reject: rejectInvoke });
+      binding.channel.invocations.set(callId, {
+        request: toolRequest, ...(diagnosticId ? { diagnosticId } : {}),
+        started: performance.now(), resolve: resolveInvoke, reject: rejectInvoke,
+      });
       binding.channel.queuedCallIds.push(callId);
+      if (diagnosticId) emitNativeToolDiagnostic({
+        stage: "broker_queued", diagnosticId, traceId: binding.channel.traceId,
+        callId: callId.slice(0, 17),
+        ...nativeToolRequestShape(toolRequest),
+      });
       console.info(
         `[chatgpt-web] broker trace=${binding.channel.traceId} queued call=${callId.slice(0, 17)} tool=${wireName} waiters=${binding.channel.waiters.size}`,
       );
+      const modelObservation = !toolRequest.freeform && subagentModelObservation(wireName, toolRequest.arguments);
+      if (modelObservation) console.info(`[chatgpt-web] subagent_model_requested ${JSON.stringify({
+        traceId: binding.channel.traceId, callId: callId.slice(0, 17), tool: wireName, ...modelObservation,
+      })}`);
       this.scheduleToolWaiters(binding.channel);
     });
   }
@@ -1191,6 +1262,11 @@ export class TurnBroker implements TurnBrokerOwner {
 
   private logToolDelivery(channel: TurnChannel, batch: BrokerToolRequest[], path: "immediate" | "waiter" | "replay"): void {
     for (const request of batch) {
+      const diagnosticId = channel.invocations.get(request.callId)?.diagnosticId;
+      if (diagnosticId) emitNativeToolDiagnostic({
+        stage: path === "replay" ? "broker_redelivered" : "broker_delivered_to_codex_adapter",
+        diagnosticId, traceId: channel.traceId, callId: request.callId.slice(0, 17),
+      });
       console.info(
         `[chatgpt-web] broker trace=${channel.traceId} delivered call=${request.callId.slice(0, 17)} path=${path} replay=${path === "replay"}`,
       );

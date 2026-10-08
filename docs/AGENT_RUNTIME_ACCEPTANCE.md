@@ -1,6 +1,6 @@
 # Agents & Runtime: pull request acceptance record
 
-Scope: branch `feat/zam-agent-runtime-pr-main`, based directly on **the owner's fork** `maemreyo/codex-chatgpt-web:main` at `b6ca2d3`. Version: **6.1.8-rc.1**, an unpublished release candidate. The fork's main branch was at 6.1.4 when this PR was prepared. This branch excludes unrelated Semantic Epoch Memory/native quota work. The existing 6.1.7 installation has not been overwritten.
+Scope: branch `feat/zam-agent-runtime-pr-main` targets **the owner's fork** `maemreyo/codex-chatgpt-web:main` at `b6ca2d3`. It merges the full committed `feat/semantic-epoch-memory` history through `5893e12` (Bigger Context, semantic epochs, diagnostic logging, upstream 6.1.5/6.1.6, and Web model changes) alongside the Agents & Runtime changes. Version: **6.1.8-rc.1**, an unpublished release candidate. The unrelated **uncommitted** Semantic Epoch Memory/native quota changes in the original source worktree are excluded and untouched. The existing installed 6.1.7 application has not been overwritten.
 
 ## Delivered
 
@@ -16,13 +16,16 @@ Scope: branch `feat/zam-agent-runtime-pr-main`, based directly on **the owner's 
 | --- | --- | --- |
 | Runtime TypeScript | `bun run typecheck` (Bun 1.4.0) | PASS |
 | Version consistency | `bun run check-version` | PASS |
-| Runtime suite from fork-main base | `bun test ./tests` | **850 passed / 28 skipped / 0 failed**, 878 tests |
-| Electron/Launcher suite | `bun run --cwd launcher test` | **379 passed / 2 skipped / 0 failed**, 381 tests |
+| Focused agent/browser tests | `bun test tests/{agent-management,browser-session-cap,launcher-helper-client}.test.ts` | **27 passed / 0 failed** |
+| Runtime suite on merged 6.1.7 lineage | `bun test ./tests` | **906 passed / 40 skipped / 14 failed**, 960 tests |
+| Electron/Launcher suite | `bun run launcher:test` | **390 passed / 2 skipped / 0 failed**, 392 tests |
 | Packaged macOS arm64 | `bun run --cwd launcher package:mac`, signed-bundle verification | PASS |
 | Packaged launcher/embedded runtime | `bun run --cwd launcher smoke:package` | **PACKAGED_LAUNCHER_SMOKE_OK darwin/arm64** |
 | Packaged CLI with temporary Codex profile | `launcher/build/runtime/runtime/bun launcher/build/runtime/app/cli.js agents inspect --codex-home <temp>` | **PACKAGED_AGENT_CLI_INSPECT_OK**, four roles |
 
 Only macOS arm64 is packaged here; Windows/Linux must be built on matching host operating systems.
+
+The full runtime suite is **not green**. All 14 failing test names exactly match the previously captured baseline at `5893e12`, which had 17 failing tests under Bun 1.4.0. The failures concern older GPT-6/Plus context, Zero Risk, DEV routing, model catalogs, and Responses Lite contracts. This is a known inherited source-test gap, not proof of correct real-account behavior. The fork-main-only integration, before merging the committed 6.1.7 lineage, passed 850/28/0; the merged runtime suite must not be presented as all-pass.
 
 ## Account-bound acceptance gates (not yet satisfied)
 
@@ -37,14 +40,14 @@ Only macOS arm64 is packaged here; Windows/Linux must be built on matching host 
 
 The manager explicitly labels hook/sandbox enforcement **unverified**. It does **not** install or authorize a whitelist hook; model checks in source and templates alone cannot prove a no-paid-delegation guarantee. Disabling existing role registrations, project agent-file edits, workflow orchestration, fairness queues and advanced agent settings are not implemented. The optional queue stays off pending safe progress/cancellation acceptance. Agent configuration changes need a new Codex session.
 
-This record supports reviewing a candidate PR, not promoting a stable release. Release requirements in `docs/release-validation.md` still apply to all supported platforms. Keep PR in draft while account-bound acceptance is outstanding.
+This record supports code review of the integration candidate, not promoting a stable release. The maintainer explicitly deferred E2E and requested **Ready for Review**. Release requirements in `docs/release-validation.md` still apply to all supported platforms; merging/publishing as stable should be gated separately on the outstanding acceptance and baseline test policy.
 
 ## Package artifacts
 
 - macOS arm64; embedded Bun 1.4.0; ad-hoc signed with hardened runtime; **not notarized**.
-- Version 6.1.8-rc.1, generated locally: `launcher/artifacts/codex-web-gpt-6.1.8-rc.1-mac-arm64.dmg` and `.zip` (excluded from Git).
-- DMG SHA-256: `30b350b293ac6b68cb4bff048e3497f59d5a855544be61b048dce785b09e0a60` (~157 MiB).
-- ZIP SHA-256: `77ceb537e134488bf88809250c6075d52da413ca3e2d9eca7aff258c06d11b19` (~161 MiB).
+- Version 6.1.8-rc.1, **rebuilt after merging all committed 6.1.7 changes**, generated locally: `launcher/artifacts/zam-codex-web-6.1.8-rc.1-mac-arm64.dmg` and `zam-codex-web-6.1.8-rc.1-mac-arm64.zip` (excluded from Git).
+- DMG SHA-256: `58dee340107f3f69a44a6008aac8762a9404c886dcc786fa0c9f21940a4f61f4` (~157 MiB).
+- ZIP SHA-256: `dbaed977b18fcb01e2a9e522c138f3cf6220f171981ba0a07f182ca27e11ac0d` (~161 MiB).
 - The RC tag/release is not published. The stable README links continue to point to the previously published stable version rather than to nonexistent RC downloads.
 
 ## Safety and ownership

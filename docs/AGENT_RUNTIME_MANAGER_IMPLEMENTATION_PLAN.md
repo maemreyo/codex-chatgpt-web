@@ -2,7 +2,7 @@
 
 Ngày lập: 2026-10-08. Trạng thái: **M1–M4 implemented in RC; live gates for M5–M8 pending**. See `AGENT_RUNTIME_ACCEPTANCE.md` for evidence and limitations. The remaining milestones below are design requirements, not claims that every feature already exists.
 
-Baseline kế hoạch ban đầu: `5893e12` (feature Semantic Epoch Memory). Branch PR chính thức được tạo trực tiếp từ `maemreyo/codex-chatgpt-web:main` tại `b6ca2d3`; các changeset Semantic Epoch Memory và native quota nằm ngoài phạm vi PR. Runtime phiên bản RC là `6.1.8-rc.1`.
+Baseline kế hoạch ban đầu: `5893e12` (feature Semantic Epoch Memory). Branch PR được tạo từ `maemreyo/codex-chatgpt-web:main` tại `b6ca2d3`, sau đó merge tất cả commit của `feat/semantic-epoch-memory` đến `5893e12` để đưa vào cả Bigger Context và các thay đổi 6.1.7. Các thay đổi chưa commit của Semantic Epoch Memory và native quota được giữ nguyên ngoài PR. Runtime phiên bản RC là `6.1.8-rc.1`.
 
 ## 1. Kết quả cần đạt
 

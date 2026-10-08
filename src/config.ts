@@ -1,5 +1,5 @@
 import { createHash, randomBytes } from "node:crypto";
-import { chmodSync, mkdirSync, openSync, closeSync, renameSync, rmSync, writeFileSync, readFileSync, existsSync } from "node:fs";
+import { chmodSync, mkdirSync, openSync, closeSync, fsyncSync, renameSync, rmSync, writeFileSync, readFileSync, existsSync } from "node:fs";
 import { homedir } from "node:os";
 import { basename, delimiter, dirname, isAbsolute, join, resolve, sep, win32 } from "node:path";
 import { tmpdir } from "node:os";
@@ -123,6 +123,8 @@ export interface AppConfig {
   experimentalBiggerContext: boolean;
   experimentalSkillAttachments: boolean;
   experimentalFreshConversationPerTurn: boolean;
+  /** Experimental semantic projection/epoch memory. Disabled by default until rollout gates pass. */
+  experimentalSemanticMemory: boolean;
   useSavedChats: boolean;
   /** Explicitly install the additional Pro-sized model row while Zero Risk is active. */
   zeroRiskProEnabled: boolean;
@@ -201,7 +203,7 @@ function renameAtomicFile(source: string, destination: string): void {
 export function atomicWriteFile(
   path: string,
   data: string | Uint8Array,
-  { mode = 0o600, protectDirectory = true }: { mode?: number; protectDirectory?: boolean } = {},
+  { mode = 0o600, protectDirectory = true, durable = false }: { mode?: number; protectDirectory?: boolean; durable?: boolean } = {},
 ): void {
   const directory = dirname(path);
   mkdirSync(directory, { recursive: true, mode: 0o700 });
@@ -212,6 +214,7 @@ export function atomicWriteFile(
   const fd = openSync(temp, "wx", mode);
   try {
     writeFileSync(fd, data);
+    if (durable) fsyncSync(fd);
     closeSync(fd);
     renameAtomicFile(temp, path);
   } catch (error) {
@@ -253,9 +256,10 @@ export function defaultConfig(mode: RuntimeMode = "browser-only"): AppConfig {
     solAvailable: true,
     extraHighAvailable: false,
     proAvailable: false,
-    experimentalBiggerContext: false,
+    experimentalBiggerContext: true,
     experimentalSkillAttachments: false,
     experimentalFreshConversationPerTurn: false,
+    experimentalSemanticMemory: false,
     useSavedChats: false,
     zeroRiskProEnabled: false,
     autoApproveToolCalls: false,
@@ -562,6 +566,11 @@ function parseConfig(value: unknown, path: string): AppConfig {
     throw new Error(`Invalid experimentalFreshConversationPerTurn in ${path}`);
   }
   const experimentalFreshConversationPerTurn = parsed.experimentalFreshConversationPerTurn === true;
+  if (parsed.experimentalSemanticMemory !== undefined
+    && typeof parsed.experimentalSemanticMemory !== "boolean") {
+    throw new Error(`Invalid experimentalSemanticMemory in ${path}`);
+  }
+  const experimentalSemanticMemory = parsed.experimentalSemanticMemory === true;
   if (parsed.useSavedChats !== undefined && typeof parsed.useSavedChats !== "boolean") {
     throw new Error(`Invalid useSavedChats in ${path}`);
   }
@@ -569,7 +578,9 @@ function parseConfig(value: unknown, path: string): AppConfig {
   if (browserInteractionMode === "manual" && experimentalSkillAttachments) {
     throw new Error(`Zero Risk does not support Skills as files in ${path}`);
   }
-  const experimentalBiggerContext = parsed.experimentalBiggerContext === true;
+  // New eligible automatic profiles default on, but saved false remains an opt-out.
+  const experimentalBiggerContext = parsed.experimentalBiggerContext
+    ?? (browserInteractionMode === "automatic" && solAvailable);
   const zeroRiskProEnabled = parsed.zeroRiskProEnabled === true;
   if (browserInteractionMode === "manual" && experimentalBiggerContext) {
     throw new Error(`Zero Risk does not support Bigger Context in ${path}`);
@@ -593,6 +604,7 @@ function parseConfig(value: unknown, path: string): AppConfig {
     experimentalBiggerContext,
     experimentalSkillAttachments,
     experimentalFreshConversationPerTurn,
+    experimentalSemanticMemory,
     useSavedChats,
     zeroRiskProEnabled,
   } as AppConfig;
@@ -644,6 +656,7 @@ export function providerConfig(config: AppConfig): CodexProviderConfig {
       brokerSocketPath: config.brokerSocketPath,
       threadEnvironmentStatePath: join(getConfigDir(), "runtime", "thread-environments.json"),
       lunaCheckpointStatePath: join(getConfigDir(), "runtime", "luna-checkpoints.json"),
+      semanticCheckpointStatePath: join(getConfigDir(), "runtime", "semantic-epochs.json"),
       headed: config.headed,
       localToolsEnabled: config.mode === "full",
       solAvailable: manual ? false : config.solAvailable,
@@ -652,6 +665,7 @@ export function providerConfig(config: AppConfig): CodexProviderConfig {
       experimentalBiggerContext: manual ? false : config.experimentalBiggerContext,
       experimentalSkillAttachments: manual ? false : config.experimentalSkillAttachments,
       experimentalFreshConversationPerTurn: !manual && config.experimentalFreshConversationPerTurn === true,
+      experimentalSemanticMemory: !manual && config.experimentalSemanticMemory === true,
       useSavedChats: config.useSavedChats === true,
       ...(config.stallTimeoutSec !== undefined ? { stallTimeoutSec: config.stallTimeoutSec } : {}),
       autoApproveToolCalls: manual ? false : config.autoApproveToolCalls,
