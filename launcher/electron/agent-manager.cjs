@@ -90,7 +90,7 @@ function createAgentManager({ runtimeCommand, codexHome, now = Date.now }) {
       };
     },
     async preview(request) {
-      if (!request || !["balanced", "parallel"].includes(request.preset)
+      if (!request || !["balanced", "parallel", "custom"].includes(request.preset)
         || !Number.isInteger(request.maxConcurrentThreads) || request.maxConcurrentThreads < 1 || request.maxConcurrentThreads > 8
         || typeof request.enrollMissingRoles !== "boolean") {
         throw new Error("Unsupported agent preset or child-thread count");

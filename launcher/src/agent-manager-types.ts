@@ -19,6 +19,8 @@ export type AgentRoleEdit = {
   developerInstructions?: string;
 };
 
+export type AgentWorkflowPreset = "balanced" | "parallel" | "custom";
+
 export type AgentManagerInspection = {
   codexHome: string;
   maxConcurrentThreads: number | null;
@@ -29,7 +31,7 @@ export type AgentManagerInspection = {
 
 export type AgentManagerPreview = {
   id: string;
-  preset: "balanced" | "parallel";
+  preset: AgentWorkflowPreset;
   maxConcurrentThreads: number;
   changes: Array<{ path: string; operation: "create" | "update"; changedKeys: string[] }>;
   warnings: string[];
@@ -38,7 +40,7 @@ export type AgentManagerPreview = {
 
 export type AgentManagerApi = {
   inspect(): Promise<AgentManagerInspection>;
-  preview(request: { preset: "balanced" | "parallel"; maxConcurrentThreads: number; enrollMissingRoles: boolean; roles?: Record<string, AgentRoleEdit> }): Promise<AgentManagerPreview>;
+  preview(request: { preset: AgentWorkflowPreset; maxConcurrentThreads: number; enrollMissingRoles: boolean; roles?: Record<string, AgentRoleEdit> }): Promise<AgentManagerPreview>;
   apply(id: string): Promise<{ requiresRestart: boolean; applied: boolean; changedFiles: number }>;
   recover(): Promise<{ recovery: "nothing-to-recover" | "rolled-back" | "committed" }>;
 };

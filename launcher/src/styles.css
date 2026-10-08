@@ -2868,3 +2868,391 @@ code {
   font-family: var(--font-mono, ui-monospace, monospace);
   font-size: 12px;
 }
+
+.agent-manager-panel {
+  min-width: 0;
+  padding-bottom: 16px;
+}
+
+.agent-panel-intro {
+  margin: 0 0 20px;
+  color: var(--color-text-secondary);
+  font-size: 13px;
+  line-height: 1.55;
+}
+
+.agent-panel-heading {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-bottom: 12px;
+}
+
+.agent-panel-heading h3,
+.agent-preview-panel h3 {
+  margin: 0;
+  font-size: 14px;
+  font-weight: 600;
+}
+
+.agent-panel-heading code {
+  max-width: 100%;
+  overflow-wrap: anywhere;
+  color: var(--color-text-tertiary);
+  font-size: 11px;
+}
+
+.agent-workflow-panel {
+  display: grid;
+  gap: 14px;
+  min-width: 0;
+  padding: 18px;
+  border: 1px solid var(--color-border);
+  border-radius: 12px;
+  background: var(--color-background-elevated);
+}
+
+.agent-saved-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  align-items: center;
+}
+
+.agent-state-chip {
+  display: inline-flex;
+  align-items: center;
+  min-height: 26px;
+  padding: 4px 9px;
+  border: 1px solid var(--color-border);
+  border-radius: 999px;
+  font-size: 12px;
+  color: var(--color-text-secondary);
+}
+
+.agent-state-chip.is-draft {
+  color: var(--color-text-warning);
+  background: var(--color-background-status-warning);
+}
+
+.agent-preset-fieldset {
+  min-width: 0;
+  margin: 0;
+  padding: 0;
+  border: 0;
+}
+
+.agent-preset-fieldset legend {
+  margin-bottom: 8px;
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.agent-preset-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px;
+}
+
+.agent-preset-card {
+  display: grid;
+  align-content: start;
+  gap: 10px;
+  min-width: 0;
+  padding: 14px;
+  border: 1px solid var(--color-border);
+  border-radius: 10px;
+  background: var(--color-background-control);
+  cursor: pointer;
+}
+
+.agent-preset-card:hover,
+.agent-preset-card:focus-within {
+  border-color: var(--color-border-focus);
+}
+
+.agent-preset-card.is-selected {
+  border-color: var(--color-border-focus);
+  background: var(--color-background-control-hover);
+  box-shadow: inset 0 0 0 1px var(--color-border-focus);
+}
+
+.agent-preset-heading {
+  display: flex;
+  align-items: flex-start;
+  gap: 9px;
+  font-size: 13px;
+  line-height: 1.4;
+}
+
+.agent-preset-heading input {
+  margin: 2px 0 0;
+  flex-shrink: 0;
+  accent-color: var(--color-text-accent);
+}
+
+.agent-preset-card small {
+  display: block;
+  padding-left: 22px;
+  color: var(--color-text-tertiary);
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+.agent-limit-field {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  font-size: 13px;
+}
+
+.agent-limit-field input {
+  width: 72px;
+  min-height: 34px;
+  padding: 5px 8px;
+  border: 1px solid var(--color-border);
+  border-radius: 8px;
+  background: var(--color-background-control);
+  text-align: center;
+}
+
+.agent-limit-field input[aria-invalid="true"] {
+  border-color: var(--color-text-warning);
+}
+
+.agent-field-hint {
+  margin: -4px 0 0;
+  color: var(--color-text-secondary);
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+.agent-field-error {
+  margin: -8px 0 0;
+  color: var(--color-text-error);
+  font-size: 12px;
+}
+
+.agent-capacity-note {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 12px;
+  border: 1px solid var(--color-border);
+  border-radius: 9px;
+}
+
+.agent-capacity-note > div {
+  min-width: 0;
+  flex: 1 1 200px;
+}
+
+.agent-capacity-note strong {
+  font-size: 12px;
+}
+
+.agent-capacity-note p {
+  margin: 5px 0 0;
+  color: var(--color-text-secondary);
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+.agent-capacity-note .agent-capacity-effective {
+  color: var(--color-text-primary);
+}
+
+.agent-pending-notice {
+  color: var(--color-text-warning);
+}
+
+.agent-capacity-note button {
+  white-space: normal;
+}
+
+.agent-roles-heading {
+  margin-top: 24px;
+}
+
+.agent-enroll-field {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  margin: 16px 0;
+  font-size: 12px;
+}
+
+.agent-enroll-field input {
+  margin: 2px 0 0;
+  flex-shrink: 0;
+}
+
+.agent-preview-panel {
+  display: grid;
+  gap: 10px;
+  margin: 16px 0;
+  padding: 16px;
+  border: 1px solid var(--color-border-focus);
+  border-radius: 10px;
+  background: var(--color-background-elevated);
+}
+
+.agent-preview-panel p {
+  margin: 0;
+  font-size: 12px;
+}
+
+.agent-preview-panel code {
+  overflow-wrap: anywhere;
+}
+
+.agent-save-bar {
+  position: sticky;
+  bottom: 0;
+  z-index: 2;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-top: 14px;
+  padding: 12px 14px;
+  border: 1px solid var(--color-border);
+  border-radius: 10px;
+  background: var(--color-background-elevated);
+  box-shadow: 0 -6px 22px rgb(0 0 0 / 12%);
+}
+
+.agent-save-bar > span {
+  color: var(--color-text-secondary);
+  font-size: 12px;
+}
+
+.agent-save-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.agent-feedback.is-success {
+  margin-top: 12px;
+  padding: 12px;
+  border-left: 3px solid var(--color-text-success);
+  background: var(--color-background-status-success);
+  font-size: 12px;
+}
+
+@media (max-width: 680px) {
+  .agent-preset-grid { grid-template-columns: 1fr; }
+  .agent-workflow-panel { padding: 12px; }
+  .agent-save-bar { align-items: stretch; }
+  .agent-save-actions { width: 100%; }
+  .agent-save-actions > button { flex: 1; }
+}
+
+/* Settings dashboard: cards adapt to the available content width, not the monitor width. */
+.content-scroll.is-dashboard {
+  width: min(1520px, calc(100% - 48px));
+  container: settings-view / inline-size;
+}
+
+.settings-dashboard {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  align-items: start;
+  gap: 16px;
+}
+
+.settings-card {
+  min-width: 0;
+  padding: 18px;
+  border: 1px solid var(--color-border);
+  border-radius: 14px;
+  background: var(--color-background-elevated);
+}
+
+.settings-card > .section-heading {
+  min-height: 30px;
+  margin-bottom: 10px;
+  color: var(--color-text-primary);
+  font-size: 14px;
+  font-weight: 600;
+}
+
+.settings-card .setting-row {
+  gap: 12px;
+  min-width: 0;
+}
+
+.settings-card .setting-row > div { min-width: 0; }
+.settings-card .settings-list > .setting-row:last-child { border-bottom: 0; }
+.settings-card .settings-list > .setting-row:first-child { border-top: 1px solid var(--color-border-light); }
+
+.settings-card .plugin-name-setting .setting-row {
+  grid-template-columns: minmax(0, 1fr);
+  gap: 0;
+}
+
+.settings-card .plugin-name-setting .plugin-name-input {
+  width: min(100%, 260px);
+  margin-bottom: 8px;
+}
+
+.settings-card .interaction-mode-picker {
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 175px), 1fr));
+}
+
+.settings-card .about-row {
+  margin: 0;
+  padding: 4px 0;
+  border: 0;
+}
+
+.settings-card .diagnostic-row { border-bottom: 1px solid var(--color-border-light); }
+.settings-card .diagnostic-row:last-of-type { border-bottom: 0; }
+
+.settings-runtime-card .agent-workflow-panel {
+  background: var(--color-background-control);
+}
+
+.settings-runtime-card .agent-role-row {
+  padding: 14px;
+  border: 1px solid var(--color-border);
+  border-radius: 10px;
+  background: var(--color-background-control);
+}
+
+.agent-roles-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 340px), 1fr));
+  align-items: start;
+  gap: 10px;
+}
+
+.settings-runtime-card .agent-roles-heading { margin-top: 20px; }
+.settings-runtime-card .agent-manager-panel { padding-bottom: 0; }
+
+@container settings-view (min-width: 760px) {
+  .settings-dashboard { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .settings-runtime-card { grid-column: span 2; }
+}
+
+@container settings-view (min-width: 1220px) {
+  .settings-dashboard { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+}
+
+@media (max-width: 760px) {
+  .content-scroll.is-dashboard { width: calc(100% - 24px); }
+  .settings-dashboard { gap: 12px; }
+  .settings-card { padding: 14px; }
+}
+
+@media (max-width: 460px) {
+  .settings-card .setting-row { gap: 8px; }
+  .settings-card .language-menu-trigger { min-width: 110px; }
+}
