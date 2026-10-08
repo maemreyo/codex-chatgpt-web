@@ -1693,6 +1693,68 @@ Required end-to-end scenarios:
 
 Keep this migration separate and only begin after S8.
 
+S5-S8 local checkpoint (2026-10-08, uncommitted `feat/semantic-epoch-memory`):
+dedicated v1/v2/memento Web routing, local continuation normalization, canonical
+source selection across compactor effort changes, atomic tool-result pressure
+guard, and a default-off guarded logical-window option are implemented for
+focused testing. The nine-turn fake browser harness retained approximately
+235k canonical tokens across four Tier 0 rotations while keeping its compiled
+messages within the unchanged physical preflight; no live browser/account
+submissions were made for that scenario. The focused adapter (3/3), semantic
+provenance/store/projection and runtime-layout (38/38), Web routing/occupancy/
+calibration/source resolution (15/15, including durable-write failure and the newer-head regression), server compaction/recovery (31/31),
+model/catalog (35/35), and physical browser enforcement/usage (165/165)
+checks passed with Bun 1.3.5. `bun run typecheck` also passed. Retained
+compaction now finishes 43/43 on Bun 1.3.5 after switching the test-only
+timer harness to Bun-compatible fake timers; no live browser run is implied.
+The S8 recovery fake harness now passes 5/5 for checkpoint reuse at 220–240k,
+same-process exact-source compaction, restart with missing/corrupt state
+(explicit fail-closed), and post-compaction legacy downgrade. A preflight
+regression was fixed: a legacy compaction view that silently trims old source
+messages must never count as a safe semantic recovery.
+Additional S8 fake-harness verification (2026-10-08):
+`tests/semantic-active-pressure.test.ts` covers a two-tool atomic pressure stop,
+409 before result delivery, exact-once retained canonical compaction and native
+delta-only continuation. `tests/semantic-auto-compaction-state.test.ts` covers
+actual server response-state persistence (not a manually seeded fixture) for
+v2/memento JSON+SSE, plus the v1 replacement-history path. The server now retains
+the original native model and canonical source for local `previous_response_id`
+expansion, strips the trigger/bridge artifacts and rejects Luna's remote-v2
+compaction with 409. A six-turn stock-vs-SEM fake replay observed zero extra
+browser submissions per 100 turns, three rotations, two cooldown skips, and
+approximately 109k fewer estimated browser input tokens per 100 turns; these
+numbers are fixture-specific, not live account spend. A process-local per-thread
+sliding-hour cap of four Tier 0 rotations now applies with idempotent charging,
+verified epoch reuse and fail-closed fallback. The combined recent focused
+verification passed 34/34 (cost caps, auto-state, routing, server-compaction,
+pressure and stock-cost); typecheck and whitespace check passed. The combined
+eight-file Web harness/compaction/SEM regression suite now passes 197/197
+(1,564 assertions) after fixing Luna's 400/409 response and isolating the
+retained-compaction test's native thread/turn identity from earlier fixtures.
+That isolation preserves the production ambiguous-source fail-closed guard.
+The single retained-handoff test also passes independently (1/1, 30 assertions);
+`bun run typecheck` and `git diff --check` pass. This is local fake-harness
+evidence only, not live browser validation.
+This checkpoint is **not** S8 acceptance: Web-compaction rolling-hour caps,
+process-restart budget persistence, physical-pressure cap-exhaustion coverage,
+the broader control/restart matrix and live-account quality evidence are not
+verified. Canonical compaction remains available for safety. Keep the logical
+240k flag OFF; S9 remains gated.
+
+S8 follow-up (2026-10-08, still uncommitted): durable per-thread rotation and
+Web-compaction reservation logic was added with idempotency, corruption/write
+failure guards, and explicit cap-exhaustion errors. A new isolated recovery
+matrix passes 5/5 (71 assertions), covering physical pressure under cap
+exhaustion, checkpoint digest/schema failures after restart, and interrupted
+tool/lost locator with duplicate-delivery protection. The latest combined
+12-file regression reports **214 pass, 1 fail** (215 tests, 1,850 assertions):
+`real Responses compaction adapter rejects cap exhaustion with 409 before any
+browser submission` still receives a failed response on its expected-completed
+fixture setup. `bun run typecheck` and `git diff --check` passed. Thus the
+Web-compaction reservation/submission boundary remains unaccepted pending an
+exact integration fix and repeat verification. The 240k flag remains OFF,
+no live browser/account acceptance occurred, and S9 is still gated.
+
 Proposed direction remains parent+delta with v1 read compatibility, but add sparse base snapshots or
 ancestor-preserving pruning only after a dedicated storage/replay review. The covered-history digest
 must remain identical for equivalent canonical history regardless of whether it came from full input

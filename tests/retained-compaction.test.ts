@@ -1,5 +1,4 @@
-import { expect, test } from "bun:test";
-import { mock } from "node:test";
+import { expect, jest, test } from "bun:test";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -1394,19 +1393,19 @@ test.each([false, true])("fresh multipart compaction preserves phase budgets wit
     expect(turn.onMultipartStageAcknowledged).toBeDefined();
     expect(turn.onSubmitted).toBeDefined();
     for (let part = 1; part <= 5; part++) {
-      mock.timers.tick(25);
+      jest.advanceTimersByTime(25);
       expect(turn.abortSignal?.aborted).toBeFalse();
       await turn.onMultipartStageAcknowledged!(part);
     }
-    mock.timers.tick(25);
+    jest.advanceTimersByTime(25);
     expect(turn.abortSignal?.aborted).toBeFalse();
     turn.onSubmitted!();
-    mock.timers.tick(25);
+    jest.advanceTimersByTime(25);
     expect(turn.abortSignal?.aborted).toBeFalse();
     return "Fallback checkpoint after separately bounded phases";
   };
   const events: AdapterEvent[] = [];
-  mock.timers.enable({ apis: ["setTimeout"] });
+  jest.useFakeTimers();
   try {
     await createChatGptWebAdapter(provider).runTurn!(
       request(true),
@@ -1417,7 +1416,7 @@ test.each([false, true])("fresh multipart compaction preserves phase budgets wit
       && event.text.includes("Fallback checkpoint after separately bounded phases"))).toBeTrue();
     expect(events.at(-1)).toMatchObject({ type: "done", stopReason: "stop", endTurn: true });
   } finally {
-    mock.timers.reset();
+    jest.useRealTimers();
     (worker as unknown as { run: (turn: BrowserTurn) => Promise<string> }).run = originalRun;
     await TurnBroker.forSocket(provider.chatgptWeb!.brokerSocketPath!).close();
     rmSync(root, { recursive: true, force: true });
@@ -1517,19 +1516,19 @@ test("a timed-out fresh compaction retains its owner until helper cleanup comple
     runs.push(run);
     return run;
   };
-  mock.timers.enable({ apis: ["setTimeout"] });
+  jest.useFakeTimers();
   try {
     void observe();
     await ready;
-    mock.timers.tick(41);
-    await Bun.sleep(5);
+    jest.advanceTimersByTime(41);
+    await new Promise<void>(resolve => setImmediate(resolve));
     expect(cancelled).toBeTrue();
     expect(events.filter(event => event.type === "error")).toHaveLength(1);
     await observe();
     let cleanupSettled = false;
     const cleanup = cancelStructuredCompactionTrace(fallbackTrace, new Error("wait for timeout cleanup"))
       .then(count => { cleanupSettled = true; return count; });
-    await Bun.sleep(5);
+    await new Promise<void>(resolve => setImmediate(resolve));
     expect(browserStarts).toBe(1);
     expect(cleanupSettled).toBeFalse();
     releasePhysical();
@@ -1543,7 +1542,7 @@ test("a timed-out fresh compaction retains its owner until helper cleanup comple
   } finally {
     releasePhysical();
     await Promise.allSettled(runs);
-    mock.timers.reset();
+    jest.useRealTimers();
     (worker as unknown as { run: (turn: BrowserTurn) => Promise<string> }).run = originalRun;
     await TurnBroker.forSocket(provider.chatgptWeb!.brokerSocketPath!).close();
     rmSync(root, { recursive: true, force: true });
@@ -1709,7 +1708,7 @@ test("finishing the previous response does not consume the retained checkpoint's
   const broker = TurnBroker.forSocket(provider.chatgptWeb!.brokerSocketPath!);
   await broker.listen();
   worker.run = async turn => {
-    mock.timers.tick(25);
+    jest.advanceTimersByTime(25);
     expect(turn.abortSignal?.aborted).toBeFalse();
     const prepared = await turn.prepareResume!();
     const binding = controlBinding(prepared.text);
@@ -1721,12 +1720,12 @@ test("finishing the previous response does not consume the retained checkpoint's
     return "Checkpoint submitted";
   };
   const events: AdapterEvent[] = [];
-  mock.timers.enable({ apis: ["setTimeout"] });
+  jest.useFakeTimers();
   let run: Promise<void> | undefined;
   try {
     run = createChatGptWebAdapter(provider).runTurn!(request(true), { headers: new Headers() }, event => events.push(event));
     await new Promise<void>(resolve => setImmediate(resolve));
-    mock.timers.tick(25);
+    jest.advanceTimersByTime(25);
     finishSource("Previous response finished");
     await run;
     expect(events.at(-1)).toMatchObject({ type: "done", endTurn: true });
@@ -1734,7 +1733,7 @@ test("finishing the previous response does not consume the retained checkpoint's
   } finally {
     finishSource("cleanup");
     await run;
-    mock.timers.reset();
+    jest.useRealTimers();
     worker.run = originalRun;
     chatGptTurnSessions.clear();
     await broker.close();

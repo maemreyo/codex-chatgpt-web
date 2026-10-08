@@ -37,6 +37,25 @@ describe("fixed ChatGPT Web model routes", () => {
   const plus = { solAvailable: true, extraHighAvailable: false, proAvailable: false };
   const pro = { solAvailable: true, extraHighAvailable: true, proAvailable: true };
 
+  test("guarded logical 240k budget leaves every browser physical limit unchanged", () => {
+    const config = { ...defaultConfig("full"),
+      experimentalBiggerContext: false,
+      experimentalSemanticMemory: true, experimentalWebCompactor: true,
+      experimentalSemanticLogicalWindow: true,
+    };
+    const before = resolveChatGptWebContextLimits(CHATGPT_WEB_BACKEND_MODEL, "high", plus, "6");
+    expect(before.contextWindow).toBe(90_000);
+    expect(resolveChatGptWebContextLimits(CHATGPT_WEB_BACKEND_MODEL, "high", config, "6"))
+      .toMatchObject({ contextWindow: 240_000, autoCompactTokenLimit: 220_000 });
+    expect(resolveChatGptWebContextLimits(CHATGPT_WEB_BACKEND_MODEL, "low", config, "6").contextWindow)
+      .toBe(41_000);
+    expect(resolveChatGptWebContextLimits(CHATGPT_WEB_BACKEND_MODEL, "max", { ...config, proAvailable: true }, "6").contextWindow)
+      .toBe(112_193);
+    expect(resolveChatGptWebContextLimits(CHATGPT_WEB_BACKEND_MODEL, "high", {
+      ...config, experimentalSemanticMemory: false,
+    }, "6")).toEqual(before);
+  });
+
   test("keeps the published legacy bindings while advertising named families", () => {
     expect(new Set(CHATGPT_WEB_MODEL_ROUTES.map(route => route.slug)).size).toBe(CHATGPT_WEB_MODEL_ROUTES.length);
     expect(CHATGPT_WEB_LEGACY_MODEL_ROUTES.map(route => [route.slug, route.codexEffort, route.adapterEffort])).toEqual([

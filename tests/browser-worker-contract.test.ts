@@ -3661,8 +3661,11 @@ test("GPT-6 staged input enforces its measured account and effort ceiling before
     )).toThrow("222,386-token two-part ceiling");
     // Plus stages Medium/High/Extra High experimentally under the same measured ceiling.
     expect(() => assertChatGptWebMultipartInputWithinLimits(
-      100_000, 40_000, "gpt-5.6-sol", effort, { ...pro, proAvailable: false }, 200_000, 6, undefined, "6",
+      239_999, 40_000, "gpt-5.6-sol", effort, { ...pro, proAvailable: false }, 200_000, 6, undefined, "6",
     )).not.toThrow();
+    expect(() => assertChatGptWebMultipartInputWithinLimits(
+      240_000, 40_000, "gpt-5.6-sol", effort, { ...pro, proAvailable: false }, 200_000, 6, undefined, "6",
+    )).toThrow("240,000-token six-part ceiling");
   }
   expect(() => assertChatGptWebMultipartInputWithinLimits(
     100_000, 40_000, "gpt-5.6-sol", "low", pro, 200_000, 6, undefined, "6",

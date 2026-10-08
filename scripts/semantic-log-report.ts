@@ -10,6 +10,18 @@ export interface SemanticLogReport {
   rotationsPerThread: Array<{ threadHash: string; rotations: number }>;
   rotationRatioPerThread: number;
   maskedTokensSaved: number;
+  loggedCost: {
+    samples: number;
+    legacyEquivalentSubmissions: number;
+    checkpointTailRequests: number;
+    checkpointTailTokensEst: number;
+    epochRotations: number;
+    reseedInputTokensEst: number;
+    webCompactionSubmissions: number;
+    extraStageSubmissions: number;
+    discardedTails: number;
+    additionalSubmissionsPer100Legacy: number | null;
+  };
   skipsByReason: Record<string, number>;
   rejectionsByClass: Record<string, number>;
   rejectionsAfterRotation: number;
@@ -38,6 +50,11 @@ const SKIP_REASONS = new Set([
 const REJECTION_CLASSES = new Set(["A", "B", "C", "D", "unknown"]);
 const FALLBACK_TARGETS = new Set(["legacy", "compaction_required", "recovery_error"]);
 const THREAD_HASH = /^[a-f0-9]{16}$/;
+const COST_KEYS = [
+  "legacyEquivalentSubmissions", "checkpointTailRequests", "checkpointTailTokensEst",
+  "epochRotations", "reseedInputTokensEst", "webCompactionSubmissions",
+  "extraStageSubmissions", "discardedTails",
+] as const;
 
 function record(value: unknown): RecordLike | undefined {
   return value !== null && typeof value === "object" && !Array.isArray(value)
@@ -97,6 +114,12 @@ export function semanticLogReport(path: string): SemanticLogReport {
   let rejectionsAfterRotation = 0;
   let retainedRejections = 0;
   let rotationPreflightNoFit = 0;
+  let costSamples = 0;
+  const costTotals: Record<(typeof COST_KEYS)[number], number> = {
+    legacyEquivalentSubmissions: 0, checkpointTailRequests: 0, checkpointTailTokensEst: 0,
+    epochRotations: 0, reseedInputTokensEst: 0, webCompactionSubmissions: 0,
+    extraStageSubmissions: 0, discardedTails: 0,
+  };
 
   for (const event of events) {
     const type = typeof event.event === "string" ? event.event : "";
@@ -137,6 +160,13 @@ export function semanticLogReport(path: string): SemanticLogReport {
       if (threadHash && rotatedThreads.has(threadHash)) rejectionsAfterRotation += 1;
     } else if (type === "semantic_fallback") {
       increment(fallbacksByTarget, enumValue(event.to, FALLBACK_TARGETS));
+    } else if (type === "semantic_cost" && threadHash) {
+      // An invalid or partial cost row must not pollute derived ratios. Logs
+      // can be truncated or externally supplied, and content is never echoed.
+      if (!COST_KEYS.every(key => Number.isSafeInteger(event[key])
+        && (event[key] as number) >= 0)) continue;
+      costSamples += 1;
+      for (const key of COST_KEYS) costTotals[key] += event[key] as number;
     }
   }
 
@@ -170,6 +200,16 @@ export function semanticLogReport(path: string): SemanticLogReport {
     rotationsPerThread,
     rotationRatioPerThread: threadSet.size > 0 ? rotations / threadSet.size : 0,
     maskedTokensSaved,
+    loggedCost: {
+      samples: costSamples,
+      ...costTotals,
+      // This counts declared added calls, not model billing or native steps.
+      // Comparing total browser tokens with legacy requires a separate replay.
+      additionalSubmissionsPer100Legacy: costTotals.legacyEquivalentSubmissions > 0
+        ? 100 * (costTotals.checkpointTailRequests + costTotals.webCompactionSubmissions
+          + costTotals.extraStageSubmissions) / costTotals.legacyEquivalentSubmissions
+        : null,
+    },
     skipsByReason,
     rejectionsByClass,
     rejectionsAfterRotation,

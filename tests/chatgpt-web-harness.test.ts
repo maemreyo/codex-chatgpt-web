@@ -1,7 +1,7 @@
 import { afterAll, describe, expect, spyOn, test } from "bun:test";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
-import { createHash } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { existsSync, mkdirSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
@@ -206,10 +206,12 @@ function parsed(developerText?: string): CodexParsedRequest {
   };
 }
 
-function rawWireRequest(environmentText: string): CodexParsedRequest {
+function rawWireRequest(
+  environmentText: string,
+  identity: { threadId: string; turnId: string } = { threadId: "thread_test_123", turnId: "turn_test_123" },
+): CodexParsedRequest {
   const request = parsed();
-  const turnId = "turn_test_123";
-  const threadId = "thread_test_123";
+  const { threadId, turnId } = identity;
   request._rawBody = {
     prompt_cache_key: threadId,
     client_metadata: {
@@ -2437,6 +2439,8 @@ describe("ChatGPT outer-native harness v4", () => {
   });
 
   test("replays an ordinary post-tool final after one retained structured compaction handoff", async () => {
+    const caseId = randomUUID();
+    const identity = { threadId: `thread_active_compact_${caseId}`, turnId: `turn_active_compact_${caseId}` };
     const socketPath = brokerTestEndpoint(`cgw-h3-adapter-${process.pid}-${Date.now()}`);
     const provider: CodexProviderConfig = {
       adapter: "chatgpt-web",
@@ -2526,7 +2530,7 @@ describe("ChatGPT outer-native harness v4", () => {
     };
 
     const adapter = createChatGptWebAdapter(provider);
-    const firstRequest = rawWireRequest(environmentXml);
+    const firstRequest = rawWireRequest(environmentXml, identity);
     const firstEvents: AdapterEvent[] = [];
     const secondEvents: AdapterEvent[] = [];
     try {
@@ -2557,7 +2561,7 @@ describe("ChatGPT outer-native harness v4", () => {
       if (!sourceSession) throw new Error("active compaction source session missing");
       sourceSession.runtime.releaseRetainedConversation = async () => {};
 
-      const compactRequest = rawWireRequest(environmentXml);
+      const compactRequest = rawWireRequest(environmentXml, identity);
       compactRequest._compactionRequest = true;
       const toolCall = {
         role: "assistant" as const,
@@ -2604,7 +2608,7 @@ describe("ChatGPT outer-native harness v4", () => {
       expect(retainedCompactionMessages).toBe(1);
       expect(browserStarts).toBe(2);
 
-      const secondRequest = rawWireRequest(environmentXml);
+      const secondRequest = rawWireRequest(environmentXml, identity);
       secondRequest.context.messages.push({
         role: "user",
         content: `${SUMMARY_PREFIX}\nThe project was inspected and the pending command completed.`,

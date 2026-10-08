@@ -49,6 +49,19 @@ function source(): Record<string, unknown> {
 }
 
 describe("native /models augmentation", () => {
+  test("explicit guarded SEM window changes only eligible Medium/High catalog rows", () => {
+    const config = defaultConfig("full");
+    config.experimentalBiggerContext = false;
+    config.experimentalSemanticMemory = true;
+    config.experimentalWebCompactor = true;
+    config.experimentalSemanticLogicalWindow = true;
+    const rows = augmentNativeModelCatalog(source(), config).models as Array<Record<string, unknown>>;
+    const get = (slug: string) => rows.find(row => row.slug === slug)!;
+    expect(get("chatgpt-web/gpt-6-sol")).toMatchObject({ context_window: 240_000, auto_compact_token_limit: 220_000 });
+    expect(get("chatgpt-web/gpt-5.6-sol")).toMatchObject({ context_window: 240_000, auto_compact_token_limit: 220_000 });
+    expect(get("chatgpt-web/gpt-6-sol-instant").context_window).toBe(41_000);
+    expect(get("gpt-5.6-sol").context_window).toBe(300_000);
+  });
   test("preserves native models, groups supported efforts, and retains hidden legacy metadata", () => {
     const native = source();
     const nativeSnapshot = structuredClone(native);

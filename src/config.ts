@@ -167,8 +167,13 @@ export interface AppConfig {
   experimentalFreshConversationPerTurn: boolean;
   /** Experimental semantic projection/epoch memory. Disabled by default until rollout gates pass. */
   experimentalSemanticMemory: boolean;
-  /** Optional protection for native Codex quota. Disabled unless explicitly enabled. */
+  /** Hidden, independent experimental routing of native compaction to a Web summarizer. */
+  experimentalWebCompactor: boolean;
+  /** Optional, explicitly enabled 240k Codex logical budget; browser limits remain physical. */
+  experimentalSemanticLogicalWindow: boolean;
+  /** Guard native Codex/Plus quota; reserves 5% of 5h and 3% of weekly allowance. */
   nativeQuotaReserveEnabled?: boolean;
+  /** Opt-in policy; strict mode blocks native work and is the safe default. */
   nativeQuotaReserve?: NativeQuotaReserveSettings;
   useSavedChats: boolean;
   /** Explicitly install the additional Pro-sized model row while Zero Risk is active. */
@@ -305,6 +310,8 @@ export function defaultConfig(mode: RuntimeMode = "browser-only"): AppConfig {
     experimentalSkillAttachments: false,
     experimentalFreshConversationPerTurn: false,
     experimentalSemanticMemory: false,
+    experimentalWebCompactor: false,
+    experimentalSemanticLogicalWindow: false,
     nativeQuotaReserveEnabled: false,
     nativeQuotaReserve: { ...DEFAULT_NATIVE_QUOTA_RESERVE_SETTINGS },
     useSavedChats: false,
@@ -618,10 +625,26 @@ function parseConfig(value: unknown, path: string): AppConfig {
     throw new Error(`Invalid experimentalSemanticMemory in ${path}`);
   }
   const experimentalSemanticMemory = parsed.experimentalSemanticMemory === true;
+  if (parsed.experimentalWebCompactor !== undefined && typeof parsed.experimentalWebCompactor !== "boolean") {
+    throw new Error(`Invalid experimentalWebCompactor in ${path}`);
+  }
+  const experimentalWebCompactor = parsed.experimentalWebCompactor === true;
   if (parsed.nativeQuotaReserveEnabled !== undefined && typeof parsed.nativeQuotaReserveEnabled !== "boolean") {
     throw new Error(`Invalid nativeQuotaReserveEnabled in ${path}`);
   }
   const nativeQuotaReserve = parseNativeQuotaReserveSettings(parsed.nativeQuotaReserve);
+  if (parsed.experimentalSemanticLogicalWindow !== undefined
+    && typeof parsed.experimentalSemanticLogicalWindow !== "boolean") {
+    throw new Error(`Invalid experimentalSemanticLogicalWindow in ${path}`);
+  }
+  const experimentalSemanticLogicalWindow = parsed.experimentalSemanticLogicalWindow === true;
+  if (experimentalSemanticLogicalWindow && (
+    !experimentalSemanticMemory || !experimentalWebCompactor
+    || parsed.mode !== "full" || parsed.browserInteractionMode === "manual"
+    || parsed.experimentalBiggerContext === true || parsed.experimentalFreshConversationPerTurn === true
+  )) {
+    throw new Error(`experimentalSemanticLogicalWindow requires Full automatic retained semantic memory and dedicated Web compaction without Bigger Context in ${path}`);
+  }
   if (parsed.useSavedChats !== undefined && typeof parsed.useSavedChats !== "boolean") {
     throw new Error(`Invalid useSavedChats in ${path}`);
   }
@@ -629,9 +652,10 @@ function parseConfig(value: unknown, path: string): AppConfig {
   if (browserInteractionMode === "manual" && experimentalSkillAttachments) {
     throw new Error(`Zero Risk does not support Skills as files in ${path}`);
   }
-  // New eligible automatic profiles default on, but saved false remains an opt-out.
+  // New automatic profiles opt in by default. Persisted false stays an explicit opt-out;
+  // Zero Risk, Luna/Think, and the independent semantic logical window remain excluded.
   const experimentalBiggerContext = parsed.experimentalBiggerContext
-    ?? (browserInteractionMode === "automatic" && solAvailable);
+    ?? (browserInteractionMode === "automatic" && solAvailable && !experimentalSemanticLogicalWindow);
   const zeroRiskProEnabled = parsed.zeroRiskProEnabled === true;
   if (browserInteractionMode === "manual" && experimentalBiggerContext) {
     throw new Error(`Zero Risk does not support Bigger Context in ${path}`);
@@ -656,6 +680,8 @@ function parseConfig(value: unknown, path: string): AppConfig {
     experimentalSkillAttachments,
     experimentalFreshConversationPerTurn,
     experimentalSemanticMemory,
+    experimentalWebCompactor,
+    experimentalSemanticLogicalWindow,
     nativeQuotaReserve,
     useSavedChats,
     zeroRiskProEnabled,

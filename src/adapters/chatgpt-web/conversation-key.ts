@@ -29,7 +29,7 @@ function compactionEpoch(input: unknown[] | undefined): unknown {
 export function chatGptConversationKey(
   parsed: CodexParsedRequest,
   namespace: string,
-  options: { semanticEpoch?: number } = {},
+  options: { semanticEpoch?: number; semanticEpochIdentity?: string } = {},
 ): string | undefined {
   const identity = extractChatGptTurnIdentity(parsed);
   if (!identity.threadId) return undefined;
@@ -42,6 +42,11 @@ export function chatGptConversationKey(
     ...(parsed._chatgptModelFamily ? { modelFamily: parsed._chatgptModelFamily } : {}),
     compaction: compactionEpoch(raw?.input),
     ...(options.semanticEpoch !== undefined ? { semanticEpoch: options.semanticEpoch } : {}),
+    // An expired/reset epoch store can reuse the epoch counter while an older
+    // retained browser conversation still exists. Bind to this commit too.
+    ...(options.semanticEpochIdentity !== undefined
+      ? { semanticEpochIdentity: options.semanticEpochIdentity }
+      : {}),
   })).digest("hex");
 }
 

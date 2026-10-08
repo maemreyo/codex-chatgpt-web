@@ -9,6 +9,7 @@ import { chatGptTurnSessions } from "../src/adapters/chatgpt-web/turn-execution"
 import { TurnBroker } from "../src/adapters/chatgpt-web/turn-broker";
 import { defaultBrokerEndpoint } from "../src/config";
 import { parseRequest } from "../src/responses/parser";
+import { estimateTokens } from "../src/lib/token-estimate";
 import type { CodexParsedRequest, CodexProviderConfig } from "../src/types";
 
 const root = join(tmpdir(), `semantic-adapter-${process.pid}-${Date.now()}`);
@@ -186,6 +187,74 @@ test("an existing native-turn session bypasses semantic reseed preflight on an e
     await adapter.runTurn!(initial, { headers: new Headers() }, () => {});
     await adapter.runTurn!(replay, { headers: new Headers() }, () => {});
     expect(browserSubmissions).toBe(1);
+  } finally {
+    (worker as unknown as { run: (turn: BrowserTurn) => Promise<string> }).run = originalRun;
+    chatGptTurnSessions.clear();
+    await TurnBroker.forSocket(socketPath).close();
+  }
+});
+
+test("canonical history reaches the guarded 220-240k target across multiple physically bounded epochs", async () => {
+  const socketPath = brokerEndpoint(`semantic-long-${process.pid}-${Date.now()}`);
+  const provider: CodexProviderConfig = {
+    adapter: "chatgpt-web",
+    baseUrl: `browser://semantic-long-${Date.now()}`,
+    chatgptWeb: {
+      browserHost: "launcher",
+      browserHostDescriptorPath: join(root, "launcher.json"),
+      brokerSocketPath: socketPath,
+      localToolsEnabled: true,
+      solAvailable: true,
+      extraHighAvailable: true,
+      proAvailable: true,
+      experimentalSemanticMemory: true,
+      semanticCheckpointStatePath: join(root, `semantic-long-epochs-${Date.now()}.json`),
+    },
+  };
+  const worker = ChatGptBrowserWorker.forProvider(provider);
+  const originalRun = worker.run.bind(worker);
+  const keys: string[] = [];
+  const prompts: string[] = [];
+  (worker as unknown as { run: (turn: BrowserTurn) => Promise<string> }).run = async browserTurn => {
+    const prepared = await browserTurn.prepare();
+    keys.push(browserTurn.conversationKey ?? "missing");
+    prompts.push(prepared.text);
+    prepared.release();
+    const answer = `Long-run answer ${keys.length}`;
+    browserTurn.onTextDelta(answer);
+    return answer;
+  };
+
+  const largeSettledResult = "alpha beta gamma delta ".repeat(7_000);
+  let canonical: unknown[] = [
+    { type: "message", role: "developer", content: "KEEP-EARLY-AUTHORITY-SENTINEL exactly." },
+  ];
+  let lastCanonicalTokens = 0;
+  try {
+    const adapter = createChatGptWebAdapter(provider);
+    for (let n = 1; n <= 9; n += 1) {
+      const id = `long_turn_${n}`;
+      const parsed = request(id, [
+        ...canonical,
+        { type: "message", role: "user", content: [{ type: "input_text", text: environmentXml }], ...turn(id) },
+        { type: "message", role: "user", id: `long_user_${n}`, content: `Continue verified stage ${n}`, ...turn(id) },
+      ]);
+      lastCanonicalTokens = estimateTokens(JSON.stringify(rawInput(parsed)));
+      await adapter.runTurn!(parsed, { headers: new Headers() }, () => {});
+      canonical = [...rawInput(parsed),
+        { type: "function_call", call_id: `long_call_${n}`, name: "exec_command", arguments: '{"cmd":"status"}' },
+        { type: "function_call_output", call_id: `long_call_${n}`, output: `EVIDENCE-${n} ${largeSettledResult}` },
+        { type: "message", role: "assistant", content: [{ type: "output_text", text: `Long-run answer ${n}` }] },
+      ];
+    }
+    expect(lastCanonicalTokens).toBeGreaterThanOrEqual(220_000);
+    expect(lastCanonicalTokens).toBeLessThanOrEqual(240_000);
+    expect(keys).toHaveLength(9);
+    expect(new Set(keys).size).toBeGreaterThanOrEqual(4);
+    expect(prompts.every(prompt => prompt.includes("KEEP-EARLY-AUTHORITY-SENTINEL"))).toBe(true);
+    expect(prompts.slice(1).some(prompt => prompt.includes("[tool result omitted:"))).toBe(true);
+    expect(prompts.at(-1)).not.toContain("EVIDENCE-1 alpha beta gamma delta");
+    expect(prompts.at(-1)).toContain("Continue verified stage 9");
   } finally {
     (worker as unknown as { run: (turn: BrowserTurn) => Promise<string> }).run = originalRun;
     chatGptTurnSessions.clear();

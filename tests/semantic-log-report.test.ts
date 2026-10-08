@@ -27,17 +27,33 @@ test("semantic log report reads raw and launcher-wrapped events without surfacin
       launcher(semantic({ event: "semantic_reject", threadHash: threadA, class: "D" })),
       launcher(semantic({ event: "semantic_reject", threadHash: threadA, class: "D" })),
       launcher(semantic({ event: "semantic_fallback", threadHash: threadA, to: "legacy" })),
+      launcher(semantic({ event: "semantic_cost", threadHash: threadA,
+        legacyEquivalentSubmissions: 2, checkpointTailRequests: 1,
+        checkpointTailTokensEst: 30, epochRotations: 1, reseedInputTokensEst: 650,
+        webCompactionSubmissions: 1, extraStageSubmissions: 0, discardedTails: 0 })),
+      launcher(semantic({ event: "semantic_cost", threadHash: threadB,
+        legacyEquivalentSubmissions: 1, checkpointTailRequests: 0,
+        checkpointTailTokensEst: 0, epochRotations: 0, reseedInputTokensEst: 0,
+        webCompactionSubmissions: 0, extraStageSubmissions: 0, discardedTails: 0 })),
+      launcher(semantic({ event: "semantic_cost", threadHash: threadA,
+        legacyEquivalentSubmissions: "SECRET TRANSCRIPT CONTENT", checkpointTailRequests: 30 })),
       launcher(semantic({ event: "semantic_skip", threadHash: "SECRET TRANSCRIPT CONTENT", reason: "SECRET TRANSCRIPT CONTENT" })),
       launcher(semantic({ event: "semantic_reject", threadHash: "SECRET TRANSCRIPT CONTENT", class: "SECRET TRANSCRIPT CONTENT" })),
       JSON.stringify({ at: "x", level: "info", event: "runtime.stdout", detail: { line: "SECRET TRANSCRIPT CONTENT" } }),
     ].join("\n"), "utf8");
 
     const report = semanticLogReport(path);
-    expect(report.events).toBe(11);
+    expect(report.events).toBe(14);
     expect(report.threads).toBe(2);
     expect(report.turns).toBe(3);
     expect(report.rotations).toBe(1);
     expect(report.maskedTokensSaved).toBe(900);
+    expect(report.loggedCost).toEqual({
+      samples: 2, legacyEquivalentSubmissions: 3, checkpointTailRequests: 1,
+      checkpointTailTokensEst: 30, epochRotations: 1, reseedInputTokensEst: 650,
+      webCompactionSubmissions: 1, extraStageSubmissions: 0, discardedTails: 0,
+      additionalSubmissionsPer100Legacy: 200 / 3,
+    });
     expect(report.skipsByReason).toEqual({ ineligible: 1, no_fit: 1, unknown: 1 });
     expect(report.rejectionsByClass).toEqual({ D: 2, unknown: 1 });
     expect(report.rejectionsAfterRotation).toBe(2);

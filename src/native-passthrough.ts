@@ -89,17 +89,28 @@ function isBridgeCompactionItem(value: unknown): value is BridgeCompactionItem {
  * than asking the official backend to decrypt a bridge-owned envelope. Once either artifact proves
  * that the history crossed providers, send the complete item content without provider-local ids.
  */
-export function scrubBridgeArtifactsForNative(value: unknown): { value: unknown; changed: boolean } {
+export function scrubBridgeArtifactsForNative(
+  value: unknown,
+  options: { locallyExpanded?: boolean } = {},
+): { value: unknown; changed: boolean } {
   if (!isObject(value)
     || !Array.isArray(value.input)
-    || !value.input.some(item => isBridgeReasoningItem(item) || isBridgeCompactionItem(item))) {
+    || (!options.locallyExpanded
+      && !value.input.some(item => isBridgeReasoningItem(item) || isBridgeCompactionItem(item)))) {
     return { value, changed: false };
   }
 
   const input = value.input.flatMap(item => {
     if (!isObject(item)) return [item];
     const clean = { ...item };
-    delete clean.id;
+    // Local Web response IDs cannot be looked up by Codex native. Preserve an
+    // authentic native encrypted reasoning/compaction item when the expanded
+    // chain mixes backends, including its provider-owned encrypted identity.
+    const nativeEncrypted = (clean.type === "reasoning" || clean.type === "compaction")
+      && typeof clean.encrypted_content === "string"
+      && !clean.encrypted_content.startsWith(BRIDGE_REASONING_PREFIX)
+      && !clean.encrypted_content.startsWith(BRIDGE_COMPACTION_PREFIX);
+    if (!nativeEncrypted || !options.locallyExpanded) delete clean.id;
     if (isBridgeCompactionItem(clean)) {
       const summary = decodeCompactionSummary(clean.encrypted_content);
       if (summary === null) throw new Error("Invalid ChatGPT Web compaction checkpoint");
@@ -210,6 +221,7 @@ export async function forwardNativeCodexRequest(
   endpoint: NativeCodexEndpoint,
   fetchUpstream: NativeFetch = fetchNativeCodex,
   decodedBody?: unknown,
+  options: { forceBodyRewrite?: boolean } = {},
 ): Promise<Response> {
   const authorization = request.headers.get("authorization") ?? "";
   if (!authorization.startsWith("Bearer ") || authorization.length <= "Bearer ".length) {
@@ -242,8 +254,10 @@ export async function forwardNativeCodexRequest(
       const tail = Array.isArray(parsedBody.input) ? parsedBody.input.at(-1) : undefined;
       compactionRequest ||= endpoint === "responses" && isObject(tail) && tail.type === "compaction_trigger";
     }
-    const scrubbed = scrubBridgeArtifactsForNative(parsedBody);
-    if (scrubbed.changed) {
+    const scrubbed = scrubBridgeArtifactsForNative(parsedBody, {
+      locallyExpanded: options.forceBodyRewrite === true,
+    });
+    if (scrubbed.changed || options.forceBodyRewrite === true) {
       headers.delete("content-encoding");
       body = JSON.stringify(scrubbed.value);
     } else {

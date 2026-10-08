@@ -174,21 +174,38 @@ function pruneResponses(at = now()): void {
   }
 }
 
-export function expandPreviousResponseInput(body: unknown): unknown {
-  if (!body || typeof body !== "object" || Array.isArray(body)) return body;
+export interface ResolvedPreviousResponseInput {
+  body: unknown;
+  expandedFromLocal: boolean;
+  localPreviousResponseId?: string;
+}
+
+/** Distinguish a bridge-owned continuation from an upstream ID before provider routing. */
+export function resolvePreviousResponseInput(body: unknown): ResolvedPreviousResponseInput {
+  if (!body || typeof body !== "object" || Array.isArray(body)) return { body, expandedFromLocal: false };
   const request = body as Record<string, unknown>;
   const previousId = typeof request.previous_response_id === "string" ? request.previous_response_id : undefined;
-  if (!previousId) return body;
+  if (!previousId) return { body, expandedFromLocal: false };
   ensureLoaded();
   pruneResponses();
   const previous = states.get(previousId);
-  if (!previous) return body;
+  if (!previous) return { body, expandedFromLocal: false };
   const expanded = {
     ...request,
     input: [...previous.items, ...inputItems(request.input)],
   };
   replayedInputPrefixLengths.set(expanded, previous.items.length);
-  return expanded;
+  return { body: expanded, expandedFromLocal: true, localPreviousResponseId: previousId };
+}
+
+export function expandPreviousResponseInput(body: unknown): unknown {
+  return resolvePreviousResponseInput(body).body;
+}
+
+/** Preserve the trusted replay prefix when changing only browser execution fields. */
+export function copyPreviousResponseProvenance(from: unknown, to: object): void {
+  const prefix = previousResponseReplayPrefixLength(from);
+  if (prefix > 0) replayedInputPrefixLengths.set(to, prefix);
 }
 
 /** Number of leading input items restored from previous_response_id state for this exact body. */

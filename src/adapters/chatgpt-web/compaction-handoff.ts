@@ -183,6 +183,13 @@ export async function settleActiveCompactionSource(
         `Codex supplied ${results.size} of ${outstanding.length} required tool results for compaction`,
       );
     }
+    if (source.runtime.semanticOccupancy
+      && !source.runtime.semanticOccupancy.canFitAtomicResults([...results.values()].map(result => ({ content: result.content })))) {
+      throw new ChatGptWebAdapterError(
+        "A canonical tool result exceeds the browser's physical capacity even during compaction.",
+        { status: 409, errorType: "invalid_request_error", code: "semantic_atomic_result_too_large", retryable: false },
+      );
+    }
     let token: string | undefined;
     try {
       token = await source.runtime.token;
@@ -194,6 +201,7 @@ export async function settleActiveCompactionSource(
           request.callId,
           toolResult(result),
         );
+        source.runtime.semanticOccupancy?.recordToolResult(request.callId, result.content);
         source.runtime.externalProgress.recordToolResult();
         source.markResultDelivered(request.callId);
       }
