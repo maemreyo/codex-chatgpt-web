@@ -242,7 +242,7 @@ test("guard stores only hashed identity and survives restart without polling aga
   }
 });
 
-test("32 active account cooldowns survive capacity pressure and restart; expired slots can be reused", async () => {
+test("profile-wide cooldown survives 32-slot history and restart; expired slots can be reused", async () => {
   const dir = mkdtempSync(join(tmpdir(), "quota-guard-test-"));
   const stateFile = join(dir, "state.json");
   let time = 3_000_000;
@@ -253,6 +253,7 @@ test("32 active account cooldowns survive capacity pressure and restart; expired
   try {
     const guard = conservativeGuard(fetchUsage, { stateFile, now: () => time });
     for (let i = 1; i <= 32; i++) {
+      if (i > 1) time += NATIVE_QUOTA_POLL_INTERVAL_MS;
       const result = await guard.run(request("responses", `account-${i}`), forward);
       expect(result.status).toBe(200);
       await result.json();
@@ -263,8 +264,8 @@ test("32 active account cooldowns survive capacity pressure and restart; expired
     for (const active of [guard, conservativeGuard(fetchUsage, { stateFile, now: () => time })]) {
       const full = await active.run(request("responses", "account-33"), forward);
       expect(full.status).toBe(403);
-      expect((await full.json() as { error: { code: string } }).error.code).toBe("quota_guard_capacity");
-      const retained = await active.run(request("responses", "account-1"), forward);
+      expect((await full.json() as { error: { code: string } }).error.code).toBe("quota_guard_cooldown");
+      const retained = await active.run(request("responses", "account-32"), forward);
       expect((await retained.json() as { error: { code: string } }).error.code).toBe("quota_guard_cooldown");
     }
     expect(reads).toBe(32);
@@ -289,20 +290,141 @@ test("32 active account cooldowns survive capacity pressure and restart; expired
   }
 });
 
+test("account header variants and token refresh cannot bypass the profile-wide admission gate", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "quota-guard-test-"));
+  const stateFile = join(dir, "state.json");
+  let time = 4_000_000;
+  let reads = 0;
+  let forwarded = 0;
+  const fetchUsage = async () => { reads++; return Response.json(usage(10, 20)); };
+  const forward = async () => { forwarded++; return Response.json({ ok: true }); };
+  const variant = (accountId?: string, token = "TOKEN_A") => new Request("http://localhost/v1/responses", {
+    method: "POST",
+    headers: {
+      authorization: `Bearer ${token}`,
+      ...(accountId === undefined ? {} : { "chatgpt-account-id": accountId }),
+    },
+    body: "{}",
+  });
+  try {
+    const first = conservativeGuard(fetchUsage, { stateFile, now: () => time });
+    const admitted = await first.run(variant("ACCOUNT"), forward);
+    expect(admitted.status).toBe(200);
+    await admitted.json();
+    const restarted = conservativeGuard(fetchUsage, { stateFile, now: () => time });
+    for (const guard of [first, restarted]) {
+      for (const req of [variant(), variant("ANOTHER_ID"), variant("ACCOUNT", "TOKEN_B"), variant(undefined, "TOKEN_C")]) {
+        const blocked = await guard.run(req, forward);
+        expect((await blocked.json() as { error: { code: string } }).error.code).toBe("quota_guard_cooldown");
+      }
+    }
+    expect(reads).toBe(1);
+    expect(forwarded).toBe(1);
+    time += NATIVE_QUOTA_POLL_INTERVAL_MS;
+    const nextAdmitted = await restarted.run(variant(undefined, "TOKEN_C"), forward);
+    expect(nextAdmitted.status).toBe(200);
+    await nextAdmitted.json();
+    expect(reads).toBe(2);
+    expect(forwarded).toBe(2);
+    const third = conservativeGuard(fetchUsage, { stateFile, now: () => time });
+    const blocked = await third.run(variant("ACCOUNT", "TOKEN_D"), forward);
+    expect((await blocked.json() as { error: { code: string } }).error.code).toBe("quota_guard_cooldown");
+    expect(reads).toBe(2);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("upstream 401 and 403 keep the normal cooldown and allow a later credential refresh", async () => {
+  for (const status of [401, 403]) {
+    let time = 1_000_000;
+    let reads = 0;
+    let forwards = 0;
+    const guard = conservativeGuard(async () => { reads++; return Response.json(usage(10, 20)); }, { now: () => time });
+    const first = await guard.run(request(), async () => {
+      forwards++;
+      return new Response("not quota related", { status });
+    });
+    expect(first.status).toBe(status);
+    expect(await first.text()).toBe("not quota related");
+    time += NATIVE_QUOTA_POLL_INTERVAL_MS - 1;
+    const blocked = await guard.run(request(), async () => { forwards++; return Response.json({ bad: true }); });
+    expect((await blocked.json() as { error: { code: string } }).error.code).toBe("quota_guard_cooldown");
+    time += 1;
+    const recovered = await guard.run(new Request("http://localhost/v1/responses", {
+      method: "POST",
+      headers: { authorization: "Bearer REFRESHED", "chatgpt-account-id": "TEST_ACCOUNT" },
+      body: "{}",
+    }), async () => { forwards++; return Response.json({ ok: true }); });
+    expect(recovered.status).toBe(200);
+    expect(await recovered.json()).toEqual({ ok: true });
+    expect(reads).toBe(2);
+    expect(forwards).toBe(2);
+  }
+});
+
+test("upstream 429 preserves the anti-spam 24-hour circuit breaker", async () => {
+  let time = 5_000_000;
+  let reads = 0;
+  let forwards = 0;
+  const guard = conservativeGuard(async () => { reads++; return Response.json(usage(10, 20)); }, { now: () => time });
+  const forward = async () => { forwards++; return new Response("throttled", { status: 429 }); };
+  const first = await guard.run(request(), forward);
+  expect(first.status).toBe(429);
+  await first.text();
+  time += NATIVE_QUOTA_FAILURE_COOLDOWN_MS;
+  const blocked = await guard.run(request("responses", "DIFFERENT_ACCOUNT"), forward);
+  expect((await blocked.json() as { error: { code: string } }).error.code).toBe("quota_guard_cooldown");
+  expect(reads).toBe(1);
+  expect(forwards).toBe(1);
+  time += NATIVE_QUOTA_DENIED_COOLDOWN_MS - NATIVE_QUOTA_FAILURE_COOLDOWN_MS;
+  const recovered = await guard.run(request(), async () => { forwards++; return Response.json({ ok: true }); });
+  expect(recovered.status).toBe(200);
+  await recovered.json();
+  expect(reads).toBe(2);
+  expect(forwards).toBe(2);
+});
+
+test("usage 401 and 403 retain the one-hour failure cooldown, not a 24-hour block", async () => {
+  for (const status of [401, 403]) {
+    let time = 2_000_000;
+    let reads = 0;
+    let forwarded = 0;
+    const guard = conservativeGuard(async () => {
+      reads++;
+      return reads === 1 ? new Response("authorization failed", { status }) : Response.json(usage(10, 20));
+    }, { now: () => time });
+    const forward = async () => { forwarded++; return Response.json({ ok: true }); };
+    expect((await guard.run(request(), forward)).status).toBe(403);
+    time += NATIVE_QUOTA_POLL_INTERVAL_MS;
+    const blocked = await guard.run(request(), forward);
+    expect((await blocked.json() as { error: { code: string } }).error.code).toBe("quota_guard_cooldown");
+    expect(reads).toBe(1);
+    time += NATIVE_QUOTA_FAILURE_COOLDOWN_MS - NATIVE_QUOTA_POLL_INTERVAL_MS;
+    const recovered = await guard.run(request(), forward);
+    expect(recovered.status).toBe(200);
+    expect(await recovered.json()).toEqual({ ok: true });
+    expect(reads).toBe(2);
+    expect(forwarded).toBe(1);
+  }
+});
+
 test("one invalid persisted account key or entry blocks all native requests before probing", async () => {
   for (const corruption of ["key", "entry"] as const) {
     const dir = mkdtempSync(join(tmpdir(), "quota-guard-test-"));
     const stateFile = join(dir, "state.json");
     let reads = 0;
     let forwarded = 0;
+    let time = 3_000_000;
     const fetchUsage = async () => { reads++; return Response.json(usage(10, 20)); };
     const forward = async () => { forwarded++; return Response.json({ ok: true }); };
     try {
-      const guard = conservativeGuard(fetchUsage, { stateFile, now: () => 3_000_000 });
+      const guard = conservativeGuard(fetchUsage, { stateFile, now: () => time });
       for (const account of ["account-1", "account-2"]) {
         const result = await guard.run(request("responses", account), forward);
         expect(result.status).toBe(200);
         await result.json();
+        time += NATIVE_QUOTA_POLL_INTERVAL_MS;
       }
       const state = JSON.parse(readFileSync(stateFile, "utf8")) as {
         version: number;
@@ -317,7 +439,7 @@ test("one invalid persisted account key or entry blocks all native requests befo
       }
       await Bun.write(stateFile, JSON.stringify(state));
 
-      const restarted = conservativeGuard(fetchUsage, { stateFile, now: () => 3_000_000 });
+      const restarted = conservativeGuard(fetchUsage, { stateFile, now: () => time });
       for (const account of ["account-1", "account-2", "account-3"]) {
         const response = await restarted.run(request("responses", account), forward);
         expect(response.status).toBe(403);
