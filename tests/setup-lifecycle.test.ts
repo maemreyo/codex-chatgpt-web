@@ -65,6 +65,7 @@ for (const development of [false, true]) {
       releaseVersion: "6.1.4",
       browserHost: "launcher" as const,
       solAvailable: true, extraHighAvailable: true, proAvailable: true,
+      experimentalBiggerContext: false,
       ...(development ? { purpose: "dev-harness" as const } : {}),
     };
     writeFileSync(configPath, JSON.stringify(existing));
@@ -91,6 +92,7 @@ for (const development of [false, true]) {
       expect(save.mock.calls[0]![0]).toMatchObject({
         releaseVersion: configModule.defaultConfig().releaseVersion,
         solAvailable: true, extraHighAvailable: true, proAvailable: true,
+        experimentalBiggerContext: false,
       });
       // Refreshing the actual model list still requires evidence from the account.
       await expect(configure({ ...options, refreshAccountCapabilities: true })).rejects.toThrow("ChatGPT is signed out");
@@ -146,6 +148,7 @@ for (const development of [false, true]) for (const interaction of ["manual", "a
       expect(result.tunnelReady).not.toBe(true);
       expect(result.connectorSetupRequired).toBe(true);
       expect(saved?.experimentalFreshConversationPerTurn).toBe(interaction === "automatic");
+      expect(saved?.experimentalBiggerContext).toBe(interaction === "automatic");
       expect(saved?.useSavedChats).toBe(true);
       expect(saved?.appName).toBe("Codex Work");
       expect(interaction === "manual" ? saved?.automaticAppName : saved?.manualAppName)
@@ -164,6 +167,39 @@ for (const development of [false, true]) for (const interaction of ["manual", "a
       mocks.push(spyOn(configModule, "saveConfig").mockImplementation(() => { throw new Error("config commit failed"); }));
       await expect((development ? setupDevProfile : setup)({ ...options, port })).rejects.toThrow("config commit failed");
       expect(calls).toEqual([]);
+    } finally {
+      for (const mock of mocks.reverse()) mock.mockRestore();
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+}
+
+for (const development of [false, true]) {
+  test(`${development ? "DEV" : "production"} starts a fresh Luna profile with standard context`, async () => {
+    const root = mkdtempSync(join(tmpdir(), "codex-web-fresh-luna-"));
+    let saved: configModule.AppConfig | undefined;
+    const mocks = [
+      spyOn(configModule, "getConfigPath").mockReturnValue(join(root, "config.json")),
+      spyOn(configModule, "saveConfig").mockImplementation(value => { saved = value; }),
+      spyOn(integration, "preflightCodexIntegration").mockImplementation(() => {}),
+      spyOn(integration, "installCodexIntegration").mockImplementation(() => ({} as never)),
+      spyOn(service, "getServiceStatus").mockReturnValue({ installed: false, loaded: false } as never),
+      spyOn(service, "removeLegacyRuntimeArtifacts").mockImplementation(() => {}),
+      spyOn(browserHost, "inspectLauncherBrowserHost").mockResolvedValue({
+        solAvailable: false, extraHighAvailable: false, proAvailable: false,
+      } as never),
+    ];
+    try {
+      const listener = Bun.serve({ port: 0, hostname: "127.0.0.1", fetch: () => new Response() });
+      const port = listener.port!;
+      await listener.stop(true);
+      const options = { mode: "browser-only" as const, subagentProtocol: "native" as const, port,
+        browserHostDescriptorPath: join(root, "launcher-browser.json"), acknowledgedUnofficial: true };
+      const configure = development ? setupDevProfile : setup;
+      await configure(options);
+      expect(saved).toMatchObject({ solAvailable: false, experimentalBiggerContext: false });
+      await expect(configure({ ...options, experimentalBiggerContext: true }))
+        .rejects.toThrow("unavailable for Luna and Think");
     } finally {
       for (const mock of mocks.reverse()) mock.mockRestore();
       rmSync(root, { recursive: true, force: true });

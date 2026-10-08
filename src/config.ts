@@ -252,7 +252,7 @@ export function defaultConfig(mode: RuntimeMode = "browser-only"): AppConfig {
     solAvailable: true,
     extraHighAvailable: false,
     proAvailable: false,
-    experimentalBiggerContext: false,
+    experimentalBiggerContext: true,
     experimentalSkillAttachments: false,
     experimentalFreshConversationPerTurn: false,
     experimentalSemanticMemory: false,
@@ -568,7 +568,9 @@ function parseConfig(value: unknown, path: string): AppConfig {
   if (browserInteractionMode === "manual" && experimentalSkillAttachments) {
     throw new Error(`Zero Risk does not support Skills as files in ${path}`);
   }
-  const experimentalBiggerContext = parsed.experimentalBiggerContext === true;
+  // New eligible automatic profiles default on, but saved false remains an opt-out.
+  const experimentalBiggerContext = parsed.experimentalBiggerContext
+    ?? (browserInteractionMode === "automatic" && solAvailable);
   const zeroRiskProEnabled = parsed.zeroRiskProEnabled === true;
   if (browserInteractionMode === "manual" && experimentalBiggerContext) {
     throw new Error(`Zero Risk does not support Bigger Context in ${path}`);

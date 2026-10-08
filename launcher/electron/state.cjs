@@ -16,7 +16,7 @@ const DEFAULT_STATE = Object.freeze({
   showBrowserDuringTurns: true,
   autoApproveToolCalls: false,
   browserInteractionMode: "automatic",
-  experimentalBiggerContext: false,
+  experimentalBiggerContext: true,
   experimentalSkillAttachments: false,
   experimentalFreshConversationPerTurn: false,
   useSavedChats: false,

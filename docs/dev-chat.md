@@ -100,8 +100,10 @@ that ChatGPT will follow them more reliably.
 
 ## Bigger Context experiment
 
-Both launcher profiles expose **Bigger Context (experimental)** in Settings. It is disabled by
-default. The switch updates the profile's canonical runtime configuration through the normal setup
+Both launcher profiles expose **Bigger Context (experimental)** in Settings. It is enabled by
+default for new eligible automatic Sol profiles (Plus and Pro); Luna/Think and Zero Risk use standard
+context. An existing saved `false` preference stays off until explicitly enabled. The switch updates
+the profile's canonical runtime configuration through the normal setup
 transaction; it is not a launcher-only preference. Production setup also rewrites the managed
 Codex model catalog with 3x context and auto-compaction thresholds and asks you to restart Codex.
 The DEV CLI reads the same setting from its isolated runtime configuration on each command.

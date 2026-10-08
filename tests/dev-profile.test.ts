@@ -32,7 +32,7 @@ test("DEV profile paths isolate browser, Codex, config, chat, and runtime state"
   });
 });
 
-test("Bigger Context is disabled by default and read from the isolated DEV runtime config", () => {
+test("Bigger Context defaults on for eligible configured DEV profiles and respects opt-out", () => {
   const root = mkdtempSync(join(tmpdir(), "codex-web-gpt-dev-features-"));
   try {
     const paths = resolveDevProfilePaths({
@@ -41,6 +41,16 @@ test("Bigger Context is disabled by default and read from the isolated DEV runti
     });
     expect(readDevChatExperimentalFeatures(paths)).toEqual({ biggerContext: false });
     mkdirSync(paths.home, { recursive: true });
+    writeFileSync(paths.configPath, JSON.stringify({ version: 3, solAvailable: true }));
+    expect(readDevChatExperimentalFeatures(paths)).toEqual({ biggerContext: true });
+    writeFileSync(paths.configPath, JSON.stringify({ version: 3, solAvailable: false }));
+    expect(readDevChatExperimentalFeatures(paths)).toEqual({ biggerContext: false });
+    writeFileSync(paths.configPath, JSON.stringify({ version: 3, browserInteractionMode: "manual" }));
+    expect(readDevChatExperimentalFeatures(paths)).toEqual({ biggerContext: false });
+    writeFileSync(paths.configPath, JSON.stringify({ version: 3, experimentalSemanticLogicalWindow: true }));
+    expect(readDevChatExperimentalFeatures(paths)).toEqual({ biggerContext: false });
+    writeFileSync(paths.configPath, JSON.stringify({ version: 3, experimentalBiggerContext: false }));
+    expect(readDevChatExperimentalFeatures(paths)).toEqual({ biggerContext: false });
     writeFileSync(paths.configPath, JSON.stringify({
       version: 3,
       experimentalBiggerContext: true,

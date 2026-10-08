@@ -580,6 +580,11 @@ export async function setup(options: SetupOptions): Promise<SetupResult> {
   config.solAvailable = solAvailable === true;
   config.extraHighAvailable = config.solAvailable && extraHighAvailable === true;
   config.proAvailable = config.solAvailable && proAvailable === true;
+  // Account capabilities are known only after login/probe. A fresh Luna/Think
+  // profile quietly uses standard context; a saved or explicit opt-in must still fail.
+  if (!existing && options.experimentalBiggerContext === undefined && !config.solAvailable) {
+    config.experimentalBiggerContext = false;
+  }
   if (config.experimentalBiggerContext && !config.solAvailable) {
     throw new Error(CHATGPT_WEB_LUNA_BIGGER_CONTEXT_ERROR);
   }
@@ -696,6 +701,9 @@ export async function setupDevProfile(options: SetupOptions): Promise<DevProfile
     config.proAvailable = capabilities.solAvailable && capabilities.proAvailable;
   }
 
+  if (!existing && options.experimentalBiggerContext === undefined && !config.solAvailable) {
+    config.experimentalBiggerContext = false;
+  }
   if (config.experimentalBiggerContext && !config.solAvailable) {
     throw new Error(CHATGPT_WEB_LUNA_BIGGER_CONTEXT_ERROR);
   }

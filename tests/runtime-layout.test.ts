@@ -99,6 +99,7 @@ test("default setup uses the fixed production connector identities", () => {
   expect(defaultConfig("full").manualAppName).toBe(ZERO_RISK_CHATGPT_CONNECTOR_NAME);
   expect(defaultConfig("full").subagentProtocol).toBe("compatibility-v1");
   expect(defaultConfig("full").browserInteractionMode).toBe("automatic");
+  expect(defaultConfig("full").experimentalBiggerContext).toBe(true);
   expect(defaultConfig("full").zeroRiskProEnabled).toBe(false);
 });
 
@@ -178,11 +179,13 @@ test("existing v3 configurations deterministically retain automatic browser inte
   const legacyV3: Record<string, unknown> = { ...defaultConfig("browser-only") };
   delete legacyV3.browserInteractionMode;
   delete legacyV3.zeroRiskProEnabled;
+  delete legacyV3.experimentalBiggerContext;
   writeFileSync(join(root, "config.json"), `${JSON.stringify(legacyV3)}\n`);
 
   expect(loadConfig()).toMatchObject({
     browserInteractionMode: "automatic",
     zeroRiskProEnabled: false,
+    experimentalBiggerContext: true,
   });
   expect(loadConfigForSetup()).toMatchObject({
     appName: CHATGPT_CONNECTOR_NAME,
@@ -388,7 +391,7 @@ test("stored names survive config loading without an additional naming preferenc
     ...resolveInteractionConnectorIdentities("automatic", "production", {}, "Work"),
   };
   for (const mode of ["automatic", "manual"] as const) {
-    Object.assign(config, { browserInteractionMode: mode }, resolveInteractionConnectorIdentities(mode, "production", config));
+    Object.assign(config, { browserInteractionMode: mode, experimentalBiggerContext: mode === "automatic" }, resolveInteractionConnectorIdentities(mode, "production", config));
     writeFileSync(join(root, "config.json"), JSON.stringify(config));
     expect(loadConfig().appName).toBe(mode === "manual" ? "Codex Zero Risk" : "Codex Work");
     expect(loadConfigForSetup().automaticAppName).toBe("Codex Work");

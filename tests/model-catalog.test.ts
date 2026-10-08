@@ -53,6 +53,7 @@ describe("native /models augmentation", () => {
     const native = source();
     const nativeSnapshot = structuredClone(native);
     const config = defaultConfig("full");
+    config.experimentalBiggerContext = false;
     config.subagentProtocol = "native";
     config.extraHighAvailable = true;
     config.proAvailable = true;
@@ -203,6 +204,7 @@ describe("native /models augmentation", () => {
 
   test("owns only its namespace, is idempotent, and omits Pro-only modes when unavailable", () => {
     const config = defaultConfig("browser-only");
+    config.experimentalBiggerContext = false;
     config.subagentProtocol = "native";
     config.proAvailable = false;
     config.extraHighAvailable = true;
@@ -260,6 +262,7 @@ describe("native /models augmentation", () => {
 
   test("Zero Risk publishes exactly one generic model without capability inference", () => {
     const config = defaultConfig("full");
+    config.experimentalBiggerContext = false;
     config.browserInteractionMode = "manual";
     config.solAvailable = false;
     config.proAvailable = false;
@@ -297,6 +300,7 @@ describe("native /models augmentation", () => {
     const native = source();
     const nativeSnapshot = structuredClone(native);
     const config = defaultConfig("full");
+    config.experimentalBiggerContext = false;
     config.subagentProtocol = "native";
     const result = augmentNativeModelCatalog(native, config, {
       contextWindow: 371_851,
