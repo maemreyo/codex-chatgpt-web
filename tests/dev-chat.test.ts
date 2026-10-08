@@ -172,6 +172,7 @@ test("Zero Risk DEV chats open only the generic route", () => {
   const config = {
     ...defaultConfig("full"),
     browserInteractionMode: "manual" as const,
+    experimentalBiggerContext: false,
   };
   const driver = new DevChatDriver(
     config,
@@ -203,7 +204,7 @@ test("an existing DEV chat changes route only when the user explicitly requests 
   store.save(original);
 
   const manual = new DevChatDriver(
-    { ...defaultConfig("full"), browserInteractionMode: "manual" },
+    { ...defaultConfig("full"), browserInteractionMode: "manual", experimentalBiggerContext: false },
     store,
     (_provider: CodexProviderConfig): ProviderAdapter => {
       throw new Error("adapter is not needed to open a DEV chat");
@@ -227,6 +228,7 @@ test("Bigger Context triples the DEV compaction window and fails closed for Luna
     purpose: "dev-harness" as const,
     solAvailable: true,
     extraHighAvailable: true, proAvailable: true,
+    experimentalBiggerContext: false,
   };
   const factory = (): ProviderAdapter => ({
     name: "dev-bigger-context-test",
@@ -446,7 +448,7 @@ test("DEV driver uses shared browser methods and its own broker while an unrelat
 
 test("synthetic fill crosses the production threshold and triggers the real compact handler", async () => {
   const root = scratch("cgw-dev-compact");
-  const config = defaultConfig("full");
+  const config = { ...defaultConfig("full"), experimentalBiggerContext: false };
   let compactRuns = 0;
   const factory = (): ProviderAdapter => ({
     name: "dev-compaction-test",

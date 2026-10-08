@@ -55,6 +55,7 @@ test("Responses Lite exposes native exec from the default functions namespace on
 
 test("Responses Lite native exec survives a complete server request as one custom call", async () => {
   const config = defaultConfig("full");
+  config.experimentalBiggerContext = false;
   config.solAvailable = false;
   config.proAvailable = false;
   const turnId = "turn_responses_lite_exec_regression";
