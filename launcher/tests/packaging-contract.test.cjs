@@ -27,8 +27,12 @@ test("the full verification gate audits launcher dependencies", () => {
 
 test("launcher publishes native packages for all supported desktop operating systems", () => {
   assert.equal(manifest.build.appId, "dev.zam.codexweb");
-  assert.equal(manifest.build.productName, "Zam Codex Web");
-  assert.equal(manifest.build.artifactName, "zam-codex-web-${version}-${os}-${arch}.${ext}");
+  assert.equal(manifest.build.productName, "Codex Web GPT");
+  assert.equal(manifest.build.artifactName, "codex-web-gpt-${version}-${os}-${arch}.${ext}");
+  const updater = fs.readFileSync(path.join(launcherRoot, "electron", "update.cjs"), "utf8");
+  const updateWorker = fs.readFileSync(path.join(launcherRoot, "electron", "update-worker.cjs"), "utf8");
+  assert.ok(updater.includes('Contents", "MacOS", "Codex Web GPT"'));
+  assert.ok(updateWorker.includes('Contents", "MacOS", "Codex Web GPT"'));
   assert.deepEqual(manifest.build.mac.target, ["dmg", "zip"]);
   assert.deepEqual(
     manifest.build.mac.signIgnore,

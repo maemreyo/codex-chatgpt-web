@@ -19,6 +19,8 @@ test("DEV launcher profile isolates every durable home from production", () => {
   });
 
   assert.equal(production.kind, "production");
+  assert.equal(production.userData, path.join(homeDir, "Library", "Application Support", "Codex Web GPT"));
+  assert.equal(production.displayName, "Zam Codex Web");
   assert.equal(development.kind, "development");
   assert.notEqual(development.coreHome, production.coreHome);
   assert.notEqual(development.codexHome, production.codexHome);

@@ -15,6 +15,35 @@ const koreanReadme = read("README.ko.md");
 const languages = require("../electron/languages.json");
 const appSource = read("launcher", "src", "App.tsx");
 
+test("Agents panel uses translated launcher dictionaries for every supported locale", () => {
+  const { copyFor, localizeAgentWarning, localizeAgentStatus } = loadI18nModule();
+  const panelSource = read("launcher", "src", "AgentManagerPanel.tsx");
+  assert.match(panelSource, /copyFor\(language\)/);
+  assert.match(appSource, /SectionHeading label=\{copy\.agentTitle\}/);
+  const english = copyFor("en");
+  const keys = Object.keys(english).filter(key => key.startsWith("agent"));
+  assert.ok(keys.includes("agentApply"));
+  assert.ok(keys.includes("agentRecover"));
+  assert.ok(keys.includes("agentRouteWarning"));
+  for (const language of Object.keys(languages)) {
+    const copy = copyFor(language);
+    for (const key of keys) {
+      assert.equal(typeof copy[key], "string", language + ": " + key);
+      assert.ok(copy[key].length > 0, language + ": " + key);
+      if (language !== "en") assert.notEqual(copy[key], english[key], language + ": " + key);
+    }
+    assert.ok(copy.agentCapacitySuggestion.includes("{count}"));
+    assert.ok(copy.agentCapacitySuggestion.includes("{current}"));
+    for (const key of ["agentWarningExternalConfig", "agentWarningWhitelist", "agentWarningPreview"]) {
+      assert.equal(localizeAgentWarning(copy, english[key]), copy[key]);
+    }
+    assert.equal(localizeAgentWarning(copy, "Unknown diagnostic"), "Unknown diagnostic");
+    assert.equal(localizeAgentStatus(copy, "externally-changed"), copy.agentStatusExternallyChanged);
+    assert.equal(localizeAgentStatus(copy, "managed"), copy.agentManaged);
+    assert.equal(localizeAgentStatus(copy, "unknown"), "unknown");
+  }
+});
+
 function loadI18nModule() {
   const source = read("launcher", "src", "i18n.ts");
   const output = ts.transpileModule(source, {

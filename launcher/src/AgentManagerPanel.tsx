@@ -1,85 +1,15 @@
 import { useEffect, useState } from "react";
+import { copyFor, localizeAgentStatus, localizeAgentWarning } from "./i18n";
+import type { Language } from "./types";
 import type { AgentManagerApi, AgentManagerInspection, AgentManagerPreview, AgentRoleEdit } from "./agent-manager-types";
-
-const en = {
-  title: "Agents & Runtime",
-  intro: "Inspect your existing Codex agents before adopting a managed workflow. Manual configuration is preserved until you approve a preview.",
-  reload: "Refresh",
-  current: "Current Codex agents",
-  unmanaged: "External",
-  managed: "Managed",
-  status: "Status",
-  model: "Model",
-  effort: "Effort",
-  threads: "Concurrent child threads",
-  preset: "Workflow preset",
-  balanced: "Balanced — one builder and a reviewer",
-  parallel: "Parallel — requires higher browser capacity",
-  enroll: "Register missing Zam agents using default templates",
-  preview: "Preview changes",
-  apply: "Apply preview",
-  restart: "Start a new Codex session for these changes to take effect.",
-  pending: "A recovery transaction needs attention. Applying another change is disabled.",
-  recover: "Recover unfinished changes",
-  noAgents: "No registered Zam roles found in the selected Codex profile.",
-  noChanges: "No file changes are needed.",
-  stale: "Preview expired after configuration changed. Refresh and preview again.",
-  edit: "Edit role settings",
-  roleEffort: "Reasoning effort",
-  roleSandbox: "Requested sandbox",
-  roleInstructions: "Developer instructions",
-  keep: "Keep existing",
-  permission: "Effective permissions: not verified (Codex may inherit broader access).",
-  capacitySuggestion: "Suggested browser capacity for this workflow: {count}. Current setting: {current}. Capacity changes take effect after a launcher restart.",
-  setCapacity: "Set suggested browser capacity",
-  modified: "Unsaved role edits are included in the next preview.",
-  routeWarning: "This role does not use the approved Web route. Confirm the Web route before applying edits.",
-  repairRoute: "Use approved ChatGPT Web model",
-};
-
-const vi: typeof en = {
-  title: "Agents & Runtime",
-  intro: "Kiểm tra các agent Codex đang dùng trước khi nhận quản lý. Cấu hình chỉnh tay được giữ nguyên cho đến khi bạn duyệt bản xem trước.",
-  reload: "Làm mới",
-  current: "Các agent Codex hiện tại",
-  unmanaged: "Bên ngoài",
-  managed: "Đang quản lý",
-  status: "Trạng thái",
-  model: "Model",
-  effort: "Effort",
-  threads: "Số child threads song song",
-  preset: "Preset workflow",
-  balanced: "Balanced — một builder và reviewer",
-  parallel: "Parallel — yêu cầu browser capacity cao hơn",
-  enroll: "Đăng ký Zam agents còn thiếu bằng các template mặc định",
-  preview: "Xem trước thay đổi",
-  apply: "Áp dụng bản xem trước",
-  restart: "Hãy mở session Codex mới để cấu hình có hiệu lực.",
-  pending: "Có transaction cần khôi phục. Tạm khóa Apply để tránh ghi đè.",
-  recover: "Khôi phục thay đổi chưa hoàn tất",
-  noAgents: "Không tìm thấy Zam agent đã đăng ký trong hồ sơ Codex này.",
-  noChanges: "Không có file nào cần thay đổi.",
-  stale: "Bản xem trước đã hết hạn do cấu hình thay đổi. Hãy tải và xem lại.",
-  edit: "Chỉnh cấu hình role",
-  roleEffort: "Mức suy luận",
-  roleSandbox: "Sandbox yêu cầu",
-  roleInstructions: "Developer instructions",
-  keep: "Giữ nguyên",
-  permission: "Quyền thực tế: chưa xác minh (Codex có thể kế thừa quyền rộng hơn).",
-  capacitySuggestion: "Browser capacity gợi ý cho workflow này: {count}. Đang đặt: {current}. Cần khởi động lại Launcher để áp dụng thay đổi.",
-  setCapacity: "Đặt browser capacity gợi ý",
-  modified: "Các chỉnh sửa role được đưa vào bản xem trước tiếp theo.",
-  routeWarning: "Role này chưa dùng Web route được duyệt. Hãy xác nhận Web route trước khi Apply.",
-  repairRoute: "Chuyển sang model ChatGPT Web được duyệt",
-};
 
 export function AgentManagerPanel({ api, language = "en", browserCapacity, onSetBrowserCapacity }: {
   api: AgentManagerApi;
-  language?: string;
+  language?: Language;
   browserCapacity?: number;
   onSetBrowserCapacity?: (value: number) => Promise<void>;
 }) {
-  const copy = language === "vi" ? vi : en;
+  const copy = copyFor(language);
   const [inspection, setInspection] = useState<AgentManagerInspection | null>(null);
   const [preset, setPreset] = useState<"balanced" | "parallel">("balanced");
   const [maxConcurrentThreads, setMaxConcurrentThreads] = useState(4);
@@ -128,7 +58,7 @@ export function AgentManagerPanel({ api, language = "en", browserCapacity, onSet
     setPreview(null);
     try {
       if (!Number.isInteger(maxConcurrentThreads) || maxConcurrentThreads < 1 || maxConcurrentThreads > 8) {
-        throw new Error("Concurrent threads must be an integer from 1 to 8");
+        throw new Error(copy.agentThreadsValidation);
       }
       setPreview(await api.preview({
         preset, maxConcurrentThreads, enrollMissingRoles,
@@ -174,29 +104,29 @@ export function AgentManagerPanel({ api, language = "en", browserCapacity, onSet
   };
 
   return (
-    <section aria-label={copy.title} className="settings-list" style={{ marginTop: 24 }}>
-      <h2>{copy.title}</h2>
-      <p>{copy.intro}</p>
+    <section aria-label={copy.agentTitle} className="settings-list" style={{ marginTop: 24 }}>
+      <h2>{copy.agentTitle}</h2>
+      <p>{copy.agentIntro}</p>
       <div className="manual-turn-actions">
-        <button disabled={busy} onClick={() => void refresh()} type="button">{copy.reload}</button>
+        <button disabled={busy} onClick={() => void refresh()} type="button">{copy.agentReload}</button>
       </div>
       {inspection && <>
-        <p><strong>{copy.current}</strong> — <code>{inspection.codexHome}</code></p>
-        {inspection.roles.length === 0 ? <p>{copy.noAgents}</p> : (
+        <p><strong>{copy.agentCurrent}</strong> — <code>{inspection.codexHome}</code></p>
+        {inspection.roles.length === 0 ? <p>{copy.agentNoAgents}</p> : (
           <div>
             {inspection.roles.map((role) => (
               <div className="diagnostic-row" key={`${role.scope}:${role.name}`}>
                 <div>
                   <strong>{role.name}</strong>
-                  <small>{copy.model}: {role.model} · {copy.effort}: {role.reasoningEffort ?? "—"}</small>
-                  <small>{copy.status}: {role.status} · {role.managed ? copy.managed : copy.unmanaged}</small>
+                  <small>{copy.agentModel}: {role.model} · {copy.agentEffort}: {role.reasoningEffort ?? "—"}</small>
+                  <small>{copy.agentStatus}: {localizeAgentStatus(copy, role.status)} · {role.managed ? copy.agentManaged : copy.agentUnmanaged}</small>
                   <small><code>{role.configPath}</code></small>
                 </div>
                 {role.configPath !== "—" && <details>
-                  <summary>{copy.edit}</summary>
-                  <p>{copy.permission}</p>
+                  <summary>{copy.agentEdit}</summary>
+                  <p>{copy.agentPermission}</p>
                   {role.policy !== "web-only" && <>
-                    <p role="alert">{copy.routeWarning}</p>
+                    <p role="alert">{copy.agentRouteWarning}</p>
                     <label>
                       <input type="checkbox" disabled={busy}
                         checked={roleEdits[role.name]?.model === "chatgpt-web/gpt-6-sol"}
@@ -211,77 +141,77 @@ export function AgentManagerPanel({ api, language = "en", browserCapacity, onSet
                             setPreview(null);
                           }
                         }} />
-                      {copy.repairRoute}
+                      {copy.agentRepairRoute}
                     </label>
                   </>}
-                  <label style={{ display: "block" }}>{copy.roleEffort}
+                  <label style={{ display: "block" }}>{copy.agentRoleEffort}
                     <select disabled={busy} value={roleEdits[role.name]?.reasoningEffort ?? ""}
                       onChange={event => editRole(role.name, "reasoningEffort", event.target.value)}>
-                      <option value="">{copy.keep} ({role.reasoningEffort ?? "—"})</option>
+                      <option value="">{copy.agentKeep} ({role.reasoningEffort ?? "—"})</option>
                       <option value="medium">medium</option>
                       <option value="high">high</option>
                     </select>
                   </label>
-                  <label style={{ display: "block" }}>{copy.roleSandbox}
+                  <label style={{ display: "block" }}>{copy.agentRoleSandbox}
                     <select disabled={busy} value={roleEdits[role.name]?.sandboxMode ?? ""}
                       onChange={event => editRole(role.name, "sandboxMode", event.target.value)}>
-                      <option value="">{copy.keep} ({role.sandboxMode ?? "—"})</option>
+                      <option value="">{copy.agentKeep} ({role.sandboxMode ?? "—"})</option>
                       <option value="read-only">read-only</option>
                       {role.name === "zam-builder" && <option value="workspace-write">workspace-write</option>}
                     </select>
                   </label>
-                  <label style={{ display: "block" }}>{copy.roleInstructions}
+                  <label style={{ display: "block" }}>{copy.agentRoleInstructions}
                     <textarea disabled={busy} rows={5} style={{ display: "block", width: "100%" }}
                       value={roleEdits[role.name]?.developerInstructions ?? role.developerInstructions ?? ""}
                       onChange={event => editRole(role.name, "developerInstructions", event.target.value)} />
                   </label>
-                  {roleEdits[role.name] && <small>{copy.modified}</small>}
+                  {roleEdits[role.name] && <small>{copy.agentModified}</small>}
                 </details>}
               </div>
             ))}
           </div>
         )}
-        {inspection.warnings.map((warning, i) => <p key={i} role="status">{warning}</p>)}
+        {inspection.warnings.map((warning, i) => <p key={i} role="status">{localizeAgentWarning(copy, warning)}</p>)}
         {inspection.pendingRecovery && <>
-          <p role="alert">{copy.pending}</p>
-          <button disabled={busy} onClick={() => void recover()} type="button">{copy.recover}</button>
+          <p role="alert">{copy.agentPending}</p>
+          <button disabled={busy} onClick={() => void recover()} type="button">{copy.agentRecover}</button>
         </>}
         <label style={{ display: "block", marginTop: 12 }}>
-          {copy.preset}
+          {copy.agentPreset}
           <select disabled={busy} value={preset} onChange={(event) => {
             const next = event.target.value as typeof preset;
             setPreset(next);
             setMaxConcurrentThreads(next === "parallel" ? 6 : 4);
             setPreview(null);
           }}>
-            <option value="balanced">{copy.balanced}</option>
-            <option value="parallel">{copy.parallel}</option>
+            <option value="balanced">{copy.agentBalanced}</option>
+            <option value="parallel">{copy.agentParallel}</option>
           </select>
         </label>
         {browserCapacity !== undefined && <p role="status">
-          {copy.capacitySuggestion.replace("{count}", String(suggestedCapacity)).replace("{current}", String(browserCapacity))}
+          {copy.agentCapacitySuggestion.replace("{count}", String(suggestedCapacity)).replace("{current}", String(browserCapacity))}
           {browserCapacity !== suggestedCapacity && onSetBrowserCapacity && <button type="button" disabled={busy}
             onClick={() => { void onSetBrowserCapacity(suggestedCapacity).catch(cause => setError(String(cause))); }}>
-            {copy.setCapacity}
+            {copy.agentSetCapacity}
           </button>}
         </p>}
         <label style={{ display: "block", marginTop: 12 }}>
-          {copy.threads}
+          {copy.agentThreads}
           <input disabled={busy} type="number" min={1} max={8} step={1} value={maxConcurrentThreads}
             onChange={(event) => { setMaxConcurrentThreads(Number(event.target.value)); setPreview(null); }} />
         </label>
         <label style={{ display: "block", marginTop: 12 }}>
           <input type="checkbox" checked={enrollMissingRoles} disabled={busy}
             onChange={(event) => { setEnrollMissingRoles(event.target.checked); setPreview(null); }} />
-          {copy.enroll}
+          {copy.agentEnroll}
         </label>
         <div className="manual-turn-actions" style={{ marginTop: 12 }}>
-          <button disabled={busy || inspection.pendingRecovery} onClick={() => void createPreview()} type="button">{copy.preview}</button>
+          <button disabled={busy || inspection.pendingRecovery} onClick={() => void createPreview()} type="button">{copy.agentPreview}</button>
         </div>
       </>}
-      {preview && <div aria-label={copy.preview}>
-        {preview.warnings.map((warning, i) => <p key={i} role="status">{warning}</p>)}
-        {preview.changes.length === 0 ? <p>{copy.noChanges}</p> : preview.changes.map((item) => (
+      {preview && <div aria-label={copy.agentPreview}>
+        {preview.warnings.map((warning, i) => <p key={i} role="status">{localizeAgentWarning(copy, warning)}</p>)}
+        {preview.changes.length === 0 ? <p>{copy.agentNoChanges}</p> : preview.changes.map((item) => (
           <details key={item.path} open>
             <summary><code>{item.path}</code></summary>
             <p>{item.operation}: {item.changedKeys.join(", ")}</p>
@@ -289,11 +219,11 @@ export function AgentManagerPanel({ api, language = "en", browserCapacity, onSet
         ))}
         <div className="manual-turn-actions">
           <button disabled={busy || inspection?.pendingRecovery === true || preview.changes.length === 0}
-            onClick={() => void apply()} type="button">{copy.apply}</button>
+            onClick={() => void apply()} type="button">{copy.agentApply}</button>
         </div>
       </div>}
-      {restart && <p role="status">{copy.restart}</p>}
-      {error && <p role="alert">{error.includes("stale") ? copy.stale : error}</p>}
+      {restart && <p role="status">{copy.agentRestart}</p>}
+      {error && <p role="alert">{error.includes("stale") ? copy.agentStale : error}</p>}
     </section>
   );
 }

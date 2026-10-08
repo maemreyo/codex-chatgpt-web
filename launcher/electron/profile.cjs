@@ -28,7 +28,7 @@ function resolveLauncherProfile({
       : path.join(homeDir, ".codex-chatgpt-web");
     const userData = env.CODEX_WEB_GPT_LAUNCHER_DATA_DIR?.trim()
       ? resolveUserPath(env.CODEX_WEB_GPT_LAUNCHER_DATA_DIR.trim(), homeDir)
-      : path.join(appData, "Zam Codex Web");
+      : path.join(appData, "Codex Web GPT");
     return {
       kind: PRODUCTION_PROFILE,
       displayName: "Zam Codex Web",

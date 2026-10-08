@@ -1957,7 +1957,7 @@ function SettingsSurface({
         </SettingRow>
       </div>
 
-      <SectionHeading label="Agents & Runtime" spaced />
+      <SectionHeading label={copy.agentTitle} spaced />
       <div className="settings-list">
         <SettingRow body={capacityBody} label={copy.browserCapacityTitle}>
           <select
