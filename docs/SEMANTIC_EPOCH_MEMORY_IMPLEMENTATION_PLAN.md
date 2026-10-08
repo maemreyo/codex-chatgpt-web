@@ -7,7 +7,7 @@ Fork: `maemreyo/codex-chatgpt-web`
 Upstream: `miuuyy/codex-chatgpt-web`
 Upstream baseline: `92a356f` (`v6.1.5`); design originally reviewed against `b6ca2d3` (`v6.1.4`)
 Current fork candidate: `fdb15ff` (`feat: scaffold semantic epoch memory safely`), not yet merged with `v6.1.5`
-Visibility: hidden, unadvertised, config-file-only experiment (section 5.8). Not a quota or rate-limit feature.
+Visibility: local opt-in experiment in launcher Settings (section 5.8). Not a quota or rate-limit feature.
 
 ## 1. Review purpose
 
@@ -331,17 +331,20 @@ Codex backend. This project makes **no claim** about account-side quota, billing
 semantics, in either direction, in code comments, docs, logs, or UI. Routing tests assert routing,
 nothing more.
 
-### 5.8 Hidden, unadvertised, cost-bounded
+### 5.8 Local opt-in, unadvertised, cost-bounded
 
-This is a private experiment, not a product feature. It must not be discoverable or promoted:
+The owner approved an early Settings opt-in on 2026-10-09 to gather real evidence before S8.
+Only the SEM projection toggle is exposed in the launcher's Experimental Features card;
+the dedicated Web compactor and ~240k logical window remain independent hidden gates.
+The experiment must not be promoted:
 
-- configuration is file-only (`experimentalSemanticMemory`, and the separate compactor setting); no
-  launcher Settings control, no `setup` CLI flag or prompt, no `doctor` advertisement, no model
+- configuration is persisted to the existing runtime config from a local launcher Settings switch;
+  no `setup` CLI flag or prompt, no `doctor` advertisement, no model
   catalog or model-picker label that mentions it;
 - the logical ~240k catalog value applies only when the flag is on; the default catalog is unchanged
   and no shipped display name, description or release note refers to it;
-- no mention in `README*`, `TROUBLESHOOTING.md`, `CONTRIBUTING.md`, launcher copy, or release notes.
-  The design docs stay under `docs/` and are not linked from any of those;
+- the Settings card describes the local experimental SEM projection and explains its prerequisites.
+  Neither the 240k logical-window gate nor the dedicated compactor is available there;
 - wording in docs, comments, log lines and tests describes **context and memory management** only.
   Do not use "quota", "free", "unlimited", or "bypass" language, including in negative marketing
   phrasing. This plan names those words only to prohibit them elsewhere. It matches upstream's own
@@ -1862,7 +1865,7 @@ Process:
 - the invariant-19 and stock-install tests are the automated tripwire for those silent breaks and run
   on every merge;
 - the provenance sidecar stays additive and private so upstream parser fixes remain mergeable;
-- keep the feature default-off and hidden until S8 acceptance is repeatable, and keep it hidden
+- keep the feature default-off on fresh installs with explicit Settings opt-in until S8 acceptance is repeatable, and keep S8 hidden
   after (section 5.8).
 
 Merge and implementation log:

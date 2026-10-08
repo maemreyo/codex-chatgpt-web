@@ -3216,6 +3216,13 @@ code {
 .settings-card .diagnostic-row { border-bottom: 1px solid var(--color-border-light); }
 .settings-card .diagnostic-row:last-of-type { border-bottom: 0; }
 
+.settings-experiments-note {
+  margin: 6px 0 14px;
+  color: var(--color-text-tertiary);
+  font-size: var(--text-sm);
+  line-height: 1.5;
+}
+
 .settings-runtime-card .agent-workflow-panel {
   background: var(--color-background-control);
 }

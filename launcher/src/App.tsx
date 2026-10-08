@@ -1771,6 +1771,17 @@ function SettingsSurface({
       setBusy(false);
     }
   };
+  const setSemanticMemory = async (enabled: boolean) => {
+    setBusy(true);
+    setError(null);
+    try {
+      updateState(await api!.setSemanticMemory(enabled));
+    } catch (cause) {
+      setError(messageOf(cause));
+    } finally {
+      setBusy(false);
+    }
+  };
   const setSkillAttachments = async (enabled: boolean) => {
     setBusy(true);
     setError(null);
@@ -1985,6 +1996,22 @@ function SettingsSurface({
           <LanguageMenu copy={copy} language={language} onChange={(next) => void updateLanguage(next)} />
         </SettingRow>
           </div>
+        </section>
+        <section className="settings-card settings-experiments-card" aria-label={copy.experimentalFeatures}>
+          <SectionHeading label={copy.experimentalFeatures} />
+          <p className="settings-experiments-note">{copy.experimentalFeaturesBody}</p>
+          <div className="settings-list">
+            <SettingRow body={snapshot.state.browserInteractionMode === "manual"
+              ? copy.semanticMemoryUnavailable : copy.semanticMemoryBody} label={copy.semanticMemory}>
+              <Switch
+                checked={snapshot.state.experimentalSemanticMemory}
+                disabled={busy || snapshot.state.browserInteractionMode === "manual"
+                  || snapshot.state.coreSetupComplete !== true}
+                onChange={checked => void setSemanticMemory(checked)}
+              />
+            </SettingRow>
+          </div>
+          <p className="settings-experiments-note" role="status">{copy.semanticLogicalWindowPending}</p>
         </section>
         <section className="settings-card settings-diagnostics-card" aria-label={copy.diagnostics}>
           <SectionHeading label={copy.diagnostics} />

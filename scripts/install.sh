@@ -2,7 +2,9 @@
 set -eu
 
 REPOSITORY="${CODEX_CHATGPT_WEB_REPOSITORY:-miuuyy/codex-chatgpt-web}"
-VERSION="${CODEX_CHATGPT_WEB_VERSION:-6.1.8-rc.1}"
+# The fork's rc.2 is currently a macOS launcher preview, not a CLI tarball release.
+# Keep the terminal-only installer on the published upstream version by default.
+VERSION="${CODEX_CHATGPT_WEB_VERSION:-6.1.5}"
 BIN_DIR="${CODEX_CHATGPT_WEB_BIN_DIR:-$HOME/.local/bin}"
 LIB_DIR="${CODEX_CHATGPT_WEB_LIB_DIR:-$HOME/.local/lib/codex-chatgpt-web}"
 DOC_DIR="${CODEX_CHATGPT_WEB_DOC_DIR:-$HOME/.local/share/doc/codex-chatgpt-web}"
