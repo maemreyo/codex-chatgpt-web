@@ -151,6 +151,7 @@ test("real Responses compaction adapter rejects cap exhaustion with 409 before a
     prompt.release();
     submissions++;
     turn.onSubmitted?.();
+    turn.onTextDelta("Verified compaction summary");
     return "Verified compaction summary";
   };
   const config = defaultConfig("full");
