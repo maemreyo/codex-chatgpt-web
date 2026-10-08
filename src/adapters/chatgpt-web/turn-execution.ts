@@ -140,6 +140,9 @@ export class ChatGptTextFeed {
 }
 
 interface ChatGptTurnRuntimeBase {
+  /** Shared process-local physical-pressure estimate for one retained semantic epoch. */
+  semanticOccupancy?: import("./semantic-occupancy").SemanticEpochOccupancy;
+  semanticThreadHash?: string;
   browser: Promise<string>;
   /** Physical helper/Playwright settlement, including the launcher end/release acknowledgement. */
   physicalSettlement: Promise<void>;
@@ -598,6 +601,29 @@ export class ChatGptTurnSessions {
     const session = this.entries.get(key);
     session?.touch();
     return session;
+  }
+
+  /** A compactor may run at a different model/effort from its source turn.
+   * Resolve only by the canonical source instruction and native thread/turn
+   * identity. An ambiguous source is never safe to settle. */
+  findExactCompactionSource(parsed: CodexParsedRequest): ChatGptTurnSession | undefined {
+    const identity = extractChatGptTurnIdentity(parsed);
+    if (!identity.threadId) return undefined;
+    const source = extractChatGptCompactionSourceRevision(parsed);
+    if (!source.turnId) return undefined;
+    const instruction = createHash("sha256")
+      .update(JSON.stringify([source.itemId ?? null, source.content])).digest("hex");
+    const matches = [...new Set(this.entries.values())].filter(session => (
+      session.nativeThreadId === identity.threadId
+      && session.nativeTurnId === source.turnId
+      && session.instruction === instruction
+    ));
+    if (matches.length > 1) {
+      throw new Error("Canonical compaction source matches multiple browser sessions");
+    }
+    const found = matches[0];
+    found?.touch();
+    return found;
   }
 
   findConversationHead(conversationKey: string): ChatGptTurnSession | undefined {

@@ -211,6 +211,16 @@ export function resolveChatGptWebContextLimits(
   capabilities: ChatGptWebAccountCapabilities,
   modelFamily?: ChatGptWebModelFamily,
 ): ChatGptWebContextLimits {
+  if (capabilities.experimentalSemanticLogicalWindow === true
+    && capabilities.experimentalSemanticMemory === true
+    && capabilities.experimentalWebCompactor === true
+    && !capabilities.experimentalBiggerContext
+    && capabilities.browserInteractionMode !== "manual"
+    && backendModel === CHATGPT_WEB_BACKEND_MODEL
+    && (effort === "medium" || effort === "high" || effort === "xhigh")
+    && (modelFamily === "5.6" || modelFamily === "6")) {
+    return contextLimits(240_000, 220_000);
+  }
   return resolveChatGptWebPhysicalContextLimits(backendModel, effort, capabilities, modelFamily);
 }
 
@@ -325,6 +335,8 @@ export interface ChatGptWebAccountCapabilities {
   proAvailable: boolean;
   experimentalBiggerContext?: boolean;
   experimentalSemanticMemory?: boolean;
+  experimentalWebCompactor?: boolean;
+  experimentalSemanticLogicalWindow?: boolean;
   browserInteractionMode?: "automatic" | "manual";
   zeroRiskProEnabled?: boolean;
 }

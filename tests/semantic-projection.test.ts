@@ -7,6 +7,7 @@ import {
   projectSemanticEpoch,
 } from "../src/adapters/chatgpt-web/semantic-projection";
 import { parseRequest } from "../src/responses/parser";
+import { COMPACT_PROMPT } from "../src/responses/compaction";
 
 const capabilities = { localToolsEnabled: true, solAvailable: true, extraHighAvailable: true, proAvailable: true };
 
@@ -128,9 +129,40 @@ test("retained conversation identity changes only when semantic epoch changes", 
   expect(chatGptConversationKey(parsed, namespace, { semanticEpoch: 2 })).not.toBe(epochOne);
 });
 
+test("a recreated epoch cannot attach to an older retained conversation with the same counter", () => {
+  const parsed = semanticRequest();
+  const namespace = "semantic-test-namespace";
+  const first = buildSemanticTier0Candidate(parsed, "5.6", undefined, 1000).candidate!;
+  const recreated = buildSemanticTier0Candidate(parsed, "5.6", undefined, 2000).candidate!;
+  expect(first.semanticEpoch).toBe(recreated.semanticEpoch);
+  expect(first.coveredHistoryDigest).toBe(recreated.coveredHistoryDigest);
+
+  const keyFor = (epoch: typeof first) => chatGptConversationKey(parsed, namespace, {
+    semanticEpoch: epoch.semanticEpoch,
+    semanticEpochIdentity: `${epoch.updatedAt}:${epoch.coveredHistoryDigest}`,
+  });
+  expect(keyFor(first)).toBe(keyFor(first));
+  expect(keyFor(recreated)).not.toBe(keyFor(first));
+});
+
 test("semantic projection rejects an epoch from a different current model family", () => {
   const parsed = semanticRequest();
   const candidate = buildSemanticTier0Candidate(parsed, "5.6", undefined, 1234).candidate!;
   parsed._chatgptModelFamily = "6";
   expect(() => projectSemanticEpoch(parsed, candidate)).toThrow("model-family mismatch");
+});
+
+test("canonical compaction accepts an older task epoch while retaining exact policy and compact instruction", () => {
+  const parsed = semanticRequest();
+  const candidate = buildSemanticTier0Candidate(parsed, "5.6", undefined, 1234).candidate!;
+  parsed._compactionRequest = true;
+  parsed._chatgptModelFamily = "6";
+  parsed.context.messages.push({ role: "user", content: COMPACT_PROMPT, timestamp: 0 });
+  const projected = projectSemanticEpoch(parsed, candidate);
+  expect(projected.parsed._rawBody).toBe(parsed._rawBody);
+  expect(projected.parsed.context.messages.at(-1)?.content).toBe(COMPACT_PROMPT);
+  expect(projected.parsed.context.messages.some(message => message.role === "developer"
+    && message.content === "Repository policy stays active.")).toBeTrue();
+  expect(projected.parsed.context.messages.find(message => message.role === "toolResult"
+    && message.toolCallId === "call_old")?.content).toContain("[tool result omitted:");
 });

@@ -2,6 +2,7 @@ import {
   resolveChatGptWebPhysicalContextLimits,
 } from "../../chatgpt-web-models";
 import type { CodexMessage, CodexParsedRequest, CodexToolResultMessage } from "../../types";
+import { COMPACT_PROMPT } from "../../responses/compaction";
 import {
   extractSemanticArtifactLedger,
   renderSemanticArtifactLedger,
@@ -223,7 +224,9 @@ export function projectSemanticEpoch(
   if (!modelFamily) throw new Error("Semantic projection requires the current ChatGPT model family");
   const hashes = semanticEpochSourceHashes(parsed, epoch);
   validateSemanticEpochRecord(parsed, epoch, {
-    modelFamily,
+    // A dedicated Web compactor may use a different visible model family from
+    // the original task. The canonical thread/digest remains the authority.
+    modelFamily: parsed._compactionRequest ? epoch.modelFamily : modelFamily,
     ...hashes,
   });
   const cut = provenance.items.findIndex(item => item.ref === epoch.coveredThroughRef);
@@ -238,6 +241,11 @@ export function projectSemanticEpoch(
 
   parsed.context.messages.forEach((message, messageIndex) => {
     const refs = [...semanticMessageRefs(parsed, messageIndex)];
+    if (refs.length === 0 && parsed._compactionRequest
+      && message.role === "user" && message.content === COMPACT_PROMPT) {
+      suffixMessages.push(message);
+      return;
+    }
     if (refs.length === 0) throw new Error("Semantic projection message is missing canonical provenance");
     const positions = refs.map(ref => provenance.items.findIndex(item => item.ref === ref));
     if (positions.some(position => position < 0)) throw new Error("Semantic projection message ref is missing");
@@ -309,6 +317,12 @@ export function preflightSemanticProjection(
     mode.localTools ? SEMANTIC_ESTIMATE_TURN_TOKEN : undefined,
     { experimentalSkillAttachments },
   );
+  if (projected._compactionRequest && compiled.trimmedCompactionMessages) {
+    // A missing or unverified checkpoint cannot turn an oversized canonical
+    // history into a superficially fitting compaction prompt by dropping old
+    // source messages. Recovery must keep the exact canonical evidence.
+    throw new Error("Semantic compaction preflight cannot discard canonical history");
+  }
   if (compiled.multipart) throw new Error("Semantic epoch preflight does not support Bigger Context");
   const estimatedInputTokens = estimateCompiledChatGptWebInputTokens(compiled, projected.modelId);
   const firstMessageTokens = estimateCompiledChatGptWebMessageTokens(compiled, projected.modelId);
