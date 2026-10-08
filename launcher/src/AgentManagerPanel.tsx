@@ -115,14 +115,14 @@ export function AgentManagerPanel({ api, language = "en", browserCapacity, onSet
         {inspection.roles.length === 0 ? <p>{copy.agentNoAgents}</p> : (
           <div>
             {inspection.roles.map((role) => (
-              <div className="diagnostic-row" key={`${role.scope}:${role.name}`}>
-                <div>
+              <div className="agent-role-row" key={`${role.scope}:${role.name}`}>
+                <div className="agent-role-summary">
                   <strong>{role.name}</strong>
                   <small>{copy.agentModel}: {role.model} · {copy.agentEffort}: {role.reasoningEffort ?? "—"}</small>
                   <small>{copy.agentStatus}: {localizeAgentStatus(copy, role.status)} · {role.managed ? copy.agentManaged : copy.agentUnmanaged}</small>
                   <small><code>{role.configPath}</code></small>
                 </div>
-                {role.configPath !== "—" && <details>
+                {role.configPath !== "—" && <details className="agent-role-details">
                   <summary>{copy.agentEdit}</summary>
                   <p>{copy.agentPermission}</p>
                   {role.policy !== "web-only" && <>
@@ -144,7 +144,7 @@ export function AgentManagerPanel({ api, language = "en", browserCapacity, onSet
                       {copy.agentRepairRoute}
                     </label>
                   </>}
-                  <label style={{ display: "block" }}>{copy.agentRoleEffort}
+                  <label className="agent-role-field">{copy.agentRoleEffort}
                     <select disabled={busy} value={roleEdits[role.name]?.reasoningEffort ?? ""}
                       onChange={event => editRole(role.name, "reasoningEffort", event.target.value)}>
                       <option value="">{copy.agentKeep} ({role.reasoningEffort ?? "—"})</option>
@@ -152,7 +152,7 @@ export function AgentManagerPanel({ api, language = "en", browserCapacity, onSet
                       <option value="high">high</option>
                     </select>
                   </label>
-                  <label style={{ display: "block" }}>{copy.agentRoleSandbox}
+                  <label className="agent-role-field">{copy.agentRoleSandbox}
                     <select disabled={busy} value={roleEdits[role.name]?.sandboxMode ?? ""}
                       onChange={event => editRole(role.name, "sandboxMode", event.target.value)}>
                       <option value="">{copy.agentKeep} ({role.sandboxMode ?? "—"})</option>
@@ -160,8 +160,8 @@ export function AgentManagerPanel({ api, language = "en", browserCapacity, onSet
                       {role.name === "zam-builder" && <option value="workspace-write">workspace-write</option>}
                     </select>
                   </label>
-                  <label style={{ display: "block" }}>{copy.agentRoleInstructions}
-                    <textarea disabled={busy} rows={5} style={{ display: "block", width: "100%" }}
+                  <label className="agent-role-field">{copy.agentRoleInstructions}
+                    <textarea disabled={busy} rows={6}
                       value={roleEdits[role.name]?.developerInstructions ?? role.developerInstructions ?? ""}
                       onChange={event => editRole(role.name, "developerInstructions", event.target.value)} />
                   </label>
