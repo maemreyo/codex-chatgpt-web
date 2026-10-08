@@ -1,4 +1,6 @@
 import { randomUUID } from "node:crypto";
+import { emitNativeToolDiagnostic } from "./mcp-observation";
+import { chatGptSafetyStatusTextVisible } from "./safety-status-observation";
 import { chmodSync, existsSync, mkdirSync, readdirSync, rmSync, statSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { skillFileTokens, validateSkillFiles } from "./skill-attachments";
@@ -5565,6 +5567,7 @@ export class ChatGptBrowserWorker {
       let sawRunning = false;
       let loggedCompletionWait = false;
       let capturedResponse = false;
+      let observedSafetyStatusText = false;
       const sentAt = Date.now();
       const visibleTrace = new ChatGptVisibleTraceTracker();
       const markdownBuffer = new ChatGptMarkdownBuffer(undefined, undefined, turn.compaction ? "complete" : "stream");
@@ -5718,6 +5721,13 @@ export class ChatGptBrowserWorker {
         const running = await stop.isVisible().catch(() => false);
         if (running) sawRunning = true;
         if (snapshot.responsePresent) {
+          // The assistant response can surface a blocked-call message even when no
+          // request reached local MCP. A text match is evidence of visible UI text
+          // only; it cannot establish which upstream layer made the decision.
+          if (mode.localTools && !observedSafetyStatusText && chatGptSafetyStatusTextVisible(snapshot.visibleText)) {
+            observedSafetyStatusText = true;
+            emitNativeToolDiagnostic({ stage: "browser_safety_text_visible", traceId: turn.traceId });
+          }
           if (!capturedResponse) {
             capturedResponse = true;
             await diagnostics.capture(page, "response-visible");

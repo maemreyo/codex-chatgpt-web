@@ -1,4 +1,39 @@
+import { createHash, randomBytes } from "node:crypto";
 import type { Transport } from "@modelcontextprotocol/sdk/shared/transport.js";
+
+// Per-process salt prevents sequential MCP protocol IDs from being linkable
+// across launcher sessions. Neither the ID nor the MCP arguments enter logs.
+const diagnosticSalt = randomBytes(16);
+
+export function mcpDiagnosticId(requestId: string | number): string {
+  return `diag_${createHash("sha256").update(diagnosticSalt).update(typeof requestId === "number" ? `n:${requestId}` : `s:${requestId}`).digest("hex").slice(0, 16)}`;
+}
+
+/** Fixed-schema lifecycle diagnostics. Never pass raw tool args, replies or error messages. */
+export interface NativeToolDiagnosticFields {
+  stage: string;
+  diagnosticId?: string;
+  traceId?: string;
+  callId?: string;
+  tool?: string;
+  outcome?: "ok" | "is_error" | "timeout" | "aborted" | "unclassified_error";
+  elapsedMs?: number;
+}
+
+let remoteSink: ((fields: NativeToolDiagnosticFields) => void) | undefined;
+
+/** A single MCP process can relay its bounded metadata to the daemon log. */
+export function setNativeToolDiagnosticSink(sink?: (fields: NativeToolDiagnosticFields) => void): void {
+  remoteSink = sink;
+}
+
+export function emitNativeToolDiagnostic(fields: NativeToolDiagnosticFields): void {
+  try {
+    // MCP uses stdout exclusively for JSON-RPC. Never write diagnostics there.
+    console.error(JSON.stringify({ event: "native_tool_diagnostic", ...fields }));
+  } catch { /* Logging must not alter MCP or Codex execution. */ }
+  try { remoteSink?.(fields); } catch { /* Preserve execution if the relay is unavailable. */ }
+}
 
 /** The model override only; prompts, names, items and other tool arguments stay private. */
 export function subagentModelObservation(wireName: string, args?: Record<string, unknown>) {
@@ -37,7 +72,7 @@ export function observeMcpToolCalls(
       } else {
         const call = { call: ++sequence, tool, started: performance.now() };
         pending.set(message.id, call);
-        emit({ event: "call_received", call: call.call, tool });
+        emit({ event: "call_received", call: call.call, diagnosticId: mcpDiagnosticId(message.id), tool });
       }
     }
     receive?.(message, extra);
@@ -51,14 +86,14 @@ export function observeMcpToolCalls(
       if (call) {
         const result = "result" in message ? message.result : undefined;
         emit({
-          event: "reply_sent", call: call.call, tool: call.tool,
+          event: "reply_sent", call: call.call, diagnosticId: mcpDiagnosticId(id!), tool: call.tool,
           elapsed_ms: Math.round(performance.now() - call.started),
           outcome: "error" in message ? "protocol_error" : "result",
           ...("result" in message ? { is_error: result?.isError === true } : {}),
         });
       }
     } catch (error) {
-      if (call) emit({ event: "reply_send_failed", call: call.call, tool: call.tool });
+      if (call) emit({ event: "reply_send_failed", call: call.call, diagnosticId: mcpDiagnosticId(id!), tool: call.tool });
       throw error;
     } finally {
       if (call && id !== undefined && id !== null) pending.delete(id);

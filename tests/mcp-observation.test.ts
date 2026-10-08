@@ -4,7 +4,8 @@ import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import type { Transport } from "@modelcontextprotocol/sdk/shared/transport.js";
 import * as z from "zod/v4";
-import { observeMcpToolCalls, subagentModelObservation } from "../src/adapters/chatgpt-web/mcp-observation";
+import { emitNativeToolDiagnostic, mcpDiagnosticId, observeMcpToolCalls, subagentModelObservation } from "../src/adapters/chatgpt-web/mcp-observation";
+import { chatGptSafetyStatusTextVisible } from "../src/adapters/chatgpt-web/safety-status-observation";
 
 test("subagent diagnostics distinguish an explicit model without exposing task arguments", () => {
   const privateText = "private task /Users/example/work sk-not-a-model";
@@ -53,12 +54,39 @@ test("MCP observations separate pre-handler validation and returned tool errors 
     expect(events.map(event => event.event)).toEqual(Array(3).fill(["call_received", "reply_sent"]).flat());
     expect(events.filter(event => event.event === "reply_sent").map(event => event.is_error)).toEqual([true, true, false]);
     expect(events.map(event => event.call)).toEqual([1, 1, 2, 2, 3, 3]);
+    for (let index = 0; index < events.length; index += 2) {
+      expect(events[index]?.diagnosticId).toBe(events[index + 1]?.diagnosticId);
+      expect(events[index]?.diagnosticId).toMatch(/^diag_[a-f0-9]{16}$/);
+    }
     expect(JSON.stringify(events)).not.toContain(secret);
     expect(JSON.stringify(events)).not.toContain("private_key");
     expect(JSON.stringify(events)).not.toContain("content");
   } finally {
     await client.close();
     await server.close();
+  }
+});
+
+test("diagnostic correlation is local, deterministic, and does not expose MCP request IDs", () => {
+  const requestId = "private-sequential-request-123";
+  expect(mcpDiagnosticId(requestId)).toBe(mcpDiagnosticId(requestId));
+  expect(mcpDiagnosticId(requestId)).not.toBe(mcpDiagnosticId(requestId + "-next"));
+  expect(mcpDiagnosticId(requestId)).not.toContain(requestId);
+});
+
+test("safety-status text is only a visible browser signal", () => {
+  expect(chatGptSafetyStatusTextVisible("This tool call was blocked by OpenAI because we couldn't determine the safety status of the request.")).toBeTrue();
+  expect(chatGptSafetyStatusTextVisible("Operation blocked by a Codex hook")).toBeFalse();
+  expect(chatGptSafetyStatusTextVisible("Tool request failed with isError")).toBeFalse();
+});
+
+test("failed diagnostic sink cannot interrupt the tool lifecycle", () => {
+  const original = console.error;
+  try {
+    console.error = () => { throw new Error("diagnostic sink unavailable"); };
+    expect(() => emitNativeToolDiagnostic({ stage: "handler_entered", diagnosticId: mcpDiagnosticId(42) })).not.toThrow();
+  } finally {
+    console.error = original;
   }
 });
 

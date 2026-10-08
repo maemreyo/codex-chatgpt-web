@@ -43,6 +43,80 @@ function toolResult(value: Record<string, unknown>): BrokerToolResult {
 }
 
 describe("Zero Risk turn broker lifecycle", () => {
+  test("MCP diagnostics relay only allowlisted fields into daemon logs", async () => {
+    const socketPath = endpoint("diagnostic-relay");
+    const broker = TurnBroker.forSocket(socketPath);
+    const logs: string[] = [];
+    const logger = spyOn(console, "error").mockImplementation((...args) => { logs.push(args.join(" ")); });
+    try {
+      await broker.listen();
+      const good = await callTurnBroker<{ observed: boolean }>(socketPath, {
+        method: "diagnostic_observe",
+        observation: {
+          stage: "mcp_ingress", diagnosticId: "diag_aabbccddeeff0011", tool: "codex_exec",
+          ...({ rawPrompt: "secret_prompt_must_not_reach_log" } as object),
+        },
+      });
+      const bad = await callTurnBroker<{ observed: boolean }>(socketPath, {
+        method: "diagnostic_observe", observation: {
+          stage: "mcp_ingress", diagnosticId: "diag_aabbccddeeff0011", tool: "private/raw/command",
+        },
+      });
+      expect(good).toEqual({ observed: true });
+      expect(bad).toEqual({ observed: false });
+      const diagnosticEvents = logs.flatMap(line => {
+        try { const value = JSON.parse(line); return value.event === "native_tool_diagnostic" ? [value] : []; }
+        catch { return []; }
+      });
+      expect(diagnosticEvents).toEqual([{
+        event: "native_tool_diagnostic", stage: "mcp_ingress", diagnosticId: "diag_aabbccddeeff0011", tool: "codex_exec",
+      }]);
+      expect(JSON.stringify(diagnosticEvents)).not.toContain("secret_prompt_must_not_reach_log");
+    } finally {
+      logger.mockRestore();
+      await broker.close();
+    }
+  });
+
+  test("diagnostic correlation distinguishes queued, adapter-delivered, and returned errors", async () => {
+    const socketPath = endpoint("diagnostic-observation");
+    const broker = TurnBroker.forSocket(socketPath);
+    const logs: string[] = [];
+    const logger = spyOn(console, "error").mockImplementation((...args) => { logs.push(args.join(" ")); });
+    const diagnosticId = "diag_0123456789abcdef";
+    try {
+      const turn = await broker.registerSafe(environment(), nonceA, undefined, "diagnostic-trace");
+      broker.startSafeTurn(turn);
+      broker.confirmSafeTurnSent(turn, nonceA);
+      const claimed = await callTurnBroker<{ bindingId: string }>(socketPath, {
+        method: "claim", token: turn, contract: "safe", activityId: "activity_diagnostic_0123456789abc",
+        diagnosticId,
+      });
+      const pending = callTurnBroker<BrokerToolResult>(socketPath, {
+        method: "invoke", bindingId: claimed.bindingId, diagnosticId,
+        wireName: "exec_command", arguments: { cmd: "secret_command" },
+      });
+      const [request] = await broker.nextToolBatch(turn);
+      expect(request).toMatchObject({ wireName: "exec_command" });
+      broker.completeTool(turn, request!.callId, { ...toolResult({ private: "secret_result" }), isError: true });
+      expect((await pending).isError).toBeTrue();
+      const diagnosticEvents = logs.flatMap(line => {
+        try { const parsed = JSON.parse(line); return parsed.event === "native_tool_diagnostic" ? [parsed] : []; }
+        catch { return []; }
+      });
+      expect(diagnosticEvents.map(event => event.stage)).toEqual([
+        "broker_claim_with_turn", "broker_queued", "broker_delivered_to_codex_adapter", "codex_result_received",
+      ]);
+      expect(diagnosticEvents.every(event => event.diagnosticId === diagnosticId && event.traceId === "diagnostic-trace")).toBeTrue();
+      expect(diagnosticEvents.at(-1)).toMatchObject({ outcome: "is_error" });
+      expect(JSON.stringify(diagnosticEvents)).not.toContain("secret_command");
+      expect(JSON.stringify(diagnosticEvents)).not.toContain("secret_result");
+    } finally {
+      logger.mockRestore();
+      await broker.close();
+    }
+  });
+
   test("requires both Launcher Sent and connector start before tools can run", async () => {
     const socketPath = endpoint("strict-lifecycle");
     const broker = TurnBroker.forSocket(socketPath);
@@ -288,6 +362,13 @@ describe("Zero Risk public MCP ABI", () => {
       stderr: "pipe",
     });
     const client = new Client({ name: "codex-safe-contract-test", version: "1.0.0" });
+    const daemonDiagnosticStages: string[] = [];
+    const diagnosticLogger = spyOn(console, "error").mockImplementation((...args) => {
+      try {
+        const event = JSON.parse(args.join(" "));
+        if (event.event === "native_tool_diagnostic") daemonDiagnosticStages.push(event.stage);
+      } catch { /* Ignore ordinary broker status lines. */ }
+    });
     try {
       await client.connect(transport);
       expect(client.getInstructions()).toContain("begin with codex_turn_start using the request_id");
@@ -347,6 +428,11 @@ describe("Zero Risk public MCP ABI", () => {
       });
       broker.completeTool(requestId, inventoryRequest!.callId, { content });
       const inventory = await inventoryAfterStart;
+      // The real MCP stdio child relays its ingress into the daemon broker.
+      // A passing JSON-RPC exchange also proves diagnostics did not pollute stdout.
+      await Bun.sleep(35);
+      expect(daemonDiagnosticStages).toContain("mcp_ingress");
+      expect(daemonDiagnosticStages).toContain("broker_claim_with_turn");
       expect(inventory.structuredContent).toMatchObject({
         total: 2,
         tools: [
@@ -407,6 +493,7 @@ describe("Zero Risk public MCP ABI", () => {
       });
       await expect(broker.waitForSafeCompletion(requestId)).resolves.toBe("done");
     } finally {
+      diagnosticLogger.mockRestore();
       await client.close().catch(() => {});
       broker.revoke(requestId);
       await broker.close();
