@@ -1244,16 +1244,16 @@ async function start() {
   const trayAvailable = createTray(logger, stateStore.read().language);
   if (startHidden && !trayAvailable) mainWindow.once("ready-to-show", () => showMainWindow());
   const launcherSmokeTest = process.argv.includes("--launcher-smoke-test");
-  let startupAuthenticationRefresh = Promise.resolve();
   if (!launcherSmokeTest && stateStore.read().browserInteractionMode === "automatic") {
-    startupAuthenticationRefresh = browserHost.refreshAuthentication().catch((error) => {
+    void browserHost.refreshAuthentication().catch((error) => {
       logger.warn("browser.session_refresh_failed", {
         ...navigationErrorForLog(error),
       });
     });
   }
   await loadRenderer(mainWindow);
-  if (!launcherSmokeTest) void updateController.checkOnce();
+  // Fork build: never offer the upstream launcher as an update to this branded app.
+  // (updateController.checkOnce() intentionally not called.)
   if (launcherSmokeTest) {
     const smokeRuntimeRoot = runtimeRootProvider();
     if (app.isPackaged && !smokeRuntimeRoot) {
@@ -1323,7 +1323,7 @@ async function start() {
       userData: launcherUserData,
     });
     if (config?.mode === "full") {
-      void startupAuthenticationRefresh.then(() => runtimeSupervisor.startIfConfigured()).catch((error) => {
+      void runtimeSupervisor.startIfConfigured().catch((error) => {
         const message = error instanceof Error ? error.message : String(error);
         logger.error("dev_profile.runtime_start_failed", { message });
         const failed = stateStore.update({ mcpSetupComplete: false });
@@ -1331,7 +1331,6 @@ async function start() {
       }).finally(finishRuntimeStartup);
     } else finishRuntimeStartup();
   } else void (async () => {
-    await startupAuthenticationRefresh;
     const upgrade = await runtimeHost.upgradeManagedRuntime();
     if (upgrade.updated) {
       const state = stateStore.update({
