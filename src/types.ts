@@ -272,6 +272,8 @@ export interface CodexProviderConfig {
     browserHost?: "managed-chrome" | "launcher";
     /** Owner-only descriptor containing the launcher's loopback CDP and control endpoints. */
     browserHostDescriptorPath?: string;
+    /** Maximum simultaneous browser turns (5–8, default 5). */
+    maxBrowserSessions?: number;
     /** Explicit browser-helper bundle. DEV builds current source; the launcher still supplies Electron-as-Node. */
     browserHelperScriptPath?: string;
     /** Explicit private diagnostic root for isolated harnesses. */

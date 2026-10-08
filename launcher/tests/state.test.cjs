@@ -26,6 +26,7 @@ test("launcher state persists onboarding, language, and autostart atomically", (
       showBrowserDuringTurns: true,
       autoApproveToolCalls: false,
       browserInteractionMode: "automatic",
+      maxBrowserSessions: 5,
       experimentalBiggerContext: false,
       experimentalSkillAttachments: false,
       experimentalFreshConversationPerTurn: false,
@@ -56,6 +57,7 @@ test("launcher state persists onboarding, language, and autostart atomically", (
       showBrowserDuringTurns: true,
       autoApproveToolCalls: false,
       browserInteractionMode: "automatic",
+      maxBrowserSessions: 5,
       experimentalBiggerContext: false,
       experimentalSkillAttachments: false,
       experimentalFreshConversationPerTurn: false,
@@ -83,6 +85,30 @@ test("sidebar state accepts only bounded native shell dimensions", () => {
   assert.throws(() => validateSidebarState({ open: "yes", width: 300 }), /invalid/);
   assert.throws(() => validateSidebarState({ open: true, width: 100 }), /between 240 and 420/);
   assert.throws(() => validateSidebarState({ open: true, width: 900 }), /between 240 and 420/);
+});
+
+test("browser capacity defaults to five, validates writes, and repairs legacy or corrupt state", () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "browser-capacity-state-"));
+  const file = path.join(root, "launcher-state.json");
+  try {
+    const store = createStateStore(file);
+    assert.equal(store.read().maxBrowserSessions, 5);
+    store.update({ maxBrowserSessions: 8 });
+    assert.equal(createStateStore(file).read().maxBrowserSessions, 8);
+    for (const invalid of [4, 9, null, "6", 5.5]) {
+      assert.throws(() => store.update({ maxBrowserSessions: invalid }), /Max browser sessions/);
+    }
+    assert.equal(store.read().maxBrowserSessions, 8);
+    for (const invalid of [4, 9, null, "6", 5.5]) {
+      fs.writeFileSync(file, JSON.stringify({ version: 1, maxBrowserSessions: invalid }));
+      assert.equal(createStateStore(file).read().maxBrowserSessions, 5);
+    }
+    fs.writeFileSync(file, JSON.stringify({ version: 1, keepRunningOnClose: false }));
+    assert.equal(createStateStore(file).read().maxBrowserSessions, 5);
+    assert.equal(createStateStore(file).read().keepRunningOnClose, false);
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
 });
 
 test("every supported launcher language survives a state update and reload", () => {
@@ -137,6 +163,7 @@ test("persisted sidebar corruption is repaired without changing the rest of laun
       showBrowserDuringTurns: true,
       autoApproveToolCalls: false,
       browserInteractionMode: "automatic",
+      maxBrowserSessions: 5,
       experimentalBiggerContext: false,
       experimentalSkillAttachments: false,
       experimentalFreshConversationPerTurn: false,

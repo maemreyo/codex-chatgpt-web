@@ -9,6 +9,7 @@ import {
 } from "./chatgpt-web-models";
 import type { CodexProviderConfig } from "./types";
 import { VERSION } from "./version";
+import { resolveMaxBrowserSessions } from "./adapters/chatgpt-web/concurrency";
 
 export type RuntimeMode = "browser-only" | "full";
 export type BrowserHostMode = "managed-chrome" | "launcher";
@@ -109,6 +110,8 @@ export interface AppConfig {
   manualAppName: string;
   browserHost: BrowserHostMode;
   browserInteractionMode: BrowserInteractionMode;
+  /** Maximum simultaneous ChatGPT browser turns (5–8). */
+  maxBrowserSessions: number;
   browserHostDescriptorPath?: string;
   chromeExecutablePath: string;
   storageStatePath: string;
@@ -242,6 +245,7 @@ export function defaultConfig(mode: RuntimeMode = "browser-only"): AppConfig {
     manualAppName: ZERO_RISK_CHATGPT_CONNECTOR_NAME,
     browserHost: "managed-chrome",
     browserInteractionMode: "automatic",
+    maxBrowserSessions: 5,
     chromeExecutablePath: defaultChromeExecutable(),
     storageStatePath: join(home, "browser", "storage-state.json"),
     brokerSocketPath: defaultBrokerEndpoint(home),
@@ -436,6 +440,12 @@ function parseConfig(value: unknown, path: string): AppConfig {
   if (!Number.isSafeInteger(parsed.contextWindow) || parsed.contextWindow! <= 0) {
     throw new Error(`Invalid contextWindow in ${path}`);
   }
+  let maxBrowserSessions: number;
+  try {
+    maxBrowserSessions = resolveMaxBrowserSessions(parsed.maxBrowserSessions);
+  } catch {
+    throw new Error(`Invalid maxBrowserSessions in ${path}: expected an integer between 5 and 8`);
+  }
   if (typeof parsed.headed !== "boolean") throw new Error(`Invalid headed in ${path}`);
   if (typeof parsed.autoApproveToolCalls !== "boolean") {
     throw new Error(`Invalid autoApproveToolCalls in ${path}`);
@@ -576,6 +586,7 @@ function parseConfig(value: unknown, path: string): AppConfig {
     automaticAppName,
     manualAppName,
     browserInteractionMode,
+    maxBrowserSessions,
     subagentProtocol,
     solAvailable,
     proAvailable,
@@ -625,6 +636,7 @@ export function providerConfig(config: AppConfig): CodexProviderConfig {
     chatgptWeb: {
       appName: manual ? config.manualAppName : config.automaticAppName,
       browserInteractionMode: config.browserInteractionMode,
+      maxBrowserSessions: resolveMaxBrowserSessions(config.maxBrowserSessions),
       browserHost: config.browserHost,
       browserHostDescriptorPath: config.browserHostDescriptorPath,
       storageStatePath: config.storageStatePath,

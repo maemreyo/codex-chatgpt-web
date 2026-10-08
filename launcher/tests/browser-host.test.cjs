@@ -2761,6 +2761,49 @@ test("five browser tabs are a hard account-safety limit", async () => {
   );
 });
 
+test("configured browser capacity applies to both automatic and manual admission", async () => {
+  for (const maxBrowserSessions of [5, 6, 7, 8]) {
+    const turnTabs = new Map(Array.from({ length: maxBrowserSessions }, (_, index) => [
+      `tab-${index + 1}`,
+      { ordinal: index + 1, status: "running" },
+    ]));
+    const fixture = Object.assign(Object.create(BrowserHost.prototype), {
+      maxBrowserSessions,
+      turnTabs,
+    });
+    assert.equal(fixture.browserCapacity(), maxBrowserSessions);
+    await assert.rejects(() => fixture.createTurnTab("next", 999),
+      new RegExp(`already has ${maxBrowserSessions} browser tabs`));
+    assert.throws(() => fixture.createManualTurnTab("next", 999),
+      new RegExp(`already has ${maxBrowserSessions} browser tabs`));
+    assert.equal(turnTabs.size, maxBrowserSessions, "active turns must not be evicted");
+  }
+});
+
+test("browser snapshot exposes effective and pending capacities without changing active tabs", () => {
+  const { webContents } = createContents();
+  const fixture = Object.assign(Object.create(BrowserHost.prototype), {
+    maxBrowserSessions: 5,
+    getRequestedMaxBrowserSessions: () => 8,
+    selectedTabId: "home",
+    turnTabs: new Map([["active", { id: "active", status: "running" }]]),
+    state: { status: "ready", loading: false },
+    visible: true,
+    surfaceActive: true,
+    activeView: () => ({ webContents }),
+    selectedTurnTab: () => null,
+    tabSnapshot: tab => ({ id: tab.id, status: tab.status }),
+  });
+  let snapshot = fixture.snapshot();
+  assert.equal(snapshot.maxTabs, 5);
+  assert.equal(snapshot.pendingMaxTabs, 8);
+  assert.equal(snapshot.tabs.length, 2);
+  fixture.getRequestedMaxBrowserSessions = () => 5;
+  snapshot = fixture.snapshot();
+  assert.equal(snapshot.pendingMaxTabs, null);
+  assert.equal(fixture.turnTabs.has("active"), true);
+});
+
 test("a full browser host evicts only its oldest ready tab", () => {
   const oldest = { id: "oldest", ordinal: 1, status: "ready", lastHeartbeatAt: 10 };
   const newer = { id: "newer", ordinal: 2, status: "ready", lastHeartbeatAt: 20 };
