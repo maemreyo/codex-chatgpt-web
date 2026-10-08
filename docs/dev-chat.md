@@ -106,6 +106,12 @@ transaction; it is not a launcher-only preference. Production setup also rewrite
 Codex model catalog with 3x context and auto-compaction thresholds and asks you to restart Codex.
 The DEV CLI reads the same setting from its isolated runtime configuration on each command.
 
+For GPT-6 Sol, Bigger Context advertises 240,000 context tokens and a 220,000-token
+auto-compaction threshold on Plus and Pro for Medium, High, and account-supported Extra High.
+Instant keeps its standard window. Only Pro's GPT-6 staged window has been verified in a live
+browser; the Plus profile is experimental and may encounter upstream retention or message limits.
+GPT-5.6 keeps its existing account-specific 3x windows.
+
 When enabled, a normal turn stays on the original single-message path while its estimated input
 is below the selected mode's existing auto-compaction threshold. At the first threshold it uses two
 messages; at twice that threshold it uses six messages. The final context part also commits the

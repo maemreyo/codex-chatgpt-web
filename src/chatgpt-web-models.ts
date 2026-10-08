@@ -7,7 +7,7 @@ export const CHATGPT_WEB_LUNA_BIGGER_CONTEXT_ERROR =
   "Bigger Context is unavailable for Luna and Think. Turn it off in launcher Settings "
   + "(or run setup with --standard-context), then restart Codex.";
 export const CHATGPT_WEB_GPT6_SOL_BIGGER_CONTEXT_ERROR =
-  "GPT-6 Sol uses standard context for this account and effort. Bigger Context supports Medium, High and Extra High on Pro accounts.";
+  "GPT-6 Sol Instant uses standard context. Bigger Context is experimental for Medium, High and account-supported Extra High.";
 /** Internal adapter identity for a turn whose ChatGPT model is selected by the user in the launcher. */
 export const CHATGPT_WEB_ZERO_RISK_BACKEND_MODEL = "chatgpt-web-zero-risk";
 /** Internal adapter identity for the explicitly enabled, Pro-sized Zero Risk context profile. */
@@ -104,15 +104,15 @@ export interface ChatGptWebTransportLimits {
   browserComposerCharLimit?: number;
 }
 
-/** GPT-6 staged context is supported only by the account and efforts checked live. */
+/** GPT-6 stages Medium/High (and available Extra High) on Plus experimentally; Pro was measured live. */
 export function supportsChatGptWebBiggerContext(
   backendModel: string,
   effort: ChatGptWebAdapterEffort,
-  capabilities: Pick<ChatGptWebAccountCapabilities, "proAvailable">,
+  _capabilities: Pick<ChatGptWebAccountCapabilities, "proAvailable">,
   modelFamily?: ChatGptWebModelFamily,
 ): boolean {
   return backendModel === CHATGPT_WEB_BACKEND_MODEL && (
-    modelFamily !== "6" || effort === "max" || (capabilities.proAvailable && effort !== "low")
+    modelFamily !== "6" || effort !== "low"
   );
 }
 
@@ -473,7 +473,7 @@ export const CHATGPT_WEB_MODEL_ROUTES: readonly ChatGptWebAutomaticModelRoute[] 
   {
     slug: "chatgpt-web/gpt-6-sol",
     displayName: "GPT-6 Sol (Web)",
-    description: "GPT-6 Sol with Medium, High, or account-supported Extra High. Bigger Context supports up to 240,000 tokens on Pro; other accounts use standard context.",
+    description: "GPT-6 Sol with Medium, High, or account-supported Extra High. Experimental Bigger Context offers a 240,000-token window on Plus and Pro; Plus has not been live validated.",
     interactionMode: "automatic",
     backendModel: CHATGPT_WEB_BACKEND_MODEL,
     modelFamily: "6",

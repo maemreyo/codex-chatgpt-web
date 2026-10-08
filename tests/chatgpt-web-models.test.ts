@@ -241,6 +241,26 @@ describe("fixed ChatGPT Web model routes", () => {
     });
   });
 
+  test("GPT-6 Bigger Context enables Plus Medium/High while Instant remains standard", () => {
+    for (const account of [plus, pro]) {
+      const enabled = { ...account, experimentalBiggerContext: true };
+      for (const effort of ["medium", "high"] as const) {
+        expect(resolveChatGptWebContextLimits(CHATGPT_WEB_BACKEND_MODEL, effort, enabled, "6")).toEqual({
+          contextWindow: 240_000,
+          effectiveContextWindowPercent: 92,
+          autoCompactTokenLimit: 220_000,
+        });
+      }
+      expect(resolveChatGptWebContextLimits(CHATGPT_WEB_BACKEND_MODEL, "low", enabled, "6"))
+        .toEqual(resolveChatGptWebContextLimits(CHATGPT_WEB_BACKEND_MODEL, "low", account, "6"));
+      expect(resolveChatGptWebContextLimits(CHATGPT_WEB_BACKEND_MODEL, "high", account, "6").contextWindow)
+        .toBe(account.proAvailable ? 111_193 : 90_000);
+    }
+    expect(resolveChatGptWebContextLimits(CHATGPT_WEB_BACKEND_MODEL, "xhigh", {
+      ...pro, experimentalBiggerContext: true,
+    }, "6").contextWindow).toBe(240_000);
+  });
+
   test("binds the selected model authoritatively and ignores a conflicting request effort", () => {
     const request = parsed("chatgpt-web/high", "low");
     const rawSnapshot = structuredClone(request._rawBody);
