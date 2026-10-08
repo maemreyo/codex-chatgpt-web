@@ -25,6 +25,9 @@ new standalone file. The following values are the defaults:
 }
 ```
 
+To disable the guard again, set `nativeQuotaReserveEnabled` to `false`
+and restart the bridge. This restores ordinary native forwarding.
+
 When you enable the feature (`nativeQuotaReserveEnabled: true`), the **default
 Strict mode** blocks all quota-consuming native requests through this bridge,
 including compaction, search and image requests. It performs **zero quota
