@@ -2811,3 +2811,60 @@ code {
   .activity-task-detail { flex-basis: calc(100% - 30px); }
   .activity-task > button { margin-left: 22px; }
 }
+
+.agent-role-row {
+  display: block;
+  width: 100%;
+  padding: 12px 0;
+  border-top: 1px solid var(--color-border-subtle, rgba(128, 128, 128, 0.2));
+}
+
+.agent-role-summary strong {
+  display: block;
+  color: var(--color-text-primary);
+  font-size: 13px;
+  font-weight: 500;
+}
+
+.agent-role-summary small {
+  display: block;
+  margin-top: 3px;
+  color: var(--color-text-tertiary);
+  font-size: var(--text-xs);
+  overflow-wrap: anywhere;
+}
+
+.agent-role-details {
+  margin-top: 8px;
+}
+
+.agent-role-details > summary {
+  cursor: pointer;
+  font-size: 13px;
+}
+
+.agent-role-details p {
+  max-width: none;
+}
+
+.agent-role-field {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  margin-top: 10px;
+  font-size: 13px;
+}
+
+.agent-role-field select,
+.agent-role-field textarea {
+  width: 100%;
+  max-width: 100%;
+  box-sizing: border-box;
+}
+
+.agent-role-field textarea {
+  min-height: 120px;
+  resize: vertical;
+  font-family: var(--font-mono, ui-monospace, monospace);
+  font-size: 12px;
+}
