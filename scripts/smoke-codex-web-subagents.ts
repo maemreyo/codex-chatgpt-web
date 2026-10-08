@@ -14,7 +14,11 @@ import { loadConfig } from "../src/config";
 import { augmentNativeModelCatalog } from "../src/model-catalog";
 
 const codexArg = process.argv.slice(2).find(argument => !argument.startsWith("--"));
-const codex = resolve(codexArg ?? "/Applications/ChatGPT.app/Contents/Resources/codex");
+const bundledCodexPaths = [
+  "/Applications/ChatGPT.app/Contents/Resources/codex",
+  "/Applications/ChatGPT.app/Contents/Resources/codex-cli/CodexCLI.app/Contents/MacOS/codex",
+];
+const codex = resolve(codexArg ?? bundledCodexPaths.find(existsSync) ?? bundledCodexPaths[0]);
 if (!existsSync(codex)) throw new Error(`Codex executable is missing: ${codex}`);
 
 const runtimeConfig = loadConfig();
@@ -40,6 +44,13 @@ if (bundled.status !== 0) {
 const root = mkdtempSync(join(tmpdir(), "codex-chatgpt-web-live-subagents-"));
 const codexHome = join(root, "codex");
 mkdirSync(codexHome, { recursive: true });
+mkdirSync(join(codexHome, "agents"), { recursive: true });
+writeFileSync(join(codexHome, "agents", "zam-explorer.toml"), [
+  'model = "chatgpt-web/gpt-6-sol"',
+  'model_reasoning_effort = "high"',
+  'sandbox_mode = "read-only"',
+  "",
+].join("\n"));
 const catalogPath = join(root, "models.json");
 const catalogConfig = structuredClone(runtimeConfig);
 catalogConfig.subagentProtocol = "compatibility-v1";
@@ -50,7 +61,7 @@ writeFileSync(
 
 const bridgeBaseUrl = `http://${runtimeConfig.host}:${runtimeConfig.port}/v1`;
 writeFileSync(join(codexHome, "config.toml"), [
-  'model = "chatgpt-web/medium"',
+  'model = "chatgpt-web/gpt-6-sol"',
   'model_provider = "live_bridge"',
   `model_catalog_json = ${JSON.stringify(catalogPath)}`,
   "",
@@ -63,6 +74,10 @@ writeFileSync(join(codexHome, "config.toml"), [
   "",
   "[agents]",
   "max_depth = 2",
+  "",
+  "[agents.zam-explorer]",
+  'description = "Read-only Web model lifecycle smoke"',
+  'config_file = "agents/zam-explorer.toml"',
   "",
   "[features]",
   "multi_agent = true",
@@ -79,11 +94,12 @@ if (typeof expectedVersion !== "string" || !expectedVersion) {
 
 const prompt = [
   "Use the available agent tools; do not read package.json in the parent yourself.",
-  "Spawn exactly one child with model chatgpt-web/high, reasoning_effort high, and no forked history.",
+  "Spawn exactly one child using agent_type zam-explorer with no model override and no forked history.",
   "Ask it to read package.json through its repository tools and return CHILD_RESULT followed by the",
   "exact version. Wait for that exact child id even if it has already completed, then return",
   "LIVE_WEB_SUBAGENT_OK followed by the same version.",
-  "Do not use fallback models. If any requested model or agent operation is unavailable, fail explicitly.",
+  "The named agent is configured for chatgpt-web/gpt-6-sol at high effort. Do not use fallback",
+  "models. If any requested model or agent operation is unavailable, fail explicitly.",
 ].join(" ");
 
 interface RolloutRecord {
@@ -137,9 +153,9 @@ try {
     "exec",
     "--skip-git-repo-check",
     "--json",
-    "--dangerously-bypass-approvals-and-sandbox",
+    "--sandbox", "read-only",
     "--model",
-    "chatgpt-web/medium",
+    "chatgpt-web/gpt-6-sol",
     prompt,
   ], {
     cwd: process.cwd(),
@@ -182,8 +198,8 @@ try {
   if (!childSession) failures.push("missing depth-1 Web child rollout");
 
   for (const [label, session, expectedModel] of [
-    ["root", rootSession, "chatgpt-web/medium"],
-    ["child", childSession, "chatgpt-web/high"],
+    ["root", rootSession, "chatgpt-web/gpt-6-sol"],
+    ["child", childSession, "chatgpt-web/gpt-6-sol"],
   ] as const) {
     const context = object(session?.context?.payload);
     if (context?.cwd !== process.cwd()) failures.push(`${label} did not inherit the repository cwd`);
@@ -217,7 +233,7 @@ try {
     );
   }
   process.stdout.write(
-    `LIVE_WEB_SUBAGENT_CHAIN_OK root=chatgpt-web/medium child=chatgpt-web/high version=${expectedVersion}\n`,
+    `LIVE_WEB_SUBAGENT_CHAIN_OK root=chatgpt-web/gpt-6-sol child=chatgpt-web/gpt-6-sol version=${expectedVersion}\n`,
   );
 } finally {
   rmSync(root, { recursive: true, force: true });
