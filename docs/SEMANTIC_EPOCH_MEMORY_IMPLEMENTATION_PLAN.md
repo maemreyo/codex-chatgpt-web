@@ -1769,6 +1769,27 @@ Bun 1.4.0 line. All evidence is fake-harness only; no live browser or account ru
 The logical 240k flag (`experimentalSemanticLogicalWindow`) stays OFF until the owner reads in-use
 `semantic-log-report` output and decides (M3). S9 remains gated behind that decision.
 
+Local diagnostics follow-up (2026-10-08): read-only `semanticLogReport()` aggregation on the
+retained diagnostic-observations archives found **0 `semantic_*` events** in 16,003 observations
+for Zam Codex Web and 840 for Codex Web GPT. No Activity **Export safe log** was found in the
+usual user export folders. These diagnostic archives are incomplete, so zero retained events
+does not establish that SEM never ran or that it is disabled. **M3 remains undecided** until a
+reviewed safe log export from in-use SEM sessions supplies actual cost, rotation, pressure and
+recovery measurements. No live model submission was made for this observation.
+Subsequent local configuration metadata inspection (without printing secrets) confirms
+`experimentalSemanticMemory=false`, `experimentalSemanticLogicalWindow=false`, and
+`experimentalBiggerContext=true`. The absence of SEM events is therefore consistent with
+the current disabled SEM setting. Bigger Context and the SEM logical-window flag are
+separate controls; the latter was not activated.
+
+On 2026-10-09, a read-only `semantic-log-report.ts` run against the installed
+`Codex Web GPT/logs/launcher.jsonl` (~17,001 records at inspection time) also
+reported **0 semantic events, 0 rotations, and 0 cost samples**. This is a
+measurement of the currently retained launcher log, not evidence of S8 readiness.
+M3 therefore remains **undecided**, and both the experimental 240k logical
+window and S9 stay gated until the owner explicitly decides from representative
+in-use SEM diagnostics.
+
 Proposed direction remains parent+delta with v1 read compatibility, but add sparse base snapshots or
 ancestor-preserving pruning only after a dedicated storage/replay review. The covered-history digest
 must remain identical for equivalent canonical history regardless of whether it came from full input
