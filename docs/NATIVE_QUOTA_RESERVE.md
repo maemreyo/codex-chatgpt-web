@@ -57,12 +57,17 @@ floor without server-side quota reservation or an enforced per-request usage cap
 
 - There is **no timer, background job or retry loop** calling the usage endpoint.
 - Only when a new quota-consuming native request arrives, the guard performs
-  a quota lookup in Conservative mode, subject to a **15-minute minimum interval per account**.
+  a quota lookup in Conservative mode, subject to a **15-minute minimum interval per bridge profile**.
+  The profile-wide gate protects against the same account arriving with different
+  `chatgpt-account-id` headers or a refreshed Bearer token. It also serializes
+  separate accounts sharing one bridge profile, intentionally favoring safety.
 - The same successful snapshot authorizes **one** native request. Other requests
   during the interval are refused locally without contacting OpenAI. Native
   requests are serialized until their response stream completes or is cancelled.
-- Transport errors or HTTP 5xx impose a **one-hour cooldown**. HTTP 401/403/429
-  and unrecognized usage formats impose a **24-hour circuit breaker**.
+- Usage lookup failures, including HTTP 401/403/5xx, impose a **one-hour cooldown**;
+  usage HTTP 429 and unrecognized usage formats impose a **24-hour circuit breaker**.
+  Forwarded native HTTP 401/403 errors retain the normal **15-minute cooldown**;
+  HTTP 429 imposes a **24-hour cooldown** to avoid hammering a throttled backend.
 - Once the reserve is reached, the guard waits at least **five hours** for the
   five-hour limit or **24 hours** for the weekly limit before checking again.
 - Last-check and cooldown timestamps are written durably under

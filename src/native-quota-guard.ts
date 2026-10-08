@@ -8,7 +8,7 @@ const USAGE_URL = "https://chatgpt.com/backend-api/wham/usage";
 const FIVE_HOUR_SECONDS = 18_000;
 const WEEK_SECONDS = 604_800;
 // No background polling. At most one snapshot and one quota-consuming native request
-// per account within this interval, even if callers keep trying.
+// per bridge profile within this interval, even if callers change account headers or tokens.
 export const NATIVE_QUOTA_POLL_INTERVAL_MS = 15 * 60_000;
 export const NATIVE_QUOTA_FAILURE_COOLDOWN_MS = 60 * 60_000;
 export const NATIVE_QUOTA_DENIED_COOLDOWN_MS = 24 * 60 * 60_000;
@@ -132,6 +132,8 @@ export class NativeQuotaGuard {
   private identity(request: Request): string {
     const accountId = request.headers.get("chatgpt-account-id");
     const authorization = request.headers.get("authorization") ?? "";
+    // This is only a durable bookkeeping key; profile-wide admission below prevents
+    // account-header omission, variation and Bearer refresh from resetting cooldown.
     // Retain a hash only; neither Bearer token nor account id is stored or logged.
     return createHash("sha256").update(accountId ? `account:${accountId}` : `auth:${authorization}`).digest("hex");
   }
@@ -191,6 +193,15 @@ export class NativeQuotaGuard {
       const accountKey = this.identity(request);
       const prior = this.accountPolls.get(accountKey);
       const now = this.now();
+      // A single account may appear with or without chatgpt-account-id, or with
+      // a refreshed Bearer token. Enforce admission across the whole bridge profile
+      // so those variants can never authorize an extra quota probe/native turn.
+      let profileNextPoll = 0;
+      for (const previous of this.accountPolls.values()) {
+        profileNextPoll = Math.max(profileNextPoll,
+          previous.lastPollAt + NATIVE_QUOTA_POLL_INTERVAL_MS, previous.blockedUntil);
+      }
+      if (now < profileNextPoll) return this.waitResponse(profileNextPoll);
       if (prior) {
         const nextPoll = Math.max(prior.lastPollAt + NATIVE_QUOTA_POLL_INTERVAL_MS, prior.blockedUntil);
         if (now < nextPoll) return this.waitResponse(nextPoll);
@@ -222,7 +233,9 @@ export class NativeQuotaGuard {
       });
       const result = await this.fetchUsage(usageRequest);
       if (!result.ok) {
-        if ([401, 403, 429].includes(result.status)) {
+        // Only provider throttling extends the normal one-hour failure cooldown;
+        // credentials/policy errors (401/403) are not evidence of quota exhaustion.
+        if (result.status === 429) {
           poll.blockedUntil = now + NATIVE_QUOTA_DENIED_COOLDOWN_MS;
           this.persist();
         }
@@ -254,7 +267,9 @@ export class NativeQuotaGuard {
       this.persist();
       forwarding = true;
       const response = await forward();
-      if ([401, 403, 429].includes(response.status)) {
+      // Keep the minimum 15-minute gate for authorization/policy failures.
+      // An upstream 429 is a throttling signal, so conservatively stop for a day.
+      if (response.status === 429) {
         poll.blockedUntil = now + NATIVE_QUOTA_DENIED_COOLDOWN_MS;
         this.persist();
       }
