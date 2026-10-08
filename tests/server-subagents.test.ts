@@ -4,6 +4,7 @@ import { responseRequest } from "../src/server";
 
 test("rejects encrypted cross-backend delegation before constructing the browser adapter", async () => {
   const config = defaultConfig("browser-only");
+  config.experimentalBiggerContext = false;
   config.solAvailable = false;
   config.proAvailable = false;
   let adapterConstructions = 0;

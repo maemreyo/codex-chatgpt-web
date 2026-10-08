@@ -475,6 +475,7 @@ test("browser check uses metadata-only launcher liveness in Zero Risk", async ()
       appName: ZERO_RISK_CHATGPT_CONNECTOR_NAME,
       browserHost: "launcher",
       browserInteractionMode: "manual",
+      experimentalBiggerContext: false,
       browserHostDescriptorPath: descriptorPath,
       tunnel: {
         binaryPath: process.execPath,

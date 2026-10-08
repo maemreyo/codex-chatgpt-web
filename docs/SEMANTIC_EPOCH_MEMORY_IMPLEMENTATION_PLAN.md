@@ -1,6 +1,6 @@
 # Semantic Epoch Memory — Implementation Plan for Review
 
-Status: revised implementation plan after design review and upstream 6.1.5 reconciliation; not yet an implementation contract
+Status: M0–M2 implemented and merged into `main` (see "Status checkpoint 2026-10-08" below); S8 logical window is default-off and awaits an owner decision from in-use logs; S9 not started; S3 and S7 dropped per 5.11
 Date: 2026-10-07
 Target branch: `feat/semantic-epoch-memory`
 Fork: `maemreyo/codex-chatgpt-web`
@@ -1754,6 +1754,17 @@ fixture setup. `bun run typecheck` and `git diff --check` passed. Thus the
 Web-compaction reservation/submission boundary remains unaccepted pending an
 exact integration fix and repeat verification. The 240k flag remains OFF,
 no live browser/account acceptance occurred, and S9 is still gated.
+
+Status checkpoint 2026-10-08 (merged): S0.5–S2, S4 and S5–S6 are merged into `main` via PR #4,
+together with the S8 fake-harness coverage (cost caps, occupancy, message ceiling, recovery matrix,
+stock-vs-SEM replay). The earlier cap-exhaustion failure was a test-fixture defect: the stubbed
+browser worker returned an answer without streaming it, so the Markdown stream check failed. The
+stub now emits the answer through `onTextDelta`. With Bun 1.4.x the full runtime suite passes
+(988 pass / 40 skip / 0 fail) and `bun run typecheck` is clean. Older Bun 1.3.5 fails three
+unrelated tests (`Bun.markdown`, URL port normalization, a turn-token race), so use the pinned
+Bun 1.4.0 line. All evidence is fake-harness only; no live browser or account run has happened.
+The logical 240k flag (`experimentalSemanticLogicalWindow`) stays OFF until the owner reads in-use
+`semantic-log-report` output and decides (M3). S9 remains gated behind that decision.
 
 Proposed direction remains parent+delta with v1 read compatibility, but add sparse base snapshots or
 ancestor-preserving pruning only after a dedicated storage/replay review. The covered-history digest
