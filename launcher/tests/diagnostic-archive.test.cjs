@@ -35,6 +35,8 @@ test("archive accepts only a bounded allowlist of content-free semantic and tool
   const tool = safeObservation(wrapped(JSON.stringify({
     event: "native_tool_diagnostic", stage: "broker_queued", diagnosticId: "diag_0123456789abcdef",
     traceId: "trace_0123456789abcdef", outcome: "is_error", elapsedMs: 12,
+    requestKind: "shell", requestStructure: "inline_script", requestChars: 45, requestArgCount: 2,
+    failureKind: "safety_status_unknown",
     tool: secret, result: secret, arguments: { key: secret },
   })));
   const toolFields = JSON.parse(tool.detail.line);
@@ -43,6 +45,15 @@ test("archive accepts only a bounded allowlist of content-free semantic and tool
   assert.deepEqual(toolFields, {
     event: "native_tool_diagnostic", stage: "broker_queued", diagnosticId: "diag_0123456789abcdef",
     outcome: "is_error", elapsedMs: 12,
+    requestKind: "shell", requestStructure: "inline_script", requestChars: 45, requestArgCount: 2,
+    failureKind: "safety_status_unknown",
+  });
+  const invalid = safeObservation(wrapped(JSON.stringify({
+    event: "native_tool_diagnostic", stage: "mcp_ingress", diagnosticId: "diag_0123456789abcdef",
+    requestKind: secret, requestStructure: secret, failureKind: secret, requestChars: secret,
+  })));
+  assert.deepEqual(JSON.parse(invalid.detail.line), {
+    event: "native_tool_diagnostic", stage: "mcp_ingress", diagnosticId: "diag_0123456789abcdef",
   });
   assert.doesNotMatch(JSON.stringify([event, tool]), /SECRET_PRIVATE_PROMPT/);
   assert.equal(safeObservation(wrapped(semantic("semantic_reject", { class: "D" }).replace(threadHash, secret))), undefined);

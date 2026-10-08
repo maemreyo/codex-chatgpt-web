@@ -18,6 +18,60 @@ export interface NativeToolDiagnosticFields {
   tool?: string;
   outcome?: "ok" | "is_error" | "timeout" | "aborted" | "unclassified_error";
   elapsedMs?: number;
+  requestKind?: "shell" | "patch" | "freeform" | "structured";
+  requestStructure?: "single" | "multiline" | "pipeline" | "inline_script" | "redirection";
+  requestChars?: number;
+  requestArgCount?: number;
+  failureKind?: "safety_status_unknown" | "openai_safety_block";
+}
+
+/** Request metadata for classifier diagnostics. Never persist command, patch, args or input text. */
+export function nativeToolRequestShape(request: {
+  wireName: string;
+  freeform: boolean;
+  arguments?: Record<string, unknown>;
+  input?: string;
+}): Pick<NativeToolDiagnosticFields, "requestKind" | "requestStructure" | "requestChars" | "requestArgCount"> {
+  const args = request.arguments;
+  const command = typeof args?.cmd === "string" ? args.cmd
+    : typeof args?.command === "string" ? args.command : undefined;
+  const requestKind = /(?:^|_)apply_patch$/.test(request.wireName) ? "patch"
+    : command !== undefined ? "shell"
+      : request.freeform ? "freeform" : "structured";
+  const text = command ?? (requestKind === "patch" && typeof args?.patch === "string" ? args.patch : undefined)
+    ?? (request.freeform ? request.input : undefined);
+  return {
+    requestKind,
+    requestArgCount: Math.min(Object.keys(args ?? {}).length, 256),
+    ...(text === undefined ? {} : {
+      requestChars: Math.min(text.length, 1_000_000),
+      requestStructure: /<<\s*['"]?\w+|\b(?:python\d*|node|ruby|perl)\s+-[ce]\b/.test(text)
+        ? "inline_script" as const
+        : /\r|\n/.test(text) ? "multiline" as const
+          : /\|/.test(text) ? "pipeline" as const
+            : /[<>]/.test(text) ? "redirection" as const : "single" as const,
+    }),
+  };
+}
+
+/** Recognize literal tool error signals without retaining the error body. */
+export function nativeToolSafetyMessage(error: unknown): NativeToolDiagnosticFields["failureKind"] {
+  const text = error instanceof Error ? error.message : error;
+  if (typeof text !== "string") return undefined;
+  if (/couldn['’]t determine the safety status of the request/i.test(text)) return "safety_status_unknown";
+  if (/blocked by OpenAI|OpenAI['’]s safety checks/i.test(text)) return "openai_safety_block";
+  return undefined;
+}
+
+export function nativeToolSafetyFailure(result: { isError?: boolean; content?: unknown[] }): NativeToolDiagnosticFields["failureKind"] {
+  if (!result.isError || !Array.isArray(result.content)) return undefined;
+  for (const item of result.content.slice(0, 8)) {
+    const text = item && typeof item === "object" && "text" in item ? item.text : undefined;
+    if (typeof text !== "string") continue;
+    const category = nativeToolSafetyMessage(text);
+    if (category) return category;
+  }
+  return undefined;
 }
 
 let remoteSink: ((fields: NativeToolDiagnosticFields) => void) | undefined;
@@ -63,6 +117,13 @@ export function observeMcpToolCalls(
     if ("method" in message && message.method === "tools/call" && "id" in message) {
       const name = message.params?.name;
       const tool = typeof name === "string" && knownTools.has(name) ? name : "unknown";
+      const rawArgs = message.params?.arguments;
+      const args = rawArgs && typeof rawArgs === "object" && !Array.isArray(rawArgs)
+        ? rawArgs as Record<string, unknown> : undefined;
+      const shape = nativeToolRequestShape({
+        wireName: tool === "codex_exec" ? "exec_command" : tool,
+        freeform: false, arguments: args,
+      });
       if (pending.has(message.id)) {
         // An ambiguous protocol ID cannot safely correlate either reply.
         pending.set(message.id, null);
@@ -72,7 +133,7 @@ export function observeMcpToolCalls(
       } else {
         const call = { call: ++sequence, tool, started: performance.now() };
         pending.set(message.id, call);
-        emit({ event: "call_received", call: call.call, diagnosticId: mcpDiagnosticId(message.id), tool });
+        emit({ event: "call_received", call: call.call, diagnosticId: mcpDiagnosticId(message.id), tool, ...shape });
       }
     }
     receive?.(message, extra);

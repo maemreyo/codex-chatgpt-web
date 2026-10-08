@@ -38,6 +38,9 @@ const ENUMS = {
     "codex_result_received", "broker_claim_with_turn", "browser_safety_text_visible",
   ]),
   outcome: new Set(["ok", "is_error", "timeout", "aborted", "unclassified_error"]),
+  requestKind: new Set(["shell", "patch", "freeform", "structured"]),
+  requestStructure: new Set(["single", "multiline", "pipeline", "inline_script", "redirection"]),
+  failureKind: new Set(["safety_status_unknown", "openai_safety_block"]),
 };
 const NULLABLE_NUMBERS = new Set(["ledgerValue", "estimatedEpochOccupancy"]);
 
@@ -80,7 +83,7 @@ function safeObservation(record) {
   } else return undefined;
   if (!payload || typeof payload !== "object" || Array.isArray(payload)) return undefined;
   const fields = payload.event === "native_tool_diagnostic"
-    ? "stage diagnosticId traceId tool outcome elapsedMs" : SEMANTIC[payload.event];
+    ? "stage diagnosticId traceId tool outcome elapsedMs requestKind requestStructure requestChars requestArgCount failureKind" : SEMANTIC[payload.event];
   if (!fields) return undefined;
   const detail = {};
   for (const field of fields.split(" ")) {

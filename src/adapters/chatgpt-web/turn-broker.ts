@@ -9,7 +9,7 @@ import {
 } from "./compaction-transaction";
 import type { ChatGptTurnEnvironment } from "./environment";
 import { chatGptToolTimeoutError } from "./adapter-error";
-import { emitNativeToolDiagnostic, subagentModelObservation, type NativeToolDiagnosticFields } from "./mcp-observation";
+import { emitNativeToolDiagnostic, nativeToolRequestShape, nativeToolSafetyFailure, subagentModelObservation, type NativeToolDiagnosticFields } from "./mcp-observation";
 
 interface BrokerRetirementFailure {
   code: "codex_tool_timeout";
@@ -465,11 +465,13 @@ export class TurnBroker implements TurnBrokerOwner {
       throw new Error(`tool call was completed before it was delivered: ${callId}`);
     }
     channel.invocations.delete(callId);
+    const failureKind = nativeToolSafetyFailure(result);
     if (invocation.diagnosticId) emitNativeToolDiagnostic({
       stage: "codex_result_received", diagnosticId: invocation.diagnosticId,
       traceId: channel.traceId, callId: callId.slice(0, 17),
       outcome: result.isError ? "is_error" : "ok",
       elapsedMs: Math.round(performance.now() - invocation.started),
+      ...(failureKind ? { failureKind } : {}),
     });
     console.info(`[chatgpt-web] broker trace=${channel.traceId} completed call=${callId.slice(0, 17)} pending=${channel.invocations.size}`);
     invocation.resolve(result);
@@ -961,6 +963,18 @@ export class TurnBroker implements TurnBrokerOwner {
         ...(item.tool ? { tool: item.tool } : {}),
         ...(item.outcome ? { outcome: item.outcome } : {}),
         ...(item.elapsedMs !== undefined ? { elapsedMs: item.elapsedMs } : {}),
+        ...(["safety_status_unknown", "openai_safety_block"].includes(item.failureKind ?? "")
+          ? { failureKind: item.failureKind } : {}),
+        ...(["mcp_ingress"].includes(item.stage) ? {
+          ...(["shell", "patch", "freeform", "structured"].includes(item.requestKind ?? "")
+            ? { requestKind: item.requestKind } : {}),
+          ...(["single", "multiline", "pipeline", "inline_script", "redirection"].includes(item.requestStructure ?? "")
+            ? { requestStructure: item.requestStructure } : {}),
+          ...(Number.isSafeInteger(item.requestChars) && item.requestChars! >= 0 && item.requestChars! <= 1_000_000
+            ? { requestChars: item.requestChars } : {}),
+          ...(Number.isSafeInteger(item.requestArgCount) && item.requestArgCount! >= 0 && item.requestArgCount! <= 256
+            ? { requestArgCount: item.requestArgCount } : {}),
+        } : {}),
       });
       return { observed: true };
     }
@@ -1225,6 +1239,7 @@ export class TurnBroker implements TurnBrokerOwner {
       if (diagnosticId) emitNativeToolDiagnostic({
         stage: "broker_queued", diagnosticId, traceId: binding.channel.traceId,
         callId: callId.slice(0, 17),
+        ...nativeToolRequestShape(toolRequest),
       });
       console.info(
         `[chatgpt-web] broker trace=${binding.channel.traceId} queued call=${callId.slice(0, 17)} tool=${wireName} waiters=${binding.channel.waiters.size}`,

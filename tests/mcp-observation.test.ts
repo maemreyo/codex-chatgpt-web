@@ -4,7 +4,7 @@ import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import type { Transport } from "@modelcontextprotocol/sdk/shared/transport.js";
 import * as z from "zod/v4";
-import { emitNativeToolDiagnostic, mcpDiagnosticId, observeMcpToolCalls, subagentModelObservation } from "../src/adapters/chatgpt-web/mcp-observation";
+import { emitNativeToolDiagnostic, mcpDiagnosticId, nativeToolRequestShape, nativeToolSafetyFailure, nativeToolSafetyMessage, observeMcpToolCalls, subagentModelObservation } from "../src/adapters/chatgpt-web/mcp-observation";
 import { chatGptSafetyStatusTextVisible } from "../src/adapters/chatgpt-web/safety-status-observation";
 
 test("subagent diagnostics distinguish an explicit model without exposing task arguments", () => {
@@ -25,6 +25,31 @@ test("subagent diagnostics distinguish an explicit model without exposing task a
   expect(subagentModelObservation("other__spawn_agent", args)).toBeUndefined();
   expect(subagentModelObservation("exec_command", args)).toBeUndefined();
   expect(JSON.stringify(subagentModelObservation("multi_agent_v1__spawn_agent", args))).not.toContain(privateText);
+});
+
+test("tool request shape and safety signals are useful without logging payload contents", () => {
+  const sensitive = "PRIVATE_USER_PROMPT_AND_KEY_123";
+  const shell = nativeToolRequestShape({
+    wireName: "exec_command", freeform: false,
+    arguments: { cmd: `python3 - <<'PY'\nprint('${sensitive}')\nPY`, workdir: "/Users/private" },
+  });
+  expect(shell).toEqual({
+    requestKind: "shell", requestArgCount: 2,
+    requestChars: expect.any(Number), requestStructure: "inline_script",
+  });
+  expect(nativeToolRequestShape({ wireName: "apply_patch", freeform: false, arguments: { patch: sensitive } }))
+    .toEqual({ requestKind: "patch", requestArgCount: 1, requestChars: sensitive.length, requestStructure: "single" });
+  expect(nativeToolRequestShape({ wireName: "other", freeform: false, arguments: { privateKey: sensitive } }))
+    .toEqual({ requestKind: "structured", requestArgCount: 1 });
+  const safety = { isError: true, content: [{ type: "text", text: `This tool call was blocked by OpenAI because we couldn't determine the safety status of the request. ${sensitive}` }] };
+  expect(nativeToolSafetyFailure(safety)).toBe("safety_status_unknown");
+  expect(nativeToolSafetyFailure({ isError: true, content: [{ type: "text", text: "This tool call was blocked by OpenAI's safety checks." }] }))
+    .toBe("openai_safety_block");
+  expect(nativeToolSafetyFailure({ isError: false, content: safety.content })).toBeUndefined();
+  expect(nativeToolSafetyMessage(new Error("We couldn't determine the safety status of the request.")))
+    .toBe("safety_status_unknown");
+  expect(nativeToolSafetyMessage(new Error("normal tool rejection"))).toBeUndefined();
+  expect(JSON.stringify({ shell, safetyClass: nativeToolSafetyFailure(safety) })).not.toContain(sensitive);
 });
 
 test("MCP observations separate pre-handler validation and returned tool errors without recording content", async () => {
@@ -54,6 +79,8 @@ test("MCP observations separate pre-handler validation and returned tool errors 
     expect(events.map(event => event.event)).toEqual(Array(3).fill(["call_received", "reply_sent"]).flat());
     expect(events.filter(event => event.event === "reply_sent").map(event => event.is_error)).toEqual([true, true, false]);
     expect(events.map(event => event.call)).toEqual([1, 1, 2, 2, 3, 3]);
+    expect(events.filter(event => event.event === "call_received").map(event => event.requestKind))
+      .toEqual(["structured", "shell", "shell"]);
     for (let index = 0; index < events.length; index += 2) {
       expect(events[index]?.diagnosticId).toBe(events[index + 1]?.diagnosticId);
       expect(events[index]?.diagnosticId).toMatch(/^diag_[a-f0-9]{16}$/);

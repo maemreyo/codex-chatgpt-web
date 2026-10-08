@@ -98,7 +98,11 @@ describe("Zero Risk turn broker lifecycle", () => {
       });
       const [request] = await broker.nextToolBatch(turn);
       expect(request).toMatchObject({ wireName: "exec_command" });
-      broker.completeTool(turn, request!.callId, { ...toolResult({ private: "secret_result" }), isError: true });
+      broker.completeTool(turn, request!.callId, {
+        ...toolResult({ private: "secret_result" }),
+        content: [{ type: "text", text: "This tool call was blocked by OpenAI because we couldn't determine the safety status of the request." }],
+        isError: true,
+      });
       expect((await pending).isError).toBeTrue();
       const diagnosticEvents = logs.flatMap(line => {
         try { const parsed = JSON.parse(line); return parsed.event === "native_tool_diagnostic" ? [parsed] : []; }
@@ -108,7 +112,10 @@ describe("Zero Risk turn broker lifecycle", () => {
         "broker_claim_with_turn", "broker_queued", "broker_delivered_to_codex_adapter", "codex_result_received",
       ]);
       expect(diagnosticEvents.every(event => event.diagnosticId === diagnosticId && event.traceId === "diagnostic-trace")).toBeTrue();
-      expect(diagnosticEvents.at(-1)).toMatchObject({ outcome: "is_error" });
+      expect(diagnosticEvents.find(event => event.stage === "broker_queued")).toMatchObject({
+        requestKind: "shell", requestStructure: "single", requestArgCount: 1,
+      });
+      expect(diagnosticEvents.at(-1)).toMatchObject({ outcome: "is_error", failureKind: "safety_status_unknown" });
       expect(JSON.stringify(diagnosticEvents)).not.toContain("secret_command");
       expect(JSON.stringify(diagnosticEvents)).not.toContain("secret_result");
     } finally {

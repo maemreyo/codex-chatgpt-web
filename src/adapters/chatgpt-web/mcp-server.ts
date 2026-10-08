@@ -8,7 +8,7 @@ import { VERSION } from "../../version";
 import type { ChatGptTurnEnvironment } from "./environment";
 import { CODEX_COMPACTION_CONTROL_WIRE_NAME } from "./native-compaction-control";
 import { callTurnBroker, TurnBrokerTimeoutError, type BrokerToolResult } from "./turn-broker";
-import { emitNativeToolDiagnostic, mcpDiagnosticId, observeMcpToolCalls, setNativeToolDiagnosticSink, type NativeToolDiagnosticFields } from "./mcp-observation";
+import { emitNativeToolDiagnostic, mcpDiagnosticId, nativeToolSafetyMessage, observeMcpToolCalls, setNativeToolDiagnosticSink, type NativeToolDiagnosticFields } from "./mcp-observation";
 
 interface ClaimedTurn {
   bindingId: string;
@@ -555,6 +555,7 @@ export async function runChatGptMcpServer(options: {
       emitNativeToolDiagnostic({
         stage: "handler_failed", ...observation,
         outcome: failureCategory(error), elapsedMs: Math.round(performance.now() - started),
+        ...(nativeToolSafetyMessage(error) ? { failureKind: nativeToolSafetyMessage(error) } : {}),
       });
       throw error;
     }
@@ -615,6 +616,7 @@ export async function runChatGptMcpServer(options: {
       if (observation) emitNativeToolDiagnostic({
         stage: "broker_invoke_failed", ...observation,
         outcome: failureCategory(error), elapsedMs: Math.round(performance.now() - started),
+        ...(nativeToolSafetyMessage(error) ? { failureKind: nativeToolSafetyMessage(error) } : {}),
       });
       // A cancelled/timed-out MCP request no longer has a consumer for the native result. Revoke
       // the whole turn capability so the broker drops the pending invocation and every later call
@@ -1039,7 +1041,13 @@ export async function runChatGptMcpServer(options: {
     if (!diagnosticId) return;
     const tool = typeof event.tool === "string" && BRIDGE_TOOL_NAMES.has(event.tool) ? event.tool : "unknown";
     if (event.event === "call_received") {
-      emitNativeToolDiagnostic({ stage: "mcp_ingress", diagnosticId, tool });
+      emitNativeToolDiagnostic({
+        stage: "mcp_ingress", diagnosticId, tool,
+        requestKind: event.requestKind as NativeToolDiagnosticFields["requestKind"],
+        requestStructure: event.requestStructure as NativeToolDiagnosticFields["requestStructure"],
+        requestChars: event.requestChars as number | undefined,
+        requestArgCount: event.requestArgCount as number | undefined,
+      });
     } else if (event.event === "reply_sent") {
       emitNativeToolDiagnostic({
         stage: "mcp_reply_sent", diagnosticId, tool,

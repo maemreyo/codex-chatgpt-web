@@ -19,10 +19,11 @@ test("native tool log report correlates launcher MCP and broker records without 
   try {
     writeFileSync(file, [
       mcp({ event: "call_received", diagnosticId, tool: "codex_exec" }),
+      event({ event: "native_tool_diagnostic", diagnosticId, stage: "mcp_ingress", requestKind: "shell", requestStructure: "inline_script", requestChars: 45 }),
       event({ event: "native_tool_diagnostic", diagnosticId, stage: "broker_queued" }),
       event({ event: "native_tool_diagnostic", diagnosticId, stage: "broker_claim_with_turn", traceId: "sample-trace" }),
       event({ event: "native_tool_diagnostic", diagnosticId, stage: "broker_delivered_to_codex_adapter" }),
-      event({ event: "native_tool_diagnostic", diagnosticId, stage: "codex_result_received", outcome: "is_error" }),
+      event({ event: "native_tool_diagnostic", diagnosticId, stage: "codex_result_received", outcome: "is_error", failureKind: "safety_status_unknown" }),
       mcp({ event: "reply_sent", diagnosticId, is_error: true }),
       event({ event: "native_tool_diagnostic", stage: "browser_safety_text_visible", traceId: "sample-trace" }),
       event({ event: "native_tool_diagnostic", stage: "browser_safety_text_visible", traceId: "unlinked-trace" }),
@@ -35,12 +36,16 @@ test("native tool log report correlates launcher MCP and broker records without 
       observedCorrelations: 1,
       correlationsWithCodexResult: 1,
       correlationsWithReportedError: 1,
+      requestKinds: { shell: 1 },
+      failureKinds: { safety_status_unknown: 1 },
     });
     expect(report.recentCalls[0]).toEqual({
       diagnosticId,
       stages: ["mcp_ingress", "broker_queued", "broker_claim_with_turn", "broker_delivered_to_codex_adapter", "codex_result_received", "mcp_reply_sent"],
       reportedError: true,
       traceHash: expect.any(String),
+      requestKind: "shell", requestStructure: "inline_script", requestChars: 45,
+      failureKind: "safety_status_unknown",
     });
     expect(report.safetySignals).toHaveLength(2);
     expect(report.safetySignals.map(signal => [signal.correlatedCalls, signal.observedMcpIngresses])).toEqual([[1, 1], [0, 0]]);

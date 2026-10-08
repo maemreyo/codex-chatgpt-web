@@ -9,6 +9,8 @@ export interface NativeToolDiagnosticReport {
   observedCorrelations: number;
   correlationsWithCodexResult: number;
   correlationsWithReportedError: number;
+  requestKinds: Record<string, number>;
+  failureKinds: Record<string, number>;
   lifecycleStages: Record<string, number>;
   safetySignals: Array<{ traceHash: string; correlatedCalls: number; observedMcpIngresses: number }>;
   recentCalls: Array<{
@@ -16,6 +18,10 @@ export interface NativeToolDiagnosticReport {
     traceHash?: string;
     stages: string[];
     reportedError: boolean;
+    requestKind?: string;
+    requestStructure?: string;
+    requestChars?: number;
+    failureKind?: string;
   }>;
 }
 
@@ -47,7 +53,10 @@ function diagnosticRecord(line: string): Json | undefined {
 }
 
 export function nativeToolDiagnosticReport(path: string): NativeToolDiagnosticReport {
-  const calls = new Map<string, { stages: string[]; reportedError: boolean; traceHash?: string }>();
+  const calls = new Map<string, {
+    stages: string[]; reportedError: boolean; traceHash?: string;
+    requestKind?: string; requestStructure?: string; requestChars?: number; failureKind?: string;
+  }>();
   const safetyTraces = new Set<string>();
   const lifecycleStages: Record<string, number> = {};
   let browserSafetyTextObservations = 0;
@@ -82,7 +91,16 @@ export function nativeToolDiagnosticReport(path: string): NativeToolDiagnosticRe
       if (diagnosticId) {
         observe(diagnosticId, event.stage,
           event.outcome === "is_error" || event.outcome === "timeout" || event.outcome === "unclassified_error");
-        if (trace) calls.get(diagnosticId)!.traceHash = trace;
+        const entry = calls.get(diagnosticId)!;
+        if (trace) entry.traceHash = trace;
+        // The original MCP ingress describes the user's request; a later
+        // broker request may contain generated gateway code instead.
+        if (typeof event.requestKind === "string" && (!entry.requestKind || event.stage === "mcp_ingress")) {
+          entry.requestKind = event.requestKind;
+          entry.requestStructure = typeof event.requestStructure === "string" ? event.requestStructure : undefined;
+          entry.requestChars = typeof event.requestChars === "number" ? event.requestChars : undefined;
+        }
+        if (typeof event.failureKind === "string") entry.failureKind = event.failureKind;
       }
     } else if (event.event === "call_received" && diagnosticId) {
       observe(diagnosticId, "mcp_ingress");
@@ -96,12 +114,19 @@ export function nativeToolDiagnosticReport(path: string): NativeToolDiagnosticRe
   const recentCalls = [...calls].slice(-50).map(([diagnosticId, observation]) => ({
     diagnosticId, ...observation,
   }));
+  const countBy = (field: "requestKind" | "failureKind") => [...calls.values()].reduce<Record<string, number>>((counts, call) => {
+    const value = call[field];
+    if (value) counts[value] = (counts[value] ?? 0) + 1;
+    return counts;
+  }, {});
   return {
     mcpIngressCalls: [...calls.values()].filter(call => call.stages.includes("mcp_ingress")).length,
     browserSafetyTextObservations,
     observedCorrelations: calls.size,
     correlationsWithCodexResult: [...calls.values()].filter(call => call.stages.includes("codex_result_received")).length,
     correlationsWithReportedError: [...calls.values()].filter(call => call.reportedError).length,
+    requestKinds: countBy("requestKind"),
+    failureKinds: countBy("failureKind"),
     lifecycleStages,
     safetySignals: [...safetyTraces].map(trace => {
       const related = [...calls.values()].filter(call => call.traceHash === trace);
