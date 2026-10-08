@@ -14,13 +14,30 @@ export interface SemanticLogReport {
   rejectionsByClass: Record<string, number>;
   rejectionsAfterRotation: number;
   fallbacksByTarget: Record<string, number>;
-  slowestStepsPerTurnThreads: Array<{
+  retainedRejectionSignals: {
+    total: number;
+    repeatedByThread: Array<{ threadHash: string; rejections: number }>;
+    rotationPreflightNoFit: number;
+  };
+  epochReuseByThread: Array<{
     threadHash: string;
-    turns: number;
-    averageStepsPerTurn: number;
-    maxStepsPerTurn: number;
+    observedEpochs: number;
+    semanticTurns: number;
+    averageTurnsPerEpoch: number;
+    maxTurnsPerEpoch: number;
   }>;
 }
+
+const KNOWN_EVENTS = new Set([
+  "semantic_turn", "semantic_rotation", "semantic_skip", "semantic_validation_failed",
+  "semantic_reject", "semantic_fallback", "semantic_cost",
+]);
+const SKIP_REASONS = new Set([
+  "ineligible", "no_fit", "cooldown", "cap_hit", "outstanding_tools", "unknown_occupancy",
+]);
+const REJECTION_CLASSES = new Set(["A", "B", "C", "D", "unknown"]);
+const FALLBACK_TARGETS = new Set(["legacy", "compaction_required", "recovery_error"]);
+const THREAD_HASH = /^[a-f0-9]{16}$/;
 
 function record(value: unknown): RecordLike | undefined {
   return value !== null && typeof value === "object" && !Array.isArray(value)
@@ -52,6 +69,10 @@ function increment(target: Record<string, number>, key: string): void {
   target[key] = (target[key] ?? 0) + 1;
 }
 
+function enumValue(value: unknown, allowed: ReadonlySet<string>): string {
+  return typeof value === "string" && allowed.has(value) ? value : "unknown";
+}
+
 export function semanticLogReport(path: string): SemanticLogReport {
   const events = readFileSync(path, "utf8")
     .split(/\r?\n/)
@@ -59,65 +80,87 @@ export function semanticLogReport(path: string): SemanticLogReport {
     .flatMap(line => {
       const decoded = parseJson(line);
       const semantic = decoded ? semanticEventFromRecord(decoded) : undefined;
-      return semantic ? [semantic] : [];
+      return semantic && KNOWN_EVENTS.has(String(semantic.event)) ? [semantic] : [];
     });
 
   const threadSet = new Set<string>();
   const rotationsByThread = new Map<string, number>();
-  const stepCounts = new Map<string, Map<number, number>>();
+  const epochTurnCounts = new Map<string, Map<number, number>>();
   const skipsByReason: Record<string, number> = {};
   const rejectionsByClass: Record<string, number> = {};
   const fallbacksByTarget: Record<string, number> = {};
   const rotatedThreads = new Set<string>();
+  const retainedRejectionsByThread = new Map<string, number>();
   let turns = 0;
   let rotations = 0;
   let maskedTokensSaved = 0;
   let rejectionsAfterRotation = 0;
+  let retainedRejections = 0;
+  let rotationPreflightNoFit = 0;
 
   for (const event of events) {
     const type = typeof event.event === "string" ? event.event : "";
-    const threadHash = typeof event.threadHash === "string" ? event.threadHash : undefined;
+    // The input is an exported log, not trusted source code. Never echo arbitrary
+    // string values from it as report keys or identifiers.
+    const threadHash = typeof event.threadHash === "string" && THREAD_HASH.test(event.threadHash)
+      ? event.threadHash : undefined;
     if (threadHash) threadSet.add(threadHash);
-    if (type === "semantic_turn" && threadHash && typeof event.epoch === "number") {
+    if (type === "semantic_turn" && threadHash && typeof event.epoch === "number"
+      && Number.isSafeInteger(event.epoch) && event.epoch >= 1) {
       turns += 1;
-      let epochs = stepCounts.get(threadHash);
+      let epochs = epochTurnCounts.get(threadHash);
       if (!epochs) {
         epochs = new Map();
-        stepCounts.set(threadHash, epochs);
+        epochTurnCounts.set(threadHash, epochs);
       }
       epochs.set(event.epoch, (epochs.get(event.epoch) ?? 0) + 1);
     } else if (type === "semantic_rotation" && threadHash) {
       rotations += 1;
       rotatedThreads.add(threadHash);
       rotationsByThread.set(threadHash, (rotationsByThread.get(threadHash) ?? 0) + 1);
-      if (typeof event.maskedTokensEst === "number" && Number.isFinite(event.maskedTokensEst)) {
-        maskedTokensSaved += Math.max(0, event.maskedTokensEst);
+      if (Number.isSafeInteger(event.maskedTokensEst) && (event.maskedTokensEst as number) >= 0) {
+        maskedTokensSaved += event.maskedTokensEst as number;
       }
     } else if (type === "semantic_skip") {
-      increment(skipsByReason, typeof event.reason === "string" ? event.reason : "unknown");
+      const reason = enumValue(event.reason, SKIP_REASONS);
+      increment(skipsByReason, reason);
+      if (reason === "no_fit") rotationPreflightNoFit += 1;
     } else if (type === "semantic_reject") {
-      increment(rejectionsByClass, typeof event.class === "string" ? event.class : "unknown");
+      const rejectionClass = enumValue(event.class, REJECTION_CLASSES);
+      increment(rejectionsByClass, rejectionClass);
+      if (rejectionClass === "D") {
+        retainedRejections += 1;
+        if (threadHash) retainedRejectionsByThread.set(
+          threadHash, (retainedRejectionsByThread.get(threadHash) ?? 0) + 1,
+        );
+      }
       if (threadHash && rotatedThreads.has(threadHash)) rejectionsAfterRotation += 1;
     } else if (type === "semantic_fallback") {
-      increment(fallbacksByTarget, typeof event.to === "string" ? event.to : "unknown");
+      increment(fallbacksByTarget, enumValue(event.to, FALLBACK_TARGETS));
     }
   }
 
   const rotationsPerThread = [...threadSet]
     .map(threadHash => ({ threadHash, rotations: rotationsByThread.get(threadHash) ?? 0 }))
     .sort((left, right) => right.rotations - left.rotations || left.threadHash.localeCompare(right.threadHash));
-  const slowestStepsPerTurnThreads = [...stepCounts].map(([threadHash, epochs]) => {
-    const steps = [...epochs.values()];
-    const total = steps.reduce((sum, value) => sum + value, 0);
+  const epochReuseByThread = [...epochTurnCounts].map(([threadHash, epochs]) => {
+    const turnCounts = [...epochs.values()];
+    const total = turnCounts.reduce((sum, value) => sum + value, 0);
     return {
       threadHash,
-      turns: steps.length,
-      averageStepsPerTurn: steps.length > 0 ? total / steps.length : 0,
-      maxStepsPerTurn: steps.length > 0 ? Math.max(...steps) : 0,
+      observedEpochs: turnCounts.length,
+      semanticTurns: total,
+      averageTurnsPerEpoch: turnCounts.length > 0 ? total / turnCounts.length : 0,
+      maxTurnsPerEpoch: turnCounts.length > 0 ? Math.max(...turnCounts) : 0,
     };
-  }).sort((left, right) => right.averageStepsPerTurn - left.averageStepsPerTurn
-    || right.maxStepsPerTurn - left.maxStepsPerTurn
+  }).sort((left, right) => right.averageTurnsPerEpoch - left.averageTurnsPerEpoch
+    || right.maxTurnsPerEpoch - left.maxTurnsPerEpoch
     || left.threadHash.localeCompare(right.threadHash)).slice(0, 10);
+
+  const repeatedByThread = [...retainedRejectionsByThread]
+    .filter(([, rejections]) => rejections >= 2)
+    .map(([threadHash, rejections]) => ({ threadHash, rejections }))
+    .sort((left, right) => right.rejections - left.rejections || left.threadHash.localeCompare(right.threadHash));
 
   return {
     events: events.length,
@@ -131,7 +174,12 @@ export function semanticLogReport(path: string): SemanticLogReport {
     rejectionsByClass,
     rejectionsAfterRotation,
     fallbacksByTarget,
-    slowestStepsPerTurnThreads,
+    retainedRejectionSignals: {
+      total: retainedRejections,
+      repeatedByThread,
+      rotationPreflightNoFit,
+    },
+    epochReuseByThread,
   };
 }
 

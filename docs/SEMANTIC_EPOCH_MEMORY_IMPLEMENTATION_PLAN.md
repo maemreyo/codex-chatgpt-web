@@ -1229,9 +1229,11 @@ JSON object per line with the prefix `semantic_`. A stock install emits none. Co
 
 Add a read-only script, `scripts/semantic-log-report.ts`, that reads a `launcher.jsonl` path given on
 the command line and prints counts and simple ratios: rotations per thread, masked tokens saved, skips
-by reason, rejections by class and whether any occurred after a rotation, fallbacks, and the slowest
-steps-per-turn threads. It makes no network or model call and prints no content. This report is the
-owner's acceptance tool.
+by reason, rejections by class and whether any occurred after a rotation, fallbacks, retained-chat
+size rejections by thread, and observed turns per semantic epoch. The current event schema cannot
+measure native steps per turn; do not label turns per epoch as steps per turn or infer elongation from
+them. Only fixed enum values and validated hashed thread IDs are reported. It makes no network or
+model call and prints no content. This report is the owner's acceptance tool.
 
 Optional local trace (default off, own flag, name `experimentalSemanticMemoryTrace`): writes the exact
 masked view that was sent to a mode-0600 file under `<config-dir>/diagnostics/semantic-trace/`, with a
@@ -1551,7 +1553,7 @@ state. Normal Tier 0 reseeds have a one-completed-turn cooldown, so the retained
 at least one subsequent native turn before another normal rotation. Numeric-only `semantic_*` events and the read-only `scripts/semantic-log-report.ts` are in
 place; stock behavior remains silent while the experiment is off.
 
-Focused verification on Bun 1.3.5: 18 semantic M1 tests (116 assertions), 152 browser-worker contract
+Focused verification on Bun 1.3.5: 18 semantic M1 tests (117 assertions), 152 browser-worker contract
 tests (917 assertions), and 2 physical-limit isolation tests (3 assertions) pass; `bun run typecheck`
 and `git diff --check` pass. No real browser/account/model submission, real transcript, expensive
 evaluation, or `bun run verify` was used.
