@@ -36,6 +36,7 @@ const {
 const { RuntimeHost } = require("./runtime.cjs");
 const { ensurePackagedRuntime, waitForPackagedRuntimeSource } = require("./runtime-install.cjs");
 const { RuntimeSupervisor } = require("./runtime-supervisor.cjs");
+const { setSemanticMemoryPreference } = require("./semantic-settings.cjs");
 const { DEVELOPMENT_PROFILE, resolveLauncherProfile } = require("./profile.cjs");
 const { runtimeBundlePaths } = require("./runtime-command.cjs");
 const { createUpdateController } = require("./update.cjs");
@@ -542,7 +543,7 @@ function registerIpc({ logger, stateStore }) {
   });
   const runtimeChannels = new Set([
     "launcher:setup-core", "launcher:setup-mcp", "launcher:uninstall-integration",
-    "launcher:bigger-context", "launcher:skill-attachments", "launcher:fresh-conversation-per-turn",
+    "launcher:bigger-context", "launcher:semantic-memory", "launcher:skill-attachments", "launcher:fresh-conversation-per-turn",
     "launcher:use-saved-chats", "launcher:zero-risk-pro", "launcher:browser-interaction-mode",
     "launcher:auto-approve-tool-calls",
     "launcher:connector-name", "launcher:mcp-verify", "launcher:doctor", "launcher:cancel-turns",
@@ -804,6 +805,7 @@ function registerIpc({ logger, stateStore }) {
       codexRestartRequired: true,
       browserInteractionMode: "automatic",
       experimentalBiggerContext: false,
+      experimentalSemanticMemory: false,
       experimentalSkillAttachments: false,
       experimentalFreshConversationPerTurn: false,
       useSavedChats: false,
@@ -843,6 +845,7 @@ function registerIpc({ logger, stateStore }) {
       codexRestartRequired: IS_DEV_PROFILE ? false : true,
       biggerContextAvailable: runtimeHost.runtimeConfigSnapshot().config?.solAvailable === true,
       experimentalBiggerContext: runtimeHost.runtimeConfigSnapshot().config?.experimentalBiggerContext === true,
+      experimentalSemanticMemory: runtimeHost.runtimeConfigSnapshot().config?.experimentalSemanticMemory === true,
       zeroRiskProEnabled: runtimeHost.runtimeConfigSnapshot().config?.zeroRiskProEnabled === true,
       experimentalFreshConversationPerTurn: runtimeHost.runtimeConfigSnapshot().config?.experimentalFreshConversationPerTurn === true,
       useSavedChats: runtimeHost.runtimeConfigSnapshot().config?.useSavedChats === true,
@@ -889,6 +892,7 @@ function registerIpc({ logger, stateStore }) {
       ...(interactionMode === "manual" ? { experimentalBiggerContext: false, experimentalSkillAttachments: false } : {}),
       biggerContextAvailable: runtimeHost.runtimeConfigSnapshot().config?.solAvailable === true,
       experimentalBiggerContext: runtimeHost.runtimeConfigSnapshot().config?.experimentalBiggerContext === true,
+      experimentalSemanticMemory: runtimeHost.runtimeConfigSnapshot().config?.experimentalSemanticMemory === true,
       zeroRiskProEnabled: runtimeHost.runtimeConfigSnapshot().config?.zeroRiskProEnabled === true,
       experimentalFreshConversationPerTurn: runtimeHost.runtimeConfigSnapshot().config?.experimentalFreshConversationPerTurn === true,
       useSavedChats: runtimeHost.runtimeConfigSnapshot().config?.useSavedChats === true,
@@ -942,6 +946,16 @@ function registerIpc({ logger, stateStore }) {
     });
     send("launcher:state-changed", state);
     if (!IS_DEV_PROFILE) startCatalogVerificationMonitor({ logger, stateStore });
+    return state;
+  });
+  handle("launcher:semantic-memory", async (_event, enabled) => {
+    if (typeof enabled !== "boolean") throw new Error("Semantic memory preference must be a boolean");
+    if (browserHost.activeTraceId || browserHost.currentOperation() || runtimeHost.currentOperation()) {
+      throw new Error("Finish active ChatGPT turns and launcher operations before changing semantic memory");
+    }
+    const result = await setSemanticMemoryPreference(runtimeSupervisor, enabled);
+    const state = stateStore.update({ experimentalSemanticMemory: result.enabled });
+    send("launcher:state-changed", state);
     return state;
   });
   handle("launcher:skill-attachments", async (_event, enabled) => {
@@ -1017,6 +1031,7 @@ function registerIpc({ logger, stateStore }) {
     const state = stateStore.update({
       browserInteractionMode: mode,
       biggerContextAvailable: runtimeHost.runtimeConfigSnapshot().config?.solAvailable === true,
+      experimentalSemanticMemory: runtimeHost.runtimeConfigSnapshot().config?.experimentalSemanticMemory === true,
       experimentalFreshConversationPerTurn: runtimeHost.runtimeConfigSnapshot().config?.experimentalFreshConversationPerTurn === true,
       useSavedChats: runtimeHost.runtimeConfigSnapshot().config?.useSavedChats === true,
       autoApproveToolCalls: runtimeHost.runtimeConfigSnapshot().config?.autoApproveToolCalls === true,
@@ -1381,6 +1396,7 @@ async function start() {
         codexCatalogVerified: false,
         codexRestartRequired: true,
         experimentalBiggerContext: runtimeHost.runtimeConfigSnapshot().config?.experimentalBiggerContext === true,
+        experimentalSemanticMemory: runtimeHost.runtimeConfigSnapshot().config?.experimentalSemanticMemory === true,
         experimentalSkillAttachments: runtimeHost.runtimeConfigSnapshot().config?.experimentalSkillAttachments === true,
         experimentalFreshConversationPerTurn: runtimeHost.runtimeConfigSnapshot().config?.experimentalFreshConversationPerTurn === true,
         useSavedChats: runtimeHost.runtimeConfigSnapshot().config?.useSavedChats === true,
@@ -1407,6 +1423,7 @@ async function start() {
     const configuredRuntime = runtimeHost.runtimeConfigSnapshot();
     if (configuredRuntime.configured) {
       const enabled = configuredRuntime.config?.experimentalBiggerContext === true;
+      const experimentalSemanticMemory = configuredRuntime.config?.experimentalSemanticMemory === true;
       const experimentalSkillAttachments = configuredRuntime.config?.experimentalSkillAttachments === true;
       const experimentalFreshConversationPerTurn = configuredRuntime.config?.experimentalFreshConversationPerTurn === true;
       const useSavedChats = configuredRuntime.config?.useSavedChats === true;
@@ -1414,12 +1431,13 @@ async function start() {
       const zeroRiskProEnabled = configuredRuntime.config?.zeroRiskProEnabled === true;
       const saved = stateStore.read();
       if (saved.experimentalSkillAttachments !== experimentalSkillAttachments
+        || saved.experimentalSemanticMemory !== experimentalSemanticMemory
         || saved.experimentalFreshConversationPerTurn !== experimentalFreshConversationPerTurn
         || saved.useSavedChats !== useSavedChats
         || saved.autoApproveToolCalls !== autoApproveToolCalls
         || saved.experimentalBiggerContext !== enabled
         || saved.zeroRiskProEnabled !== zeroRiskProEnabled) {
-        const state = stateStore.update({ experimentalBiggerContext: enabled, experimentalSkillAttachments, experimentalFreshConversationPerTurn, useSavedChats, autoApproveToolCalls, zeroRiskProEnabled });
+        const state = stateStore.update({ experimentalBiggerContext: enabled, experimentalSemanticMemory, experimentalSkillAttachments, experimentalFreshConversationPerTurn, useSavedChats, autoApproveToolCalls, zeroRiskProEnabled });
         send("launcher:state-changed", state);
       }
     }
@@ -1435,6 +1453,7 @@ async function start() {
         coreSetupComplete: true,
         mcpRuntimeInstalled: config.mode === "full",
         experimentalBiggerContext: config.experimentalBiggerContext === true,
+        experimentalSemanticMemory: config.experimentalSemanticMemory === true,
         experimentalSkillAttachments: config.experimentalSkillAttachments === true,
         experimentalFreshConversationPerTurn: config.experimentalFreshConversationPerTurn === true,
         useSavedChats: config.useSavedChats === true,

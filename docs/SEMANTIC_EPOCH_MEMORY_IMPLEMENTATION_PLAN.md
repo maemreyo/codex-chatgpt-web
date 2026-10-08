@@ -7,7 +7,7 @@ Fork: `maemreyo/codex-chatgpt-web`
 Upstream: `miuuyy/codex-chatgpt-web`
 Upstream baseline: `92a356f` (`v6.1.5`); design originally reviewed against `b6ca2d3` (`v6.1.4`)
 Current fork candidate: `fdb15ff` (`feat: scaffold semantic epoch memory safely`), not yet merged with `v6.1.5`
-Visibility: hidden, unadvertised, config-file-only experiment (section 5.8). Not a quota or rate-limit feature.
+Visibility: local opt-in experiment in launcher Settings (section 5.8). Not a quota or rate-limit feature.
 
 ## 1. Review purpose
 
@@ -331,17 +331,20 @@ Codex backend. This project makes **no claim** about account-side quota, billing
 semantics, in either direction, in code comments, docs, logs, or UI. Routing tests assert routing,
 nothing more.
 
-### 5.8 Hidden, unadvertised, cost-bounded
+### 5.8 Local opt-in, unadvertised, cost-bounded
 
-This is a private experiment, not a product feature. It must not be discoverable or promoted:
+The owner approved an early Settings opt-in on 2026-10-09 to gather real evidence before S8.
+Only the SEM projection toggle is exposed in the launcher's Experimental Features card;
+the dedicated Web compactor and ~240k logical window remain independent hidden gates.
+The experiment must not be promoted:
 
-- configuration is file-only (`experimentalSemanticMemory`, and the separate compactor setting); no
-  launcher Settings control, no `setup` CLI flag or prompt, no `doctor` advertisement, no model
+- configuration is persisted to the existing runtime config from a local launcher Settings switch;
+  no `setup` CLI flag or prompt, no `doctor` advertisement, no model
   catalog or model-picker label that mentions it;
 - the logical ~240k catalog value applies only when the flag is on; the default catalog is unchanged
   and no shipped display name, description or release note refers to it;
-- no mention in `README*`, `TROUBLESHOOTING.md`, `CONTRIBUTING.md`, launcher copy, or release notes.
-  The design docs stay under `docs/` and are not linked from any of those;
+- the Settings card describes the local experimental SEM projection and explains its prerequisites.
+  Neither the 240k logical-window gate nor the dedicated compactor is available there;
 - wording in docs, comments, log lines and tests describes **context and memory management** only.
   Do not use "quota", "free", "unlimited", or "bypass" language, including in negative marketing
   phrasing. This plan names those words only to prohibit them elsewhere. It matches upstream's own
@@ -1766,6 +1769,27 @@ Bun 1.4.0 line. All evidence is fake-harness only; no live browser or account ru
 The logical 240k flag (`experimentalSemanticLogicalWindow`) stays OFF until the owner reads in-use
 `semantic-log-report` output and decides (M3). S9 remains gated behind that decision.
 
+Local diagnostics follow-up (2026-10-08): read-only `semanticLogReport()` aggregation on the
+retained diagnostic-observations archives found **0 `semantic_*` events** in 16,003 observations
+for Zam Codex Web and 840 for Codex Web GPT. No Activity **Export safe log** was found in the
+usual user export folders. These diagnostic archives are incomplete, so zero retained events
+does not establish that SEM never ran or that it is disabled. **M3 remains undecided** until a
+reviewed safe log export from in-use SEM sessions supplies actual cost, rotation, pressure and
+recovery measurements. No live model submission was made for this observation.
+Subsequent local configuration metadata inspection (without printing secrets) confirms
+`experimentalSemanticMemory=false`, `experimentalSemanticLogicalWindow=false`, and
+`experimentalBiggerContext=true`. The absence of SEM events is therefore consistent with
+the current disabled SEM setting. Bigger Context and the SEM logical-window flag are
+separate controls; the latter was not activated.
+
+On 2026-10-09, a read-only `semantic-log-report.ts` run against the installed
+`Codex Web GPT/logs/launcher.jsonl` (~17,001 records at inspection time) also
+reported **0 semantic events, 0 rotations, and 0 cost samples**. This is a
+measurement of the currently retained launcher log, not evidence of S8 readiness.
+M3 therefore remains **undecided**, and both the experimental 240k logical
+window and S9 stay gated until the owner explicitly decides from representative
+in-use SEM diagnostics.
+
 Proposed direction remains parent+delta with v1 read compatibility, but add sparse base snapshots or
 ancestor-preserving pruning only after a dedicated storage/replay review. The covered-history digest
 must remain identical for equivalent canonical history regardless of whether it came from full input
@@ -1862,7 +1886,7 @@ Process:
 - the invariant-19 and stock-install tests are the automated tripwire for those silent breaks and run
   on every merge;
 - the provenance sidecar stays additive and private so upstream parser fixes remain mergeable;
-- keep the feature default-off and hidden until S8 acceptance is repeatable, and keep it hidden
+- keep the feature default-off on fresh installs with explicit Settings opt-in until S8 acceptance is repeatable, and keep S8 hidden
   after (section 5.8).
 
 Merge and implementation log:
