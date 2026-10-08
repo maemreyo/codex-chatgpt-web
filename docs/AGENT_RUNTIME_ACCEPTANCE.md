@@ -18,8 +18,9 @@ Scope: branch `feat/zam-agent-runtime-pr-main`, based directly on **the owner's 
 | Version consistency | `bun run check-version` | PASS |
 | Runtime suite from fork-main base | `bun test ./tests` | **850 passed / 28 skipped / 0 failed**, 878 tests |
 | Electron/Launcher suite | `bun run --cwd launcher test` | **379 passed / 2 skipped / 0 failed**, 381 tests |
-| Packaged macOS arm64 | `bun run --cwd launcher package:mac`, signed-bundle verification | RC artifact metadata below |
-| Packaged launcher/embedded runtime | `bun run --cwd launcher smoke:package` | RC smoke result below |
+| Packaged macOS arm64 | `bun run --cwd launcher package:mac`, signed-bundle verification | PASS |
+| Packaged launcher/embedded runtime | `bun run --cwd launcher smoke:package` | **PACKAGED_LAUNCHER_SMOKE_OK darwin/arm64** |
+| Packaged CLI with temporary Codex profile | `launcher/build/runtime/runtime/bun launcher/build/runtime/app/cli.js agents inspect --codex-home <temp>` | **PACKAGED_AGENT_CLI_INSPECT_OK**, four roles |
 
 Only macOS arm64 is packaged here; Windows/Linux must be built on matching host operating systems.
 
@@ -42,6 +43,8 @@ This record supports reviewing a candidate PR, not promoting a stable release. R
 
 - macOS arm64; embedded Bun 1.4.0; ad-hoc signed with hardened runtime; **not notarized**.
 - Version 6.1.8-rc.1, generated locally: `launcher/artifacts/codex-web-gpt-6.1.8-rc.1-mac-arm64.dmg` and `.zip` (excluded from Git).
+- DMG SHA-256: `30b350b293ac6b68cb4bff048e3497f59d5a855544be61b048dce785b09e0a60` (~157 MiB).
+- ZIP SHA-256: `77ceb537e134488bf88809250c6075d52da413ca3e2d9eca7aff258c06d11b19` (~161 MiB).
 - The RC tag/release is not published. The stable README links continue to point to the previously published stable version rather than to nonexistent RC downloads.
 
 ## Safety and ownership
