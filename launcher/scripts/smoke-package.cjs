@@ -82,8 +82,8 @@ try {
     const stage = path.join(scratch, "stage");
     fs.mkdirSync(stage);
     run("ditto", ["-x", "-k", archive, stage]);
-    macAppBundle = path.join(stage, "Zam Codex Web.app");
-    executable = path.join(macAppBundle, "Contents", "MacOS", "Zam Codex Web");
+    macAppBundle = path.join(stage, `${launcherManifest.build.productName}.app`);
+    executable = path.join(macAppBundle, "Contents", "MacOS", launcherManifest.build.productName);
     command = executable;
     args = ["--launcher-smoke-test"];
   } else if (process.platform === "linux") {
