@@ -100,11 +100,19 @@ that ChatGPT will follow them more reliably.
 
 ## Bigger Context experiment
 
-Both launcher profiles expose **Bigger Context (experimental)** in Settings. It is disabled by
-default. The switch updates the profile's canonical runtime configuration through the normal setup
+Both launcher profiles expose **Bigger Context (experimental)** in Settings. It is enabled by
+default for new eligible automatic Sol profiles (Plus and Pro); Luna/Think and Zero Risk use standard
+context. An existing saved `false` preference stays off until explicitly enabled. The switch updates
+the profile's canonical runtime configuration through the normal setup
 transaction; it is not a launcher-only preference. Production setup also rewrites the managed
 Codex model catalog with 3x context and auto-compaction thresholds and asks you to restart Codex.
 The DEV CLI reads the same setting from its isolated runtime configuration on each command.
+
+For GPT-6 Sol, Bigger Context advertises 240,000 context tokens and a 220,000-token
+auto-compaction threshold on Plus and Pro for Medium, High, and account-supported Extra High.
+Instant keeps its standard window. Only Pro's GPT-6 staged window has been verified in a live
+browser; the Plus profile is experimental and may encounter upstream retention or message limits.
+GPT-5.6 keeps its existing account-specific 3x windows.
 
 When enabled, a normal turn stays on the original single-message path while its estimated input
 is below the selected mode's existing auto-compaction threshold. At the first threshold it uses two
@@ -140,7 +148,9 @@ stage must still fit the selected ChatGPT mode's measured one-message boundary.
 Small turns use one request. Two-part turns use one inert staging request and one final request;
 six-part turns use five staging requests and one final request. Browser-only compaction also uses
 six parts. Inert stages use the fastest available mode that fits their complete messages; the final
-part uses the selected execution effort. Large turns may increase the probability of
+part uses the selected execution effort. Plus Instant uploads keep the same input headroom as
+ordinary Instant turns; the selected final mode can receive a larger share of the context.
+Large turns may increase the probability of
 rate limits or a temporary account cooldown. The experiment is intentionally unavailable for Luna:
 Luna's later requests still include the accumulated transcript inside the same measured
 28,000-token browser transport budget.

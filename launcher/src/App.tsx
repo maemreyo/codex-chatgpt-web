@@ -14,6 +14,7 @@ import { createPortal } from "react-dom";
 import { copyFor, localizeRuntimeMessage, type Copy } from "./i18n";
 import { Icon, type IconName } from "./icons";
 import { LimitsSurface } from "./LimitsSurface";
+import { AgentManagerPanel } from "./AgentManagerPanel";
 import { limitsCopyFor } from "./limits-copy";
 import { useLimits } from "./useLimits";
 import { describeTurnActivity } from "./turn-activity";
@@ -359,6 +360,7 @@ function LauncherShell({
   const [biggerContextRecommendationOpen, setBiggerContextRecommendationOpen] = useState(
     snapshot.state.browserInteractionMode === "automatic"
       && snapshot.state.coreSetupComplete === true
+      && snapshot.state.biggerContextAvailable === true
       && !snapshot.state.experimentalBiggerContext,
   );
   const [biggerContextRecommendationBusy, setBiggerContextRecommendationBusy] = useState(false);
@@ -381,10 +383,10 @@ function LauncherShell({
   const limitsCopy = limitsCopyFor(language);
 
   useEffect(() => {
-    if (snapshot.state.browserInteractionMode === "manual") {
+    if (snapshot.state.browserInteractionMode === "manual" || snapshot.state.biggerContextAvailable !== true) {
       setBiggerContextRecommendationOpen(false);
     }
-  }, [snapshot.state.browserInteractionMode]);
+  }, [snapshot.state.browserInteractionMode, snapshot.state.biggerContextAvailable]);
 
   useEffect(() => {
     if (!selectedManualTab) return;
@@ -744,6 +746,7 @@ function LauncherShell({
             ) : null}
             {surface === "settings" ? (
               <SettingsSurface
+                browser={browser}
                 configureInteractionMode={(mode) => {
                   setMcpTargetMode(mode);
                   setSurface("mcp");
@@ -955,7 +958,7 @@ function BrowserSurface({
 
   return (
     <section className="browser-surface">
-      <div className="browser-tab-strip" title={copy.browserTabLimit}>
+      <div className="browser-tab-strip" title={copy.browserTabLimit.replace("{count}", String(browser?.maxTabs ?? 5))}>
         {(browser?.tabs ?? []).map((tab) => (
           <div
             className={`browser-tab${tab.active ? " is-active" : ""}`}
@@ -1667,6 +1670,7 @@ function ActivitySurface({
 }
 
 function SettingsSurface({
+  browser,
   configureInteractionMode,
   copy,
   devProfile,
@@ -1675,6 +1679,7 @@ function SettingsSurface({
   snapshot,
   updateState,
 }: {
+  browser: BrowserState | null;
   configureInteractionMode: (mode: BrowserInteractionMode) => void;
   copy: Copy;
   devProfile: boolean;
@@ -1687,6 +1692,23 @@ function SettingsSurface({
   const [busy, setBusy] = useState(false);
   const [turnsCancelled, setTurnsCancelled] = useState(false);
   const [integrationRemoved, setIntegrationRemoved] = useState(false);
+  const [capacityBusy, setCapacityBusy] = useState(false);
+  const effectiveCapacity = browser?.maxTabs ?? snapshot.browser?.maxTabs ?? 5;
+  const requestedCapacity = snapshot.state.maxBrowserSessions;
+  const pendingCapacity = requestedCapacity !== effectiveCapacity;
+  const capacityBody = `${copy.browserCapacityBody} ${copy.browserCapacityEffective.replace("{count}", String(effectiveCapacity))}`
+    + (pendingCapacity ? ` ${copy.browserCapacityPending.replace("{count}", String(requestedCapacity))}` : "");
+  const changeCapacity = async (value: number) => {
+    setCapacityBusy(true);
+    setError(null);
+    try {
+      updateState(await api!.setMaxBrowserSessions(value));
+    } catch (cause) {
+      setError(messageOf(cause));
+    } finally {
+      setCapacityBusy(false);
+    }
+  };
   const currentPluginName = snapshot.connectorNames[snapshot.state.browserInteractionMode];
   const [nameSuffix, setNameSuffix] = useState(currentPluginName.slice(6));
   const [confirmNameChange, setConfirmNameChange] = useState(false);
@@ -1885,6 +1907,8 @@ function SettingsSurface({
         <SettingRow
           body={snapshot.state.browserInteractionMode === "manual"
             ? copy.manualBiggerContextUnavailable
+            : snapshot.state.biggerContextAvailable === false
+            ? copy.lunaBiggerContextUnavailable
             : copy.biggerContextBody}
           label={copy.biggerContext}
         >
@@ -1892,6 +1916,7 @@ function SettingsSurface({
             checked={snapshot.state.experimentalBiggerContext}
             disabled={busy
               || snapshot.state.browserInteractionMode === "manual"
+              || (snapshot.state.biggerContextAvailable !== true && !snapshot.state.experimentalBiggerContext)
               || snapshot.state.coreSetupComplete !== true}
             onChange={(checked) => void setBiggerContext(checked)}
           />
@@ -1930,6 +1955,24 @@ function SettingsSurface({
         <SettingRow body={copy.chooseLanguageHint} label={copy.language}>
           <LanguageMenu copy={copy} language={language} onChange={(next) => void updateLanguage(next)} />
         </SettingRow>
+      </div>
+
+      <SectionHeading label={copy.agentTitle} spaced />
+      <div className="settings-list">
+        <SettingRow body={capacityBody} label={copy.browserCapacityTitle}>
+          <select
+            aria-label={copy.browserCapacityTitle}
+            className="browser-capacity-select"
+            disabled={capacityBusy || busy}
+            onChange={event => void changeCapacity(Number(event.target.value))}
+            value={requestedCapacity}
+          >
+            {[5, 6, 7, 8].map(value => <option key={value} value={value}>{value}</option>)}
+          </select>
+        </SettingRow>
+        {api?.agents ? <AgentManagerPanel api={api.agents} language={language}
+          browserCapacity={requestedCapacity} onSetBrowserCapacity={changeCapacity} />
+          : <p className="agent-manager-placeholder">{copy.agentManagerPlaceholder}</p>}
       </div>
 
       {!devProfile && snapshot.state.codexRestartRequired ? (

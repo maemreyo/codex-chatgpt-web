@@ -168,6 +168,37 @@ test("launcher runtime ownership cannot cross production and DEV profiles", () =
   }
 });
 
+test("capacity is validated and survives config migration and CLI rewrites in production and DEV", () => {
+  for (const profile of ["production", "development"]) {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), "browser-capacity-supervisor-"));
+    try {
+      const descriptor = path.join(root, "runtime", "launcher-browser.json");
+      const configPath = path.join(root, "config.json");
+      const raw = launcherConfig(descriptor, profile === "development" ? { purpose: "dev-harness" } : {});
+      let preference = 5;
+      fs.writeFileSync(configPath, JSON.stringify(raw));
+      const supervisor = new RuntimeSupervisor({ coreHome: root, browserDescriptorPath: descriptor,
+        launcherProfile: profile, getMaxBrowserSessions: () => preference });
+      assert.equal(supervisor.readConfig().maxBrowserSessions, 5);
+      assert.equal(JSON.parse(fs.readFileSync(configPath)).maxBrowserSessions, 5);
+      preference = 8;
+      supervisor.setMaxBrowserSessions(preference);
+      assert.equal(supervisor.readConfig().maxBrowserSessions, 8);
+      assert.equal(JSON.parse(fs.readFileSync(configPath)).maxBrowserSessions, 8);
+      fs.writeFileSync(configPath, JSON.stringify(raw)); // A CLI setup generated a legacy config.
+      supervisor.readConfig();
+      assert.equal(JSON.parse(fs.readFileSync(configPath)).maxBrowserSessions, 8);
+      for (const invalid of [null, "8", 4, 9, 5.5, NaN]) {
+        assert.throws(() => validateConfig({ ...raw, maxBrowserSessions: invalid }, descriptor,
+          process.platform, profile), /Max browser sessions/);
+        assert.throws(() => supervisor.setMaxBrowserSessions(invalid), /Max browser sessions/);
+      }
+    } finally {
+      fs.rmSync(root, { recursive: true, force: true });
+    }
+  }
+});
+
 test("DEV runtime supervision ignores launcher version mismatch and starts only the isolated MCP tunnel", async () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "codex-web-gpt-dev-tunnel-supervisor-"));
   const descriptorPath = path.join(root, "runtime", "launcher-browser.json");
@@ -2049,7 +2080,7 @@ test("observed CLI fresh-conversation changes retire completed tabs once and def
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "codex-web-gpt-fresh-config-"));
   const descriptorPath = path.join(root, "launcher.json");
   const configPath = path.join(root, "config.json");
-  const state = { experimentalFreshConversationPerTurn: false, useSavedChats: false, autoApproveToolCalls: false };
+  const state = { experimentalFreshConversationPerTurn: false, useSavedChats: false, autoApproveToolCalls: false, biggerContextAvailable: true };
   const key = "a".repeat(64);
   const old = { id: "old", traceId: "old-trace", status: "ready", interactionMode: "automatic", conversationKey: key,
     connectorIdentity: "Codex Native2", connectorBound: true };

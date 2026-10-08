@@ -3,13 +3,13 @@
 </p>
 
 <p align="center">
-  <a href="https://github.com/miuuyy/codex-chatgpt-web/releases/download/v6.1.4/codex-web-gpt-6.1.4-win-x64.exe"><img src="assets/readme/download-windows.svg" width="224" height="64" alt="Windows · x64"></a>&nbsp;
-  <a href="https://github.com/miuuyy/codex-chatgpt-web/releases/download/v6.1.4/codex-web-gpt-6.1.4-mac-arm64.dmg"><img src="assets/readme/download-macos.svg" width="224" height="64" alt="macOS · Apple silicon"></a>&nbsp;
-  <a href="https://github.com/miuuyy/codex-chatgpt-web/releases/download/v6.1.4/codex-web-gpt-6.1.4-linux-x64.AppImage"><img src="assets/readme/download-linux.svg" width="224" height="64" alt="Linux · x64"></a>
+  <a href="https://github.com/miuuyy/codex-chatgpt-web/releases/download/v6.1.5/codex-web-gpt-6.1.5-win-x64.exe"><img src="assets/readme/download-windows.svg" width="224" height="64" alt="Windows · x64"></a>&nbsp;
+  <a href="https://github.com/miuuyy/codex-chatgpt-web/releases/download/v6.1.5/codex-web-gpt-6.1.5-mac-arm64.dmg"><img src="assets/readme/download-macos.svg" width="224" height="64" alt="macOS · Apple silicon"></a>&nbsp;
+  <a href="https://github.com/miuuyy/codex-chatgpt-web/releases/download/v6.1.5/codex-web-gpt-6.1.5-linux-x64.AppImage"><img src="assets/readme/download-linux.svg" width="224" height="64" alt="Linux · x64"></a>
 </p>
 
 <p align="center">
-  <a href="https://github.com/miuuyy/codex-chatgpt-web/releases/download/v6.1.4/codex-web-gpt-6.1.4-mac-x64.dmg">macOS Intel</a> · <a href="https://github.com/miuuyy/codex-chatgpt-web/releases/latest">所有版本</a>
+  <a href="https://github.com/miuuyy/codex-chatgpt-web/releases/download/v6.1.5/codex-web-gpt-6.1.5-mac-x64.dmg">macOS Intel</a> · <a href="https://github.com/miuuyy/codex-chatgpt-web/releases/latest">所有版本</a>
 </p>
 
 <p align="center">
@@ -27,6 +27,8 @@
 在 Codex 原生模型选择器中使用账户可用的 ChatGPT 网页版模型，包括 Pro。使用 ChatGPT 网页版的独立额度，不消耗 Work 或 Codex 额度。保留原有的界面、任务、图片和流式输出。
 
 完整 harness 模式通过 MCP 将 ChatGPT 连接到当前任务的文件、终端、工具和审批流程。对话始终关联到你的 Codex 任务，上下文增长时也能继续工作。
+
+**6.1.8-rc.1 功能预览：**[Agents & Runtime 设置指南](docs/AGENT_RUNTIME_USER_GUIDE.md) · [验证结果与待完成的验收测试](docs/AGENT_RUNTIME_ACCEPTANCE.md)。上方安装链接仍指向已发布的稳定版本。
 
 <div id="get-started"><a id="quick-start"></a></div>
 

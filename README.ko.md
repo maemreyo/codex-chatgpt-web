@@ -3,13 +3,13 @@
 </p>
 
 <p align="center">
-  <a href="https://github.com/miuuyy/codex-chatgpt-web/releases/download/v6.1.4/codex-web-gpt-6.1.4-win-x64.exe"><img src="assets/readme/download-windows.svg" width="224" height="64" alt="Windows · x64"></a>&nbsp;
-  <a href="https://github.com/miuuyy/codex-chatgpt-web/releases/download/v6.1.4/codex-web-gpt-6.1.4-mac-arm64.dmg"><img src="assets/readme/download-macos.svg" width="224" height="64" alt="macOS · Apple silicon"></a>&nbsp;
-  <a href="https://github.com/miuuyy/codex-chatgpt-web/releases/download/v6.1.4/codex-web-gpt-6.1.4-linux-x64.AppImage"><img src="assets/readme/download-linux.svg" width="224" height="64" alt="Linux · x64"></a>
+  <a href="https://github.com/miuuyy/codex-chatgpt-web/releases/download/v6.1.5/codex-web-gpt-6.1.5-win-x64.exe"><img src="assets/readme/download-windows.svg" width="224" height="64" alt="Windows · x64"></a>&nbsp;
+  <a href="https://github.com/miuuyy/codex-chatgpt-web/releases/download/v6.1.5/codex-web-gpt-6.1.5-mac-arm64.dmg"><img src="assets/readme/download-macos.svg" width="224" height="64" alt="macOS · Apple silicon"></a>&nbsp;
+  <a href="https://github.com/miuuyy/codex-chatgpt-web/releases/download/v6.1.5/codex-web-gpt-6.1.5-linux-x64.AppImage"><img src="assets/readme/download-linux.svg" width="224" height="64" alt="Linux · x64"></a>
 </p>
 
 <p align="center">
-  <a href="https://github.com/miuuyy/codex-chatgpt-web/releases/download/v6.1.4/codex-web-gpt-6.1.4-mac-x64.dmg">macOS Intel</a> · <a href="https://github.com/miuuyy/codex-chatgpt-web/releases/latest">모든 릴리스</a>
+  <a href="https://github.com/miuuyy/codex-chatgpt-web/releases/download/v6.1.5/codex-web-gpt-6.1.5-mac-x64.dmg">macOS Intel</a> · <a href="https://github.com/miuuyy/codex-chatgpt-web/releases/latest">모든 릴리스</a>
 </p>
 
 <p align="center">
@@ -27,6 +27,8 @@
 Codex의 네이티브 모델 선택기에서 Pro를 포함해 계정에 제공되는 ChatGPT Web 모델을 사용하세요. ChatGPT Web의 별도 사용 한도를 사용하므로 Work나 Codex의 사용량은 차감되지 않습니다. 기존 인터페이스, 작업, 이미지, 스트리밍은 그대로 유지됩니다.
 
 Full harness 모드는 MCP를 통해 ChatGPT를 현재 작업의 파일, 터미널, 도구 및 승인 절차에 연결합니다. 대화는 Codex 작업에 계속 연결되어 있으므로 컨텍스트가 늘어나도 작업을 이어갈 수 있습니다.
+
+**6.1.8-rc.1 미리보기:** [Agents & Runtime 설정 안내](docs/AGENT_RUNTIME_USER_GUIDE.md) · [검증 결과 및 남은 승인 테스트](docs/AGENT_RUNTIME_ACCEPTANCE.md). 위 설치 링크는 게시된 안정 버전을 가리킵니다.
 
 <div id="get-started"><a id="quick-start"></a></div>
 

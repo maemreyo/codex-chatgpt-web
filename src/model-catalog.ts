@@ -46,14 +46,18 @@ function routedModelPriority(
   config: AppConfig,
 ): number | undefined {
   const priority = modelPriority(template);
-  if (priority === undefined
-    || config.subagentProtocol !== "compatibility-v1"
-    || !["chatgpt-web/light", "chatgpt-web/gpt-5.6-sol-instant"].includes(route.slug)) return priority;
-  if (priority === Number.MAX_SAFE_INTEGER) {
+  if (priority === undefined || config.subagentProtocol !== "compatibility-v1") return priority;
+  // The native row keeps the lead, the default routed subagent model follows it, and the GPT-6 Sol
+  // rows sort after both so the five-slot spawn-agent registry keeps its existing members.
+  const offset = ["chatgpt-web/light", "chatgpt-web/gpt-5.6-sol-instant"].includes(route.slug) ? 1
+    : ["chatgpt-web/gpt-6-sol-instant", "chatgpt-web/gpt-6-sol"].includes(route.slug) ? 2
+      : 0;
+  if (offset === 0) return priority;
+  if (priority > Number.MAX_SAFE_INTEGER - offset) {
     throw new Error("Native Codex model template priority cannot reserve the Compatibility V1 roster");
   }
   // Preserve the native model and the reasoning/Pro choices in Codex V1's bounded registry.
-  return priority + 1;
+  return priority + offset;
 }
 
 function nativeTemplateCandidate(value: unknown, requireTools: boolean): value is JsonObject {
@@ -103,12 +107,13 @@ export function buildChatGptWebModel(
   if (!templateSlug || templateSlug.startsWith(CHATGPT_WEB_MODEL_PREFIX)) {
     throw new Error("ChatGPT Web model template must be a native Codex model");
   }
-  const limits = resolveChatGptWebContextLimits(route.backendModel, route.adapterEffort, config);
+  const modelFamily = route.interactionMode === "automatic" ? route.modelFamily : undefined;
+  const limits = resolveChatGptWebContextLimits(route.backendModel, route.adapterEffort, config, modelFamily);
   const efforts = chatGptWebRouteEfforts(route, config);
   for (const effort of efforts) {
     const adapterEffort = route.supportedCodexEfforts ? effort : route.adapterEffort;
     if (adapterEffort === "ultra") throw new Error("Ultra is not a browser effort");
-    const candidate = resolveChatGptWebContextLimits(route.backendModel, adapterEffort, config);
+    const candidate = resolveChatGptWebContextLimits(route.backendModel, adapterEffort, config, modelFamily);
     if (JSON.stringify(candidate) !== JSON.stringify(limits)) {
       throw new Error(`Cannot group different context budgets under ${route.slug}`);
     }

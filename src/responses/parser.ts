@@ -16,6 +16,7 @@ import { responsesRequestSchema } from "./schema";
 import { compactionItemToText, isNativeTextCompaction } from "./compaction";
 import { previousResponseReplayPrefixLength } from "./state";
 import { decodeReasoningEnvelope } from "./reasoning-envelope";
+import { semanticCanonicalItemsFromBody } from "./semantic-provenance";
 
 function isObj(v: unknown): v is Record<string, unknown> {
   return typeof v === "object" && v !== null && !Array.isArray(v);
@@ -219,14 +220,6 @@ function buildTools(tools: unknown[] | undefined): CodexTool[] | undefined {
   return out.length > 0 ? out : undefined;
 }
 
-function ensureAssistantPlaceholder(messages: CodexMessage[], modelId: string, now: number): CodexAssistantMessage {
-  const last = messages[messages.length - 1];
-  if (last && last.role === "assistant") return last;
-  const placeholder: CodexAssistantMessage = { role: "assistant", content: [], model: modelId, timestamp: now };
-  messages.push(placeholder);
-  return placeholder;
-}
-
 /**
  * Tool-call output content. Preserves images (e.g. Codex `view_image` returns
  * `input_image` items): returns content parts when any image is present, else a plain joined string.
@@ -285,17 +278,38 @@ export function parseRequest(body: unknown): CodexParsedRequest {
   const data = parsed.data;
   const now = Date.now();
   const messages: CodexMessage[] = [];
+  const semanticItems = semanticCanonicalItemsFromBody(body);
+  const messageSourceRefs: string[][] = [];
+  const pushMessage = <T extends CodexMessage>(message: T, refs: Array<string | undefined> = []): T => {
+    messages.push(message);
+    messageSourceRefs.push([...new Set(refs.filter((ref): ref is string => typeof ref === "string"))]);
+    return message;
+  };
+  const addMessageRef = (message: CodexMessage, ref: string | undefined): void => {
+    if (!ref) return;
+    const index = messages.lastIndexOf(message);
+    if (index < 0) return;
+    const refs = messageSourceRefs[index] ?? (messageSourceRefs[index] = []);
+    if (!refs.includes(ref)) refs.push(ref);
+  };
   const systemPrompt: string[] = [];
   // Responses reasoning siblings belong to the following assistant, including across call items.
   // Keep them off the message list until that assistant arrives; turn boundaries clear the array.
-  const pendingReasoning: Array<{ part: CodexThinkingContent; envelopeSigned: boolean }> = [];
+  const pendingReasoning: Array<{ part: CodexThinkingContent; envelopeSigned: boolean; sourceRefs: string[] }> = [];
   // Assistant placeholder that folds pending reasoning into the same turn before tool calls.
-  const assistantHolderWithReasoning = (): CodexAssistantMessage => {
-    const holder = ensureAssistantPlaceholder(messages, data.model, now);
+  const assistantHolderWithReasoning = (sourceRef?: string): CodexAssistantMessage => {
+    const last = messages[messages.length - 1];
+    const holder = last?.role === "assistant"
+      ? last
+      : pushMessage<CodexAssistantMessage>({ role: "assistant", content: [], model: data.model, timestamp: now });
     if (pendingReasoning.length > 0) {
       holder.content.push(...pendingReasoning.map(entry => entry.part));
+      for (const entry of pendingReasoning) {
+        for (const ref of entry.sourceRefs) addMessageRef(holder, ref);
+      }
       pendingReasoning.length = 0;
     }
+    addMessageRef(holder, sourceRef);
     return holder;
   };
   // Tool specs surfaced by a prior tool_search (deferred tools, e.g. subagents). Codex does not
@@ -311,9 +325,10 @@ export function parseRequest(body: unknown): CodexParsedRequest {
   }
 
   if (typeof data.input === "string") {
-    messages.push({ role: "user", content: data.input, timestamp: now });
+    pushMessage({ role: "user", content: data.input, timestamp: now }, [semanticItems[0]?.ref]);
   } else if (data.input) {
-    for (const item of data.input) {
+    for (const [rawIndex, item] of data.input.entries()) {
+      const sourceRef = semanticItems[rawIndex]?.ref;
       const effectiveType = (item as { type?: string }).type ?? ("role" in item ? "message" : undefined);
 
       if (effectiveType === "compaction_trigger") {
@@ -342,11 +357,11 @@ export function parseRequest(body: unknown): CodexParsedRequest {
         const encrypted = (item as { encrypted_content?: unknown }).encrypted_content;
         if (effectiveType === "context_compaction" && typeof encrypted !== "string") continue;
         pendingReasoning.length = 0;
-        messages.push({
+        pushMessage({
           role: "user",
           content: compactionItemToText(typeof encrypted === "string" ? encrypted : undefined),
           timestamp: now,
-        });
+        }, [sourceRef]);
         continue;
       }
 
@@ -375,7 +390,7 @@ export function parseRequest(body: unknown): CodexParsedRequest {
           content,
           timestamp: now,
         };
-        messages.push(message);
+        pushMessage(message, [sourceRef]);
 
         continue;
       }
@@ -402,12 +417,12 @@ export function parseRequest(body: unknown): CodexParsedRequest {
             const kinds = msg.internal_chat_message_metadata_passthrough?.content_item_kinds;
             const selectedSkill = msg.role === "user" && kinds?.length === 1
               && kinds[0] === "skills.selected_skill_instructions";
-            messages.push({ role: msg.role, content, timestamp: now, ...(selectedSkill ? { origin: "codex_skill" as const } : {}) });
+            pushMessage({ role: msg.role, content, timestamp: now, ...(selectedSkill ? { origin: "codex_skill" as const } : {}) }, [sourceRef]);
             break;
           }
           case "assistant": {
             const parts = outputTextOf(msg.content as unknown[] | string | undefined);
-            messages.push({
+            pushMessage({
               role: "assistant",
               content: pendingReasoning.length > 0
                 ? [...pendingReasoning.map(entry => entry.part), ...parts]
@@ -415,7 +430,7 @@ export function parseRequest(body: unknown): CodexParsedRequest {
               ...(msg.phase ? { phase: msg.phase } : {}),
               model: data.model,
               timestamp: now,
-            });
+            }, [...pendingReasoning.flatMap(entry => entry.sourceRefs), sourceRef]);
             pendingReasoning.length = 0;
             break;
           }
@@ -450,8 +465,9 @@ export function parseRequest(body: unknown): CodexParsedRequest {
               ...part,
               thinking: `${previous.part.thinking}\n${part.thinking}`,
             };
+            if (sourceRef && !previous.sourceRefs.includes(sourceRef)) previous.sourceRefs.push(sourceRef);
           } else {
-            pendingReasoning.push({ part, envelopeSigned });
+            pendingReasoning.push({ part, envelopeSigned, sourceRefs: sourceRef ? [sourceRef] : [] });
           }
         }
         continue;
@@ -478,7 +494,7 @@ export function parseRequest(body: unknown): CodexParsedRequest {
           type: "toolCall", id: call.call_id, name: call.name, arguments: args,
           ...(call.namespace ? { namespace: call.namespace } : {}),
         };
-        assistantHolderWithReasoning().content.push(toolCall);
+        assistantHolderWithReasoning(sourceRef).content.push(toolCall);
         continue;
       }
 
@@ -488,7 +504,7 @@ export function parseRequest(body: unknown): CodexParsedRequest {
           type: "toolCall", id: call.call_id, name: call.name,
           arguments: { input: call.input ?? "" },
         };
-        assistantHolderWithReasoning().content.push(toolCall);
+        assistantHolderWithReasoning(sourceRef).content.push(toolCall);
         continue;
       }
 
@@ -499,7 +515,7 @@ export function parseRequest(body: unknown): CodexParsedRequest {
         const callId = call.call_id ?? call.id;
         if (callId) {
           const command = Array.isArray(call.action?.command) ? call.action.command : [];
-          assistantHolderWithReasoning().content.push({
+          assistantHolderWithReasoning(sourceRef).content.push({
             type: "toolCall", id: callId, name: "shell",
             arguments: command.length > 0 ? { command } : {},
           });
@@ -519,7 +535,7 @@ export function parseRequest(body: unknown): CodexParsedRequest {
         // history stays complete (otherwise the model re-issues tool_search forever).
         const call = item as { id?: string; call_id?: string; arguments?: unknown };
         const callId = call.call_id ?? call.id ?? "";
-        assistantHolderWithReasoning().content.push({
+        assistantHolderWithReasoning(sourceRef).content.push({
           type: "toolCall", id: callId, name: "tool_search",
           arguments: isObj(call.arguments) ? call.arguments : {},
         });
@@ -546,7 +562,7 @@ export function parseRequest(body: unknown): CodexParsedRequest {
           }
         }
         const failed = typeof out.status === "string" && out.status !== "completed" && out.status !== "success";
-        messages.push({
+        pushMessage({
           role: "toolResult", toolCallId: out.call_id ?? "", toolName: "tool_search",
           content: failed && wireNames.length === 0
             ? `Tool search failed (status: ${out.status}).`
@@ -554,7 +570,7 @@ export function parseRequest(body: unknown): CodexParsedRequest {
               ? `Tool search loaded these tools — they are now in your available tools. Call one by its EXACT name: ${wireNames.join(", ")}.`
               : "Tool search returned no tools.",
           isError: failed && wireNames.length === 0, timestamp: now,
-        });
+        }, [sourceRef]);
         continue;
       }
 
@@ -562,11 +578,11 @@ export function parseRequest(body: unknown): CodexParsedRequest {
         pendingReasoning.length = 0;
         const output = item as { call_id: string; output?: string | unknown[] };
         const toolInfo = findToolById(messages, output.call_id);
-        messages.push({
+        pushMessage({
           role: "toolResult", toolCallId: output.call_id,
           toolName: toolInfo.name, toolNamespace: toolInfo.namespace,
           content: outputToToolResultContent(output.output), isError: false, timestamp: now,
-        });
+        }, [sourceRef]);
         continue;
       }
 
@@ -574,13 +590,13 @@ export function parseRequest(body: unknown): CodexParsedRequest {
         pendingReasoning.length = 0;
         const output = item as { call_id: string; output: string | unknown[] };
         const toolInfo = findToolById(messages, output.call_id);
-        messages.push({
+        pushMessage({
           role: "toolResult", toolCallId: output.call_id,
           toolName: toolInfo.name, toolNamespace: toolInfo.namespace,
           // Same payload shape as function_call_output (codex-rs FunctionCallOutputPayload):
           // string or content items — normalize arrays instead of leaking raw wire blocks.
           content: outputToToolResultContent(output.output), isError: false, timestamp: now,
-        });
+        }, [sourceRef]);
       }
     }
   }
@@ -635,6 +651,13 @@ export function parseRequest(body: unknown): CodexParsedRequest {
     stream: data.stream === true,
     options,
     _rawBody: body,
+    _semanticProvenance: {
+      version: 1,
+      digestPolicyVersion: 1,
+      items: semanticItems,
+      messageSourceRefs,
+      replayPrefixLength: replayedInputPrefixLength,
+    },
     ...(replayedInputPrefixLength > 0 ? { _replayPrefixLen: replayedInputPrefixLength } : {}),
     ...(compactionRequest || textCompaction ? { _compactionRequest: true } : {}),
     ...(textCompaction ? { _compactionResponseFormat: "message" as const } : {}),

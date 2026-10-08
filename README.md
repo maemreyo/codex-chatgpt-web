@@ -3,13 +3,13 @@
 </p>
 
 <p align="center">
-  <a href="https://github.com/miuuyy/codex-chatgpt-web/releases/download/v6.1.4/codex-web-gpt-6.1.4-win-x64.exe"><img src="assets/readme/download-windows.svg" width="224" height="64" alt="Windows · x64"></a>&nbsp;
-  <a href="https://github.com/miuuyy/codex-chatgpt-web/releases/download/v6.1.4/codex-web-gpt-6.1.4-mac-arm64.dmg"><img src="assets/readme/download-macos.svg" width="224" height="64" alt="macOS · Apple silicon"></a>&nbsp;
-  <a href="https://github.com/miuuyy/codex-chatgpt-web/releases/download/v6.1.4/codex-web-gpt-6.1.4-linux-x64.AppImage"><img src="assets/readme/download-linux.svg" width="224" height="64" alt="Linux · x64"></a>
+  <a href="https://github.com/miuuyy/codex-chatgpt-web/releases/download/v6.1.5/codex-web-gpt-6.1.5-win-x64.exe"><img src="assets/readme/download-windows.svg" width="224" height="64" alt="Windows · x64"></a>&nbsp;
+  <a href="https://github.com/miuuyy/codex-chatgpt-web/releases/download/v6.1.5/codex-web-gpt-6.1.5-mac-arm64.dmg"><img src="assets/readme/download-macos.svg" width="224" height="64" alt="macOS · Apple silicon"></a>&nbsp;
+  <a href="https://github.com/miuuyy/codex-chatgpt-web/releases/download/v6.1.5/codex-web-gpt-6.1.5-linux-x64.AppImage"><img src="assets/readme/download-linux.svg" width="224" height="64" alt="Linux · x64"></a>
 </p>
 
 <p align="center">
-  <a href="https://github.com/miuuyy/codex-chatgpt-web/releases/download/v6.1.4/codex-web-gpt-6.1.4-mac-x64.dmg">macOS Intel</a> · <a href="https://github.com/miuuyy/codex-chatgpt-web/releases/latest">All releases</a>
+  <a href="https://github.com/miuuyy/codex-chatgpt-web/releases/download/v6.1.5/codex-web-gpt-6.1.5-mac-x64.dmg">macOS Intel</a> · <a href="https://github.com/miuuyy/codex-chatgpt-web/releases/latest">All releases</a>
 </p>
 
 <p align="center">
@@ -27,6 +27,8 @@
 Use the ChatGPT Web models available on your account, including Pro, from Codex’s native model picker—with ChatGPT Web’s separate usage limits, without spending your Work or Codex quota. Keep the same interface, tasks, images, and streaming.
 
 Full harness mode connects ChatGPT to the current task’s files, terminal, tools, and approvals through MCP. Conversations stay tied to your Codex task, so you can keep working as the context grows.
+
+**6.1.8-rc.1 feature preview:** [Agents & Runtime settings guide](docs/AGENT_RUNTIME_USER_GUIDE.md) · [verification and live acceptance gates](docs/AGENT_RUNTIME_ACCEPTANCE.md). The installer links above still point to the published stable version while RC validation is ongoing.
 
 <div id="get-started"><a id="quick-start"></a></div>
 

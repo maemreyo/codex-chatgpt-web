@@ -35,7 +35,9 @@ const expected = [
 for (const [path, needle] of expected) {
   if (!readFileSync(resolve(root, path), "utf8").includes(needle)) throw new Error(`${path} is not synchronized to ${packageVersion}`);
 }
-for (const path of ["README.md", "README.zh-CN.md", "README.ja.md", "README.ko.md"]) {
+// Preview builds are not published until validation and tag promotion. Their
+// landing-page download buttons must continue targeting an actual stable release.
+for (const path of packageVersion.includes("-") ? [] : ["README.md", "README.zh-CN.md", "README.ja.md", "README.ko.md"]) {
   const readme = readFileSync(resolve(root, path), "utf8");
   for (const target of ["win-x64.exe", "mac-arm64.dmg", "mac-x64.dmg", "linux-x64.AppImage"]) {
     const download = `/releases/download/v${packageVersion}/codex-web-gpt-${packageVersion}-${target}`;

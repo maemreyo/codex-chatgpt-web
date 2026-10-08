@@ -29,6 +29,7 @@ function compactionEpoch(input: unknown[] | undefined): unknown {
 export function chatGptConversationKey(
   parsed: CodexParsedRequest,
   namespace: string,
+  options: { semanticEpoch?: number } = {},
 ): string | undefined {
   const identity = extractChatGptTurnIdentity(parsed);
   if (!identity.threadId) return undefined;
@@ -40,6 +41,7 @@ export function chatGptConversationKey(
     reasoning: parsed.options.reasoning,
     ...(parsed._chatgptModelFamily ? { modelFamily: parsed._chatgptModelFamily } : {}),
     compaction: compactionEpoch(raw?.input),
+    ...(options.semanticEpoch !== undefined ? { semanticEpoch: options.semanticEpoch } : {}),
   })).digest("hex");
 }
 

@@ -4,6 +4,7 @@ import { stdin, stderr, stdout } from "node:process";
 import type { CodexProviderConfig } from "../../types";
 import { ChatGptBrowserWorker, closeChatGptBrowserWorkers, type BrowserTurn } from "./browser-worker";
 import { ChatGptCompactionHandoffAccepted, ChatGptWebAdapterError } from "./adapter-error";
+import { CHATGPT_BROWSER_CAPACITY_HELPER_FEATURE } from "./concurrency";
 import type { ChatGptWebCapabilities } from "./model";
 import { createProcessLineWriter } from "./process-line-writer";
 import { createBrowserHelperPromptSelection } from "./browser-helper-prompt-selection";
@@ -16,6 +17,7 @@ interface RunMessage {
   id: string;
   config: {
     appName: string;
+    maxBrowserSessions?: number;
     browserHostDescriptorPath: string;
     browserDiagnosticsPath?: string;
     turnTimeoutMs: number;
@@ -191,6 +193,7 @@ async function run(message: RunMessage): Promise<void> {
     baseUrl: "https://chatgpt.com",
     chatgptWeb: {
       appName: message.config.appName,
+      maxBrowserSessions: message.config.maxBrowserSessions,
       browserHost: "launcher",
       browserHostDescriptorPath: message.config.browserHostDescriptorPath,
       browserDiagnosticsPath: message.config.browserDiagnosticsPath,
@@ -535,4 +538,4 @@ process.once("SIGTERM", () => {
 });
 
 // Advertise the optional frames this helper understands so the daemon can negotiate them explicitly.
-writeProtocol({ type: "ready", features: ["progress", "tool-boundary-ack", "completion-fence", "multipart-stage-ack", "skill-attachments"] });
+writeProtocol({ type: "ready", features: ["progress", "tool-boundary-ack", "completion-fence", "multipart-stage-ack", "skill-attachments", CHATGPT_BROWSER_CAPACITY_HELPER_FEATURE] });

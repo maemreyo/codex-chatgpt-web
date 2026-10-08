@@ -31,7 +31,7 @@ const CHATGPT_ORIGIN = "https://chatgpt.com";
 const IDLE_BROWSER_URL = "data:text/html;charset=utf-8,%3C!doctype%20html%3E%3Chtml%3E%3Chead%3E%3Cmeta%20charset%3D%22utf-8%22%3E%3Ctitle%3ECodex%20Web%20GPT%3C%2Ftitle%3E%3C%2Fhead%3E%3Cbody%3E%3C%2Fbody%3E%3C%2Fhtml%3E#codex-web-gpt-browser-host";
 const PRIMARY_VIEW_BOOTSTRAP_TIMEOUT_MS = 10_000;
 const MAX_BROWSER_VIEW_DIMENSION = 16_384;
-const MAX_BROWSER_TABS = 5;
+const { DEFAULT_MAX_BROWSER_SESSIONS, validateMaxBrowserSessions } = require("./browser-capacity.cjs");
 const MAX_CANCELLED_TURN_TRACES = 256;
 const MANUAL_SUBMIT_TIMEOUT_MS = 60_000;
 const MANUAL_COMPACTION_SUBMIT_TIMEOUT_MS = 120_000;
@@ -331,6 +331,8 @@ class BrowserHost {
     clipboardApi = clipboard,
     getBrowserInteractionMode = () => "automatic",
     getUseSavedChats = () => false,
+    maxBrowserSessions = DEFAULT_MAX_BROWSER_SESSIONS,
+    getRequestedMaxBrowserSessions = () => maxBrowserSessions,
   }) {
     if (typeof getConnectorName !== "function") {
       throw new Error("Browser host connector-name resolver is unavailable");
@@ -361,6 +363,8 @@ class BrowserHost {
     this.clipboard = clipboardApi;
     this.getBrowserInteractionMode = getBrowserInteractionMode;
     this.getUseSavedChats = getUseSavedChats;
+    this.maxBrowserSessions = validateMaxBrowserSessions(maxBrowserSessions);
+    this.getRequestedMaxBrowserSessions = getRequestedMaxBrowserSessions;
     this.runBrowserHelperOperation = runBrowserHelperOperation;
     this.verifyConnectorWithBrowserHelper = verifyConnectorWithBrowserHelper;
     this.surfaceId = randomBytes(24).toString("base64url");
@@ -389,6 +393,7 @@ class BrowserHost {
     this.shellZoomShortcutBindings = new Map();
     this.authView = null;
     this.authNavigationError = null;
+    this.primaryNavigationError = null;
     this.homeNavigationTimeout = null;
     this.lastTurnSweepAt = Date.now();
     this.powerSaveBlockerId = null;
@@ -561,17 +566,23 @@ class BrowserHost {
     return this.turnTabs.get(this.selectedTabId) || null;
   }
 
+  browserCapacity() {
+    // The current launcher session keeps its cap until restart, even when settings change.
+    return this.maxBrowserSessions ?? DEFAULT_MAX_BROWSER_SESSIONS;
+  }
+
   async createTurnTab(traceId, helperPid, conversationKey, connectorIdentity, signal) {
     signal?.throwIfAborted();
-    if (this.turnTabs.size >= MAX_BROWSER_TABS
+    const maxTabs = BrowserHost.prototype.browserCapacity.call(this);
+    if (this.turnTabs.size >= maxTabs
       && !BrowserHost.prototype.evictOldestReclaimableTurnTab.call(this)) {
       throw new Error(
-        `ChatGPT Web already has ${MAX_BROWSER_TABS} browser tabs; close one before starting another turn to avoid excessive parallel traffic on the ChatGPT account`,
+        `ChatGPT Web already has ${maxTabs} browser tabs; close one before starting another turn to avoid excessive parallel traffic on the ChatGPT account`,
       );
     }
     const id = randomBytes(12).toString("base64url");
     const surfaceId = randomBytes(24).toString("base64url");
-    const ordinal = Array.from({ length: MAX_BROWSER_TABS }, (_unused, index) => index + 1)
+    const ordinal = Array.from({ length: maxTabs }, (_unused, index) => index + 1)
       .find(candidate => ![...this.turnTabs.values()].some(tab => tab.ordinal === candidate));
     if (!ordinal) throw new Error("ChatGPT Web browser tab allocation is inconsistent");
     const view = new WebContentsView({
@@ -652,14 +663,15 @@ class BrowserHost {
   }
 
   createManualTurnTab(traceId, helperPid, conversationKey, prompt, manualSubmitTimeoutMs) {
-    if (this.turnTabs.size >= MAX_BROWSER_TABS
+    const maxTabs = BrowserHost.prototype.browserCapacity.call(this);
+    if (this.turnTabs.size >= maxTabs
       && !BrowserHost.prototype.evictOldestReclaimableTurnTab.call(this)) {
       throw new Error(
-        `ChatGPT Web already has ${MAX_BROWSER_TABS} browser tabs; close one before starting another turn to avoid excessive parallel traffic on the ChatGPT account`,
+        `ChatGPT Web already has ${maxTabs} browser tabs; close one before starting another turn to avoid excessive parallel traffic on the ChatGPT account`,
       );
     }
     const id = randomBytes(12).toString("base64url");
-    const ordinal = Array.from({ length: MAX_BROWSER_TABS }, (_unused, index) => index + 1)
+    const ordinal = Array.from({ length: maxTabs }, (_unused, index) => index + 1)
       .find(candidate => ![...this.turnTabs.values()].some(tab => tab.ordinal === candidate));
     if (!ordinal) throw new Error("ChatGPT Web browser tab allocation is inconsistent");
     const view = new WebContentsView({
@@ -1068,6 +1080,7 @@ class BrowserHost {
         this.setState({ url });
         return;
       }
+      this.primaryNavigationError = null;
       this.primaryRendererReady = false;
       this.primaryDeviceEmulationDirty = true;
       this.armHomeNavigationTimeout(contents, url);
@@ -1083,6 +1096,7 @@ class BrowserHost {
     });
     contents.on("did-finish-load", () => {
       this.clearHomeNavigationTimeout();
+      if (this.primaryNavigationError) return;
       this.primaryRendererReady = true;
       this.syncViewVisibility();
       if (this.manualOperation === "ChatGPT login") {
@@ -1137,6 +1151,8 @@ class BrowserHost {
     contents.on("did-fail-load", (_event, errorCode, errorDescription, url, mainFrame) => {
       if (!mainFrame || errorCode === -3) return;
       this.clearHomeNavigationTimeout();
+      this.primaryNavigationError = new Error(`ChatGPT page failed to load: ${errorDescription}`);
+      this.primaryRendererReady = false;
       this.logger.error(
         this.manualOperation === "ChatGPT login"
           ? "browser.auth_navigation_failed"
@@ -1152,6 +1168,8 @@ class BrowserHost {
     });
     contents.on("render-process-gone", (_event, details) => {
       this.clearHomeNavigationTimeout();
+      this.primaryNavigationError = new Error(`ChatGPT renderer stopped: ${details.reason}`);
+      this.primaryRendererReady = false;
       this.logger.error("browser.renderer_gone", { reason: details.reason, exitCode: details.exitCode });
       this.setState({ status: "error", message: `Browser renderer stopped: ${details.reason}`, loading: false });
     });
@@ -1164,6 +1182,8 @@ class BrowserHost {
       if (contents.isDestroyed() || !contents.isLoadingMainFrame()) return;
       contents.stop();
       const message = "ChatGPT did not finish loading within 60 seconds. Check your connection and retry.";
+      this.primaryNavigationError = new Error(message);
+      this.primaryRendererReady = false;
       this.logger.error("browser.navigation_timeout", { origin: navigationOriginForLog(url) });
       this.setState({ status: "error", message, url, loading: false });
     }, BROWSER_NAVIGATION_TIMEOUT_MS);
@@ -1426,7 +1446,12 @@ class BrowserHost {
             ...[...this.turnTabs.values()].map((tab) => this.tabSnapshot(tab)),
           ]
         : [homeTab],
-      maxTabs: MAX_BROWSER_TABS,
+      maxTabs: BrowserHost.prototype.browserCapacity.call(this),
+      pendingMaxTabs: (() => {
+        const effective = BrowserHost.prototype.browserCapacity.call(this);
+        const requested = this.getRequestedMaxBrowserSessions?.() ?? effective;
+        return requested === effective ? null : validateMaxBrowserSessions(requested);
+      })(),
     };
   }
 
@@ -2606,7 +2631,7 @@ class BrowserHost {
 
   openLogin() {
     requireAutomaticBrowserInspection(this, "Automated ChatGPT sign-in verification");
-    if (this.state.authenticated) {
+    if (this.state.authenticated && !this.primaryNavigationError) {
       this.activateHomeSurface();
       this.show();
       return Promise.resolve(this.snapshot());
@@ -2630,7 +2655,7 @@ class BrowserHost {
         this.show();
         this.logger.info("browser.login_opened");
         const current = this.view.webContents.getURL();
-        if (this.reauthenticationRequired || !current.startsWith(CHATGPT_ORIGIN)) {
+        if (this.primaryNavigationError || this.reauthenticationRequired || !current.startsWith(CHATGPT_ORIGIN)) {
           await this.view.webContents.loadURL(TEMPORARY_CHAT_URL);
         }
         await this.probeAuthentication();
@@ -2808,7 +2833,13 @@ class BrowserHost {
     const operation = this.withManualOperation("session refresh", async () => {
       this.setState({ status: "loading", message: "Checking saved ChatGPT session" });
       if (!isTemporaryChatUrl(this.view.webContents.getURL())) {
-        await this.view.webContents.loadURL(TEMPORARY_CHAT_URL);
+        try {
+          await this.view.webContents.loadURL(TEMPORARY_CHAT_URL);
+        } catch (error) {
+          // ChatGPT may replace the home navigation with its sign-in page. The
+          // observed auth URL is a signed-out state, not a broken installation.
+          if (!isAbortedNavigationError(error) || !allowedAuthUrl(this.view.webContents.getURL())) throw error;
+        }
       }
       const state = await this.probeAuthentication();
       if (state.authenticated) {
@@ -2817,7 +2848,14 @@ class BrowserHost {
       return this.snapshot();
     });
     let tracked;
-    tracked = operation.finally(() => {
+    tracked = operation.catch((error) => {
+      this.setState({
+        status: "error",
+        message: "Could not check ChatGPT sign-in. Open sign in to try again.",
+        loading: false,
+      });
+      throw error;
+    }).finally(() => {
       if (this.sessionRefreshOperation === tracked) this.sessionRefreshOperation = null;
     });
     this.sessionRefreshOperation = tracked;
@@ -2843,7 +2881,8 @@ class BrowserHost {
         });
         return this.snapshot();
       }
-      if (!url.startsWith(CHATGPT_ORIGIN)) {
+      const awaitingLogin = allowedAuthUrl(url) && this.manualOperation !== "ChatGPT login" && !this.authView;
+      if (awaitingLogin || !url.startsWith(`${CHATGPT_ORIGIN}/`)) {
         this.setState({ status: "signed-out", message: "Sign in to ChatGPT", authenticated: false, url });
         return this.snapshot();
       }
@@ -2934,6 +2973,7 @@ class BrowserHost {
   async waitForAuthenticated(timeoutMs = 180_000) {
     const deadline = Date.now() + timeoutMs;
     while (Date.now() < deadline) {
+      if (this.primaryNavigationError) throw this.primaryNavigationError;
       if (this.authNavigationError) {
         const error = this.authNavigationError;
         this.authNavigationError = null;

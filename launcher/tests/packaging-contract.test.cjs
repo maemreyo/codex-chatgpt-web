@@ -26,8 +26,13 @@ test("the full verification gate audits launcher dependencies", () => {
 });
 
 test("launcher publishes native packages for all supported desktop operating systems", () => {
-  assert.equal(manifest.build.appId, "dev.codexwebgpt.launcher");
+  assert.equal(manifest.build.appId, "dev.zam.codexweb");
+  assert.equal(manifest.build.productName, "Codex Web GPT");
   assert.equal(manifest.build.artifactName, "codex-web-gpt-${version}-${os}-${arch}.${ext}");
+  const updater = fs.readFileSync(path.join(launcherRoot, "electron", "update.cjs"), "utf8");
+  const updateWorker = fs.readFileSync(path.join(launcherRoot, "electron", "update-worker.cjs"), "utf8");
+  assert.ok(updater.includes('Contents", "MacOS", "Codex Web GPT"'));
+  assert.ok(updateWorker.includes('Contents", "MacOS", "Codex Web GPT"'));
   assert.deepEqual(manifest.build.mac.target, ["dmg", "zip"]);
   assert.deepEqual(
     manifest.build.mac.signIgnore,
@@ -98,7 +103,9 @@ test("release installers resolve checksummed native launcher assets", () => {
   assert.ok(windowsInstaller.includes(`HKCU:\\Software\\${manifest.build.nsis.guid}`));
   assert.ok(devProfile.includes(`WINDOWS_LAUNCHER_GUID = "${manifest.build.nsis.guid}"`));
   assert.match(windowsInstaller, /Get-ItemPropertyValue[\s\S]*InstallLocation/);
-  assert.ok(windowsInstaller.includes(`Join-Path $InstallLocation "${manifest.build.productName}.exe"`));
+  // Public installers intentionally target upstream releases. The private Zam package
+  // has a different identity and must not silently replace the upstream channel.
+  assert.ok(windowsInstaller.includes('Join-Path $InstallLocation "Codex Web GPT.exe"'));
   assert.match(windowsInstaller, /-ArgumentList "\/S", "\/currentuser"/);
   const packageSmoke = fs.readFileSync(path.join(launcherRoot, "scripts", "smoke-package.cjs"), "utf8");
   assert.match(packageSmoke, /run\(installer, \["\/S", "\/currentuser"\]/);

@@ -1,5 +1,5 @@
 import { createHash, randomBytes } from "node:crypto";
-import { chmodSync, mkdirSync, openSync, closeSync, renameSync, rmSync, writeFileSync, readFileSync, existsSync } from "node:fs";
+import { chmodSync, mkdirSync, openSync, closeSync, fsyncSync, renameSync, rmSync, writeFileSync, readFileSync, existsSync } from "node:fs";
 import { homedir } from "node:os";
 import { basename, delimiter, dirname, isAbsolute, join, resolve, sep, win32 } from "node:path";
 import { tmpdir } from "node:os";
@@ -9,6 +9,7 @@ import {
 } from "./chatgpt-web-models";
 import type { CodexProviderConfig } from "./types";
 import { VERSION } from "./version";
+import { resolveMaxBrowserSessions } from "./adapters/chatgpt-web/concurrency";
 
 export type RuntimeMode = "browser-only" | "full";
 export type BrowserHostMode = "managed-chrome" | "launcher";
@@ -151,6 +152,8 @@ export interface AppConfig {
   manualAppName: string;
   browserHost: BrowserHostMode;
   browserInteractionMode: BrowserInteractionMode;
+  /** Maximum simultaneous ChatGPT browser turns (5–8). */
+  maxBrowserSessions: number;
   browserHostDescriptorPath?: string;
   chromeExecutablePath: string;
   storageStatePath: string;
@@ -162,6 +165,8 @@ export interface AppConfig {
   experimentalBiggerContext: boolean;
   experimentalSkillAttachments: boolean;
   experimentalFreshConversationPerTurn: boolean;
+  /** Experimental semantic projection/epoch memory. Disabled by default until rollout gates pass. */
+  experimentalSemanticMemory: boolean;
   /** Optional protection for native Codex quota. Disabled unless explicitly enabled. */
   nativeQuotaReserveEnabled?: boolean;
   nativeQuotaReserve?: NativeQuotaReserveSettings;
@@ -243,7 +248,7 @@ function renameAtomicFile(source: string, destination: string): void {
 export function atomicWriteFile(
   path: string,
   data: string | Uint8Array,
-  { mode = 0o600, protectDirectory = true }: { mode?: number; protectDirectory?: boolean } = {},
+  { mode = 0o600, protectDirectory = true, durable = false }: { mode?: number; protectDirectory?: boolean; durable?: boolean } = {},
 ): void {
   const directory = dirname(path);
   mkdirSync(directory, { recursive: true, mode: 0o700 });
@@ -254,6 +259,7 @@ export function atomicWriteFile(
   const fd = openSync(temp, "wx", mode);
   try {
     writeFileSync(fd, data);
+    if (durable) fsyncSync(fd);
     closeSync(fd);
     renameAtomicFile(temp, path);
   } catch (error) {
@@ -287,6 +293,7 @@ export function defaultConfig(mode: RuntimeMode = "browser-only"): AppConfig {
     manualAppName: ZERO_RISK_CHATGPT_CONNECTOR_NAME,
     browserHost: "managed-chrome",
     browserInteractionMode: "automatic",
+    maxBrowserSessions: 5,
     chromeExecutablePath: defaultChromeExecutable(),
     storageStatePath: join(home, "browser", "storage-state.json"),
     brokerSocketPath: defaultBrokerEndpoint(home),
@@ -294,9 +301,10 @@ export function defaultConfig(mode: RuntimeMode = "browser-only"): AppConfig {
     solAvailable: true,
     extraHighAvailable: false,
     proAvailable: false,
-    experimentalBiggerContext: false,
+    experimentalBiggerContext: true,
     experimentalSkillAttachments: false,
     experimentalFreshConversationPerTurn: false,
+    experimentalSemanticMemory: false,
     nativeQuotaReserveEnabled: false,
     nativeQuotaReserve: { ...DEFAULT_NATIVE_QUOTA_RESERVE_SETTINGS },
     useSavedChats: false,
@@ -483,6 +491,12 @@ function parseConfig(value: unknown, path: string): AppConfig {
   if (!Number.isSafeInteger(parsed.contextWindow) || parsed.contextWindow! <= 0) {
     throw new Error(`Invalid contextWindow in ${path}`);
   }
+  let maxBrowserSessions: number;
+  try {
+    maxBrowserSessions = resolveMaxBrowserSessions(parsed.maxBrowserSessions);
+  } catch {
+    throw new Error(`Invalid maxBrowserSessions in ${path}: expected an integer between 5 and 8`);
+  }
   if (typeof parsed.headed !== "boolean") throw new Error(`Invalid headed in ${path}`);
   if (typeof parsed.autoApproveToolCalls !== "boolean") {
     throw new Error(`Invalid autoApproveToolCalls in ${path}`);
@@ -599,6 +613,11 @@ function parseConfig(value: unknown, path: string): AppConfig {
     throw new Error(`Invalid experimentalFreshConversationPerTurn in ${path}`);
   }
   const experimentalFreshConversationPerTurn = parsed.experimentalFreshConversationPerTurn === true;
+  if (parsed.experimentalSemanticMemory !== undefined
+    && typeof parsed.experimentalSemanticMemory !== "boolean") {
+    throw new Error(`Invalid experimentalSemanticMemory in ${path}`);
+  }
+  const experimentalSemanticMemory = parsed.experimentalSemanticMemory === true;
   if (parsed.nativeQuotaReserveEnabled !== undefined && typeof parsed.nativeQuotaReserveEnabled !== "boolean") {
     throw new Error(`Invalid nativeQuotaReserveEnabled in ${path}`);
   }
@@ -610,7 +629,9 @@ function parseConfig(value: unknown, path: string): AppConfig {
   if (browserInteractionMode === "manual" && experimentalSkillAttachments) {
     throw new Error(`Zero Risk does not support Skills as files in ${path}`);
   }
-  const experimentalBiggerContext = parsed.experimentalBiggerContext === true;
+  // New eligible automatic profiles default on, but saved false remains an opt-out.
+  const experimentalBiggerContext = parsed.experimentalBiggerContext
+    ?? (browserInteractionMode === "automatic" && solAvailable);
   const zeroRiskProEnabled = parsed.zeroRiskProEnabled === true;
   if (browserInteractionMode === "manual" && experimentalBiggerContext) {
     throw new Error(`Zero Risk does not support Bigger Context in ${path}`);
@@ -627,12 +648,14 @@ function parseConfig(value: unknown, path: string): AppConfig {
     automaticAppName,
     manualAppName,
     browserInteractionMode,
+    maxBrowserSessions,
     subagentProtocol,
     solAvailable,
     proAvailable,
     experimentalBiggerContext,
     experimentalSkillAttachments,
     experimentalFreshConversationPerTurn,
+    experimentalSemanticMemory,
     nativeQuotaReserve,
     useSavedChats,
     zeroRiskProEnabled,
@@ -677,6 +700,7 @@ export function providerConfig(config: AppConfig): CodexProviderConfig {
     chatgptWeb: {
       appName: manual ? config.manualAppName : config.automaticAppName,
       browserInteractionMode: config.browserInteractionMode,
+      maxBrowserSessions: resolveMaxBrowserSessions(config.maxBrowserSessions),
       browserHost: config.browserHost,
       browserHostDescriptorPath: config.browserHostDescriptorPath,
       storageStatePath: config.storageStatePath,
@@ -684,6 +708,7 @@ export function providerConfig(config: AppConfig): CodexProviderConfig {
       brokerSocketPath: config.brokerSocketPath,
       threadEnvironmentStatePath: join(getConfigDir(), "runtime", "thread-environments.json"),
       lunaCheckpointStatePath: join(getConfigDir(), "runtime", "luna-checkpoints.json"),
+      semanticCheckpointStatePath: join(getConfigDir(), "runtime", "semantic-epochs.json"),
       headed: config.headed,
       localToolsEnabled: config.mode === "full",
       solAvailable: manual ? false : config.solAvailable,
@@ -692,6 +717,7 @@ export function providerConfig(config: AppConfig): CodexProviderConfig {
       experimentalBiggerContext: manual ? false : config.experimentalBiggerContext,
       experimentalSkillAttachments: manual ? false : config.experimentalSkillAttachments,
       experimentalFreshConversationPerTurn: !manual && config.experimentalFreshConversationPerTurn === true,
+      experimentalSemanticMemory: !manual && config.experimentalSemanticMemory === true,
       useSavedChats: config.useSavedChats === true,
       ...(config.stallTimeoutSec !== undefined ? { stallTimeoutSec: config.stallTimeoutSec } : {}),
       autoApproveToolCalls: manual ? false : config.autoApproveToolCalls,
