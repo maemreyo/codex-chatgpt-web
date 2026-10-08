@@ -24,9 +24,9 @@ function usage(fiveHourUsed: number, weeklyUsed: number): unknown {
   };
 }
 
-const request = (endpoint = "responses") => new Request(`http://localhost/v1/${endpoint}`, {
+const request = (endpoint = "responses", accountId = "TEST_ACCOUNT") => new Request(`http://localhost/v1/${endpoint}`, {
   method: "POST",
-  headers: { authorization: "Bearer TEST_TOKEN", "chatgpt-account-id": "TEST_ACCOUNT" },
+  headers: { authorization: "Bearer TEST_TOKEN", "chatgpt-account-id": accountId },
   body: "{}",
 });
 
@@ -239,6 +239,95 @@ test("guard stores only hashed identity and survives restart without polling aga
     expect(reads).toBe(2);
   } finally {
     rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("32 active account cooldowns survive capacity pressure and restart; expired slots can be reused", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "quota-guard-test-"));
+  const stateFile = join(dir, "state.json");
+  let time = 3_000_000;
+  let reads = 0;
+  let forwarded = 0;
+  const fetchUsage = async () => { reads++; return Response.json(usage(10, 20)); };
+  const forward = async () => { forwarded++; return Response.json({ ok: true }); };
+  try {
+    const guard = conservativeGuard(fetchUsage, { stateFile, now: () => time });
+    for (let i = 1; i <= 32; i++) {
+      const result = await guard.run(request("responses", `account-${i}`), forward);
+      expect(result.status).toBe(200);
+      await result.json();
+    }
+    expect(reads).toBe(32);
+    expect(forwarded).toBe(32);
+
+    for (const active of [guard, conservativeGuard(fetchUsage, { stateFile, now: () => time })]) {
+      const full = await active.run(request("responses", "account-33"), forward);
+      expect(full.status).toBe(403);
+      expect((await full.json() as { error: { code: string } }).error.code).toBe("quota_guard_capacity");
+      const retained = await active.run(request("responses", "account-1"), forward);
+      expect((await retained.json() as { error: { code: string } }).error.code).toBe("quota_guard_cooldown");
+    }
+    expect(reads).toBe(32);
+    expect(forwarded).toBe(32);
+
+    time += NATIVE_QUOTA_POLL_INTERVAL_MS;
+    const restarted = conservativeGuard(fetchUsage, { stateFile, now: () => time });
+    const admitted = await restarted.run(request("responses", "account-33"), forward);
+    expect(admitted.status).toBe(200);
+    await admitted.json();
+    expect(reads).toBe(33);
+    expect(forwarded).toBe(33);
+    const state = JSON.parse(readFileSync(stateFile, "utf8")) as { entries: Record<string, unknown> };
+    expect(Object.keys(state.entries)).toHaveLength(32);
+    const again = conservativeGuard(fetchUsage, { stateFile, now: () => time });
+    const retained = await again.run(request("responses", "account-33"), forward);
+    expect((await retained.json() as { error: { code: string } }).error.code).toBe("quota_guard_cooldown");
+    expect(reads).toBe(33);
+    expect(forwarded).toBe(33);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("one invalid persisted account key or entry blocks all native requests before probing", async () => {
+  for (const corruption of ["key", "entry"] as const) {
+    const dir = mkdtempSync(join(tmpdir(), "quota-guard-test-"));
+    const stateFile = join(dir, "state.json");
+    let reads = 0;
+    let forwarded = 0;
+    const fetchUsage = async () => { reads++; return Response.json(usage(10, 20)); };
+    const forward = async () => { forwarded++; return Response.json({ ok: true }); };
+    try {
+      const guard = conservativeGuard(fetchUsage, { stateFile, now: () => 3_000_000 });
+      for (const account of ["account-1", "account-2"]) {
+        const result = await guard.run(request("responses", account), forward);
+        expect(result.status).toBe(200);
+        await result.json();
+      }
+      const state = JSON.parse(readFileSync(stateFile, "utf8")) as {
+        version: number;
+        entries: Record<string, { lastPollAt: number; blockedUntil: number }>;
+      };
+      const secondKey = Object.keys(state.entries)[1]!;
+      if (corruption === "key") {
+        state.entries["invalid-key"] = state.entries[secondKey]!;
+        delete state.entries[secondKey];
+      } else {
+        state.entries[secondKey] = { ...state.entries[secondKey]!, blockedUntil: -1 };
+      }
+      await Bun.write(stateFile, JSON.stringify(state));
+
+      const restarted = conservativeGuard(fetchUsage, { stateFile, now: () => 3_000_000 });
+      for (const account of ["account-1", "account-2", "account-3"]) {
+        const response = await restarted.run(request("responses", account), forward);
+        expect(response.status).toBe(403);
+        expect((await response.json() as { error: { code: string } }).error.code).toBe("quota_guard_state_unavailable");
+      }
+      expect(reads).toBe(2);
+      expect(forwarded).toBe(2);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
   }
 });
 

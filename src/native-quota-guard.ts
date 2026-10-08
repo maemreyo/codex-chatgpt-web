@@ -12,6 +12,7 @@ const WEEK_SECONDS = 604_800;
 export const NATIVE_QUOTA_POLL_INTERVAL_MS = 15 * 60_000;
 export const NATIVE_QUOTA_FAILURE_COOLDOWN_MS = 60 * 60_000;
 export const NATIVE_QUOTA_DENIED_COOLDOWN_MS = 24 * 60 * 60_000;
+const MAX_ACCOUNT_POLLS = 32;
 
 type Window = { usedPercent: number; durationSeconds: number };
 
@@ -72,7 +73,7 @@ function declined(code: string, message: string): Response {
 export class NativeQuotaGuard {
   private busy = false;
   private readonly policy: NativeQuotaReserveSettings;
-  private readonly accountPolls = new Map<string, { lastPollAt: number; blockedUntil: number }>();
+  private accountPolls = new Map<string, { lastPollAt: number; blockedUntil: number }>();
 
   constructor(
     private readonly fetchUsage: NativeFetch = fetchNativeCodex,
@@ -91,17 +92,22 @@ export class NativeQuotaGuard {
       };
       const entries = record(parsed.entries);
       if (parsed.version !== 1 || !entries) throw new Error("Invalid quota guard state");
-      this.accountPolls.clear();
+      const loaded = new Map<string, { lastPollAt: number; blockedUntil: number }>();
       for (const [key, entry] of Object.entries(entries)) {
         const value = record(entry);
         if (!/^[a-f0-9]{64}$/.test(key) || !value
           || typeof value.lastPollAt !== "number" || !Number.isSafeInteger(value.lastPollAt)
           || value.lastPollAt < 0 || typeof value.blockedUntil !== "number"
-          || !Number.isSafeInteger(value.blockedUntil) || value.blockedUntil < 0) continue;
-        this.accountPolls.set(key, { lastPollAt: value.lastPollAt, blockedUntil: value.blockedUntil });
+          || !Number.isSafeInteger(value.blockedUntil) || value.blockedUntil < 0) {
+          throw new Error("Invalid quota guard entry");
+        }
+        loaded.set(key, { lastPollAt: value.lastPollAt, blockedUntil: value.blockedUntil });
       }
+      if (loaded.size > MAX_ACCOUNT_POLLS) throw new Error("Quota guard state exceeds capacity");
+      this.accountPolls = loaded;
     } catch {
       // Corrupt/unreadable persisted state must never turn into repeated usage polling.
+      this.accountPolls.clear();
       this.stateUnavailable = true;
     }
   }
@@ -189,13 +195,21 @@ export class NativeQuotaGuard {
         const nextPoll = Math.max(prior.lastPollAt + NATIVE_QUOTA_POLL_INTERVAL_MS, prior.blockedUntil);
         if (now < nextPoll) return this.waitResponse(nextPoll);
       }
+      if (!prior && this.accountPolls.size >= MAX_ACCOUNT_POLLS) {
+        for (const [key, previous] of this.accountPolls) {
+          const nextPoll = Math.max(previous.lastPollAt + NATIVE_QUOTA_POLL_INTERVAL_MS, previous.blockedUntil);
+          if (now >= nextPoll) {
+            this.accountPolls.delete(key);
+            break;
+          }
+        }
+        if (this.accountPolls.size >= MAX_ACCOUNT_POLLS) {
+          return declined("quota_guard_capacity", "Native quota guard has no available account slot; no quota check was sent.");
+        }
+      }
       // Record BEFORE contacting the quota endpoint. Failed/crashed checks cannot be retried
       // in a tight loop, and durable state survives launcher restarts.
       const poll = { lastPollAt: now, blockedUntil: now + NATIVE_QUOTA_FAILURE_COOLDOWN_MS };
-      if (this.accountPolls.size >= 32 && !this.accountPolls.has(accountKey)) {
-        const oldest = this.accountPolls.keys().next().value;
-        if (oldest) this.accountPolls.delete(oldest);
-      }
       this.accountPolls.set(accountKey, poll);
       this.persist();
       const headers = new Headers({ authorization, accept: "application/json" });
