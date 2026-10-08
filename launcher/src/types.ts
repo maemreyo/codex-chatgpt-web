@@ -1,5 +1,6 @@
 import languages from "../electron/languages.json";
 import type { LimitsSnapshot } from "./limits-types";
+import type { AgentManagerApi } from "./agent-manager-types";
 
 export type Language = keyof typeof languages;
 export type LauncherProfile = "production" | "development";
@@ -17,6 +18,7 @@ export interface LauncherState {
   showBrowserDuringTurns: boolean;
   autoApproveToolCalls: boolean;
   browserInteractionMode: BrowserInteractionMode;
+  maxBrowserSessions: number;
   experimentalBiggerContext: boolean;
   biggerContextAvailable?: boolean;
   experimentalSkillAttachments: boolean;
@@ -50,6 +52,7 @@ export interface BrowserState {
   zoomFactor: number;
   activeTabId: string;
   maxTabs: number;
+  pendingMaxTabs: number | null;
   tabs: BrowserTabState[];
 }
 
@@ -136,6 +139,7 @@ export interface LauncherSnapshot {
 }
 
 export interface LauncherApi {
+  agents: AgentManagerApi;
   snapshot(): Promise<LauncherSnapshot>;
   getLimits(): Promise<LimitsSnapshot>;
   setupLimits(): Promise<LimitsSnapshot>;
@@ -188,6 +192,7 @@ export interface LauncherApi {
     key: "keepRunningOnClose" | "showBrowserDuringTurns",
     value: boolean,
   ): Promise<LauncherState>;
+  setMaxBrowserSessions(value: number): Promise<LauncherState>;
   setSidebarState(state: { open: boolean; width: number }): Promise<LauncherState>;
   logs(limit?: number): Promise<LogRecord[]>;
   exportLogs(): Promise<string | null>;

@@ -89,7 +89,7 @@ import {
 } from "../../chatgpt-web-models";
 import { LauncherBrowserHelperClient } from "./launcher-helper-client";
 import { assertChatGptModelFamily, selectChatGptModelFamily } from "./model-selection";
-import { MAX_CHATGPT_BROWSER_TABS } from "./concurrency";
+import { MAX_CHATGPT_BROWSER_TABS, reserveChatGptBrowserTurn, resolveMaxBrowserSessions } from "./concurrency";
 import {
   ChatGptCompactionHandoffAccepted,
   ChatGptWebAdapterError,
@@ -1462,6 +1462,7 @@ interface ChatGptSubmissionDomCache {
 
 export interface ResolvedBrowserConfig {
   appName: string;
+  maxBrowserSessions: number;
   browserHost: "managed-chrome" | "launcher";
   browserHostDescriptorPath?: string;
   browserHelperScriptPath?: string;
@@ -2200,6 +2201,7 @@ class ChatGptBrowserDiagnostics {
 
 export function resolveBrowserConfig(provider: CodexProviderConfig): ResolvedBrowserConfig {
   const configured = provider.chatgptWeb ?? {};
+  const maxBrowserSessions = resolveMaxBrowserSessions(configured.maxBrowserSessions);
   const appName = configured.appName?.trim() || CHATGPT_CONNECTOR_NAME;
   const browserHost = configured.browserHost ?? "managed-chrome";
   const browserHostDescriptorPath = configured.browserHostDescriptorPath?.trim();
@@ -2229,6 +2231,7 @@ export function resolveBrowserConfig(provider: CodexProviderConfig): ResolvedBro
   }
   return {
     appName,
+    maxBrowserSessions,
     browserHost,
     ...(browserHostDescriptorPath ? { browserHostDescriptorPath: resolve(expandUserPath(browserHostDescriptorPath)) } : {}),
     ...(resolvedBrowserHelperScriptPath ? { browserHelperScriptPath: resolvedBrowserHelperScriptPath } : {}),
@@ -2409,21 +2412,28 @@ export class ChatGptBrowserWorker {
     if (this.activeRuns.has(turn.traceId)) {
       return Promise.reject(new Error(`Duplicate ChatGPT web browser turn: ${turn.traceId}`));
     }
-    if (this.activeRuns.size >= MAX_CHATGPT_BROWSER_TABS) {
-      return Promise.reject(new Error(
-        `ChatGPT Web supports at most ${MAX_CHATGPT_BROWSER_TABS} simultaneous browser turns; close or finish a browser tab before starting another`,
-      ));
+    let releaseReservation: () => void;
+    try {
+      releaseReservation = reserveChatGptBrowserTurn(this.config.maxBrowserSessions ?? MAX_CHATGPT_BROWSER_TABS);
+    } catch (error) {
+      return Promise.reject(error);
     }
     const useHelper = this.config.browserHost === "launcher" && process.env.CODEX_CHATGPT_WEB_BROWSER_HELPER_PROCESS !== "1";
-    if (useHelper) {
-      this.launcherHelper ??= new LauncherBrowserHelperClient(this.config);
+    try {
+      if (useHelper) {
+        this.launcherHelper ??= new LauncherBrowserHelperClient(this.config);
+      }
+      const run = Promise.resolve().then(() => useHelper ? this.launcherHelper!.run(turn) : this.runExclusive(turn));
+      this.activeRuns.set(turn.traceId, run);
+      void run.finally(() => {
+        if (this.activeRuns.get(turn.traceId) === run) this.activeRuns.delete(turn.traceId);
+        releaseReservation();
+      }).catch(() => {});
+      return run;
+    } catch (error) {
+      releaseReservation();
+      return Promise.reject(error);
     }
-    const run = Promise.resolve().then(() => useHelper ? this.launcherHelper!.run(turn) : this.runExclusive(turn));
-    this.activeRuns.set(turn.traceId, run);
-    void run.finally(() => {
-      if (this.activeRuns.get(turn.traceId) === run) this.activeRuns.delete(turn.traceId);
-    }).catch(() => {});
-    return run;
   }
 
   verifyConnector(traceId = `verify_${randomUUID().replaceAll("-", "")}`): Promise<string> {

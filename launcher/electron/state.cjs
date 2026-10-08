@@ -1,6 +1,7 @@
 const languages = require("./languages.json");
 const fs = require("node:fs");
 const { writePrivateFileAtomic } = require("./atomic-file.cjs");
+const { DEFAULT_MAX_BROWSER_SESSIONS, validateMaxBrowserSessions } = require("./browser-capacity.cjs");
 const SIDEBAR_MIN_WIDTH = 240;
 const SIDEBAR_MAX_WIDTH = 420;
 const SESSION_REFRESH_REMINDER_INTERVAL_MS = 48 * 60 * 60 * 1000;
@@ -16,6 +17,7 @@ const DEFAULT_STATE = Object.freeze({
   showBrowserDuringTurns: true,
   autoApproveToolCalls: false,
   browserInteractionMode: "automatic",
+  maxBrowserSessions: DEFAULT_MAX_BROWSER_SESSIONS,
   experimentalBiggerContext: true,
   experimentalSkillAttachments: false,
   experimentalFreshConversationPerTurn: false,
@@ -63,6 +65,11 @@ function readState(filePath) {
     }
     if (state.browserInteractionMode !== "automatic" && state.browserInteractionMode !== "manual") {
       state.browserInteractionMode = DEFAULT_STATE.browserInteractionMode;
+    }
+    try {
+      validateMaxBrowserSessions(state.maxBrowserSessions);
+    } catch {
+      state.maxBrowserSessions = DEFAULT_MAX_BROWSER_SESSIONS;
     }
     if (state.coreSetupComplete !== true) {
       if (state.onboardingComplete !== true) state.browserInteractionMode = "automatic";
@@ -121,6 +128,7 @@ function createStateStore(filePath) {
       return structuredClone(state);
     },
     update(patch) {
+      if (Object.hasOwn(patch, "maxBrowserSessions")) validateMaxBrowserSessions(patch.maxBrowserSessions);
       const next = { ...state, ...patch, version: 1 };
       writeState(filePath, next);
       state = next;

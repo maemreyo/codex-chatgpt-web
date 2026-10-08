@@ -20,6 +20,8 @@ const {
   Tray,
 } = require("electron");
 const { BrowserHost, navigationErrorForLog } = require("./browser-host.cjs");
+const { createAgentManager } = require("./agent-manager.cjs");
+const { validateMaxBrowserSessions } = require("./browser-capacity.cjs");
 const { BrowserControlServer } = require("./control-server.cjs");
 const { LimitsController } = require("./limits-controller.cjs");
 const { SOURCE_URL: LIMITS_SOURCE_URL } = require("./limits-store.cjs");
@@ -532,6 +534,12 @@ function syncBrowserPreferences(stateStore, config) {
 }
 
 function registerIpc({ logger, stateStore }) {
+  // Lazy setup keeps launcher IPC boot tests and unconfigured DEV profiles safe.
+  let nativeAgentManager;
+  const agents = () => nativeAgentManager ??= createAgentManager({
+    runtimeCommand: args => runtimeSupervisor.runtimeCommand(args),
+    codexHome: LAUNCHER_PROFILE.codexHome,
+  });
   const runtimeChannels = new Set([
     "launcher:setup-core", "launcher:setup-mcp", "launcher:uninstall-integration",
     "launcher:bigger-context", "launcher:skill-attachments", "launcher:fresh-conversation-per-turn",
@@ -540,11 +548,24 @@ function registerIpc({ logger, stateStore }) {
     "launcher:connector-name", "launcher:mcp-verify", "launcher:doctor", "launcher:cancel-turns",
     "launcher:browser-passkey-login", "launcher:browser-logout", "launcher:browser-smoke",
     "launcher:limits-setup", "launcher:update-install", "launcher:complete-onboarding",
+    "launcher:max-browser-sessions",
+    "launcher:agents-inspect", "launcher:agents-preview", "launcher:agents-apply", "launcher:agents-recover",
   ]);
   const handle = (channel, handler) => registerLoggedIpc(ipcMain, logger, channel, async (...args) => {
     if (runtimeChannels.has(channel)) await runtimeStartup;
     return handler(...args);
   });
+  handle("launcher:agents-inspect", () => agents().inspect());
+  handle("launcher:agents-preview", (_event, input) => agents().preview(input));
+  handle("launcher:agents-apply", async (_event, id) => {
+    const result = await agents().apply(id);
+    if (result.requiresRestart && !IS_DEV_PROFILE) {
+      const state = stateStore.update({ codexRestartRequired: true });
+      send("launcher:state-changed", state);
+    }
+    return result;
+  });
+  handle("launcher:agents-recover", () => agents().recover());
   handle("launcher:limits", () => limitsController.snapshot());
   handle("launcher:limits-setup", async () => {
     if (runtimeHost.currentOperation()) throw new Error("Finish the current launcher operation before checking Limits.");
@@ -1015,6 +1036,23 @@ function registerIpc({ logger, stateStore }) {
     if (!ordinary) throw new Error("Unknown preference");
     return stateStore.update({ [key]: value === true });
   });
+  handle("launcher:max-browser-sessions", (_event, value) => {
+    const requested = validateMaxBrowserSessions(value);
+    if (runtimeHost.currentOperation()) {
+      throw new Error("Finish the current launcher operation before changing browser capacity");
+    }
+    if (requested === stateStore.read().maxBrowserSessions) return stateStore.read();
+    // The JSON configuration is committed before the visible preference. The running
+    // runtime and browser keep their old cap until the next launcher restart.
+    runtimeSupervisor.setMaxBrowserSessions(requested);
+    const state = stateStore.update({ maxBrowserSessions: requested });
+    send("launcher:state-changed", state);
+    send("launcher:browser-state", browserHost.snapshot());
+    logger.info("browser.capacity_pending_restart", {
+      effective: browserHost.browserCapacity(), requested,
+    });
+    return state;
+  });
   handle("launcher:sidebar-state", (_event, value) => stateStore.update(validateSidebarState(value)));
   handle("launcher:logs", (_event, limit) => logger.recent(limit));
   handle("launcher:export-logs", async () => {
@@ -1185,6 +1223,7 @@ async function start() {
     browserDescriptorPath: BROWSER_DESCRIPTOR_PATH,
     launcherProfile: LAUNCHER_PROFILE.kind,
     publishOperation,
+    getMaxBrowserSessions: () => stateStore.read().maxBrowserSessions,
     onConfigRead: config => {
       // Setup may read an intermediate config before rollback. The setting IPC commits
       // its change only after the existing setup transaction has succeeded.
@@ -1218,6 +1257,8 @@ async function start() {
     cancelTurn: IS_DEV_PROFILE ? undefined : (traceId, reason) => runtimeSupervisor.cancelBrowserTurn(traceId, reason),
     getConnectorName: () => runtimeHost.browserConnectorName(),
     getUseSavedChats: () => runtimeHost.runtimeConfigSnapshot().config?.useSavedChats === true,
+    maxBrowserSessions: stateStore.read().maxBrowserSessions,
+    getRequestedMaxBrowserSessions: () => stateStore.read().maxBrowserSessions,
     helper: { executable: process.execPath, script: BROWSER_HELPER_PATH },
     logger,
     loginWithPasskey: () => runtimeHost.capturePasskeyLogin(),

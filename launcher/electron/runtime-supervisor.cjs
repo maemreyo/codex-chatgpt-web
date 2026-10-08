@@ -4,6 +4,7 @@ const os = require("node:os");
 const path = require("node:path");
 const { spawn } = require("node:child_process");
 const { writePrivateFileAtomic } = require("./atomic-file.cjs");
+const { DEFAULT_MAX_BROWSER_SESSIONS, validateMaxBrowserSessions } = require("./browser-capacity.cjs");
 const { redactText } = require("./logging.cjs");
 const {
   DETACH_OWNED_CHILD,
@@ -190,6 +191,8 @@ function managedTunnelConnectArgs(config, invocation) {
 
 function validateConfig(config, descriptorPath, platform = process.platform, launcherProfile = "production") {
   if (!config || config.version !== 3) throw new Error("Runtime configuration is missing or unsupported");
+  if (config.maxBrowserSessions === undefined) config.maxBrowserSessions = DEFAULT_MAX_BROWSER_SESSIONS;
+  validateMaxBrowserSessions(config.maxBrowserSessions);
   if (launcherProfile === "development") {
     if (config.purpose !== "dev-harness") {
       throw new Error("DEV launcher refuses a configuration that is not marked dev-harness");
@@ -335,6 +338,7 @@ class RuntimeSupervisor {
     publishOperation,
     runtimeInvocationFactory = runtimeInvocation,
     onConfigRead,
+    getMaxBrowserSessions,
   }) {
     this.app = app;
     this.logger = logger;
@@ -350,6 +354,7 @@ class RuntimeSupervisor {
     this.publishOperation = publishOperation;
     this.runtimeInvocationFactory = runtimeInvocationFactory;
     this.onConfigRead = onConfigRead;
+    this.getMaxBrowserSessions = getMaxBrowserSessions;
     this.configPath = path.join(coreHome, "config.json");
     this.statePath = path.join(coreHome, "runtime", "launcher-supervisor.json");
     this.daemon = null;
@@ -374,14 +379,38 @@ class RuntimeSupervisor {
 
   readConfig() {
     if (!fs.existsSync(this.configPath)) return null;
+    const persisted = readJson(this.configPath);
+    const persistedCapacity = persisted?.maxBrowserSessions;
     const config = validateConfig(
-      readJson(this.configPath),
+      persisted,
       this.browserDescriptorPath,
       this.platform,
       this.launcherProfile,
     );
+    if (this.getMaxBrowserSessions) {
+      const requested = validateMaxBrowserSessions(this.getMaxBrowserSessions());
+      if (persistedCapacity !== requested) {
+        // CLI setup/settings may rewrite config.json. Preserve the launcher preference
+        // before it is consumed by the next supervised runtime start.
+        config.maxBrowserSessions = requested;
+        writePrivateFileAtomic(this.configPath, `${JSON.stringify(config, null, 2)}\n`);
+      }
+    }
     this.onConfigRead?.(config);
     return config;
+  }
+
+  setMaxBrowserSessions(value) {
+    const requested = validateMaxBrowserSessions(value);
+    if (!fs.existsSync(this.configPath)) return;
+    const config = validateConfig(readJson(this.configPath), this.browserDescriptorPath,
+      this.platform, this.launcherProfile);
+    if (config.browserHost !== "launcher") {
+      throw new Error("Browser session capacity requires a launcher-owned runtime");
+    }
+    if (config.maxBrowserSessions === requested) return;
+    config.maxBrowserSessions = requested;
+    writePrivateFileAtomic(this.configPath, `${JSON.stringify(config, null, 2)}\n`);
   }
 
   readSetupConfig() {

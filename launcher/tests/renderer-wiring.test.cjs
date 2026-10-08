@@ -10,6 +10,63 @@ const electronMain = fs.readFileSync(path.join(launcherRoot, "electron", "main.c
 const browserHostSource = fs.readFileSync(path.join(launcherRoot, "electron", "browser-host.cjs"), "utf8");
 const preloadSource = fs.readFileSync(path.join(launcherRoot, "electron", "preload.cjs"), "utf8");
 
+test("capacity IPC validates requests, persists config before UI state, and reports pending restart", async () => {
+  const vm = require("node:vm");
+  const { validateMaxBrowserSessions } = require("../electron/browser-capacity.cjs");
+  const events = [];
+  const state = { maxBrowserSessions: 5 };
+  let requestHandler, effective = 5, rejectWrite = false;
+  const stateStore = {
+    read: () => ({ ...state }),
+    update: patch => { Object.assign(state, patch); events.push(["stored", patch.maxBrowserSessions]); return { ...state }; },
+  };
+  const runtimeSupervisor = { setMaxBrowserSessions(value) {
+    if (rejectWrite) throw new Error("config write failed");
+    events.push(["runtime-config", value]);
+  } };
+  const browserHost = {
+    browserCapacity: () => effective,
+    snapshot: () => ({ maxTabs: effective, pendingMaxTabs: state.maxBrowserSessions === effective ? null : state.maxBrowserSessions }),
+  };
+  vm.runInNewContext(electronMain.slice(
+    electronMain.indexOf('handle("launcher:max-browser-sessions",'),
+    electronMain.indexOf('handle("launcher:sidebar-state",'),
+  ), {
+    handle: (_name, handler) => { requestHandler = handler; },
+    validateMaxBrowserSessions, stateStore, runtimeSupervisor, browserHost,
+    runtimeHost: { currentOperation: () => null },
+    send: (channel, payload) => events.push([channel, payload]),
+    logger: { info: () => {} },
+  });
+  assert.throws(() => requestHandler(null, 8.5), /integer between 5 and 8/);
+  assert.deepEqual(events, []);
+  rejectWrite = true;
+  assert.throws(() => requestHandler(null, 8), /config write failed/);
+  assert.deepEqual(state, { maxBrowserSessions: 5 });
+  rejectWrite = false;
+  assert.equal(requestHandler(null, 8).maxBrowserSessions, 8);
+  assert.deepEqual(events.map(([name]) => name), [
+    "runtime-config", "stored", "launcher:state-changed", "launcher:browser-state",
+  ]);
+  assert.equal(events.at(-1)[1].pendingMaxTabs, 8);
+  assert.equal(events.at(-1)[1].maxTabs, 5);
+  assert.equal(requestHandler(null, 8).maxBrowserSessions, 8);
+  assert.equal(events.length, 4, "same preference should not rewrite config");
+
+  let api;
+  vm.runInNewContext(preloadSource, { require: () => ({
+    contextBridge: { exposeInMainWorld: (_name, value) => { api = value; } },
+    ipcRenderer: { invoke: (channel, value) => {
+      assert.equal(channel, "launcher:max-browser-sessions");
+      return requestHandler(null, value);
+    } },
+  }) });
+  effective = 8; // After launcher restart, the old pending capacity becomes effective.
+  assert.equal((await api.setMaxBrowserSessions(5)).maxBrowserSessions, 5);
+  assert.equal(events.at(-1)[1].maxTabs, 8);
+  assert.equal(events.at(-1)[1].pendingMaxTabs, 5);
+});
+
 test("Bigger Context waits for startup and route recovery without invalidating healthy setup", async () => {
   const vm = require("node:vm");
   for (const fails of [false, true]) {

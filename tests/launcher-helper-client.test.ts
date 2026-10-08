@@ -22,6 +22,7 @@ test("daemon streams browser lifecycle through the real helper process", async (
     // Substitute only the browser. Both sides of the production IPC protocol run unchanged.
     ChatGptBrowserWorker.prototype.run = async function(turn) {
       if (this.config.useSavedChats !== true) throw new Error("Saved chat preference lost in helper IPC");
+      if (this.config.maxBrowserSessions !== 8) throw new Error("Browser capacity lost in helper IPC");
       if (turn.modelFamily !== "5.6") throw new Error("Pinned model family lost in helper IPC");
       await turn.onPreparedSelected(false);
       const prepared = await turn.prepare();
@@ -72,6 +73,7 @@ test("daemon streams browser lifecycle through the real helper process", async (
   })}\n`, { mode: 0o600 });
   const config: ResolvedBrowserConfig = {
     appName: "Codex Native2",
+    maxBrowserSessions: 8,
     browserHost: "launcher",
     browserHostDescriptorPath: descriptorPath,
     browserHelperScriptPath: helper,
@@ -186,7 +188,7 @@ test("accepted compaction retires through the helper as completed without hiding
     surfaceTargets: { launcher_surface_id_0123456789AB: "native-owned-target" },
   }), { mode: 0o600 });
   const client = new LauncherBrowserHelperClient({
-    appName: "Codex Native2", browserHost: "launcher", browserHostDescriptorPath: descriptorPath,
+    appName: "Codex Native2", maxBrowserSessions: 5, browserHost: "launcher", browserHostDescriptorPath: descriptorPath,
     browserHelperScriptPath: helper, browserDiagnosticsPath: join(root, "diagnostics"),
     storageStatePath: join(root, "unused-state.json"), chromeExecutablePath: join(root, "unused-chrome"),
     turnTimeoutMs: 60_000, headed: true, autoApproveToolCalls: false, useSavedChats: false,
@@ -235,6 +237,7 @@ test("launcher helper protocol preserves multipart context and the compaction fl
   const sent: Record<string, unknown>[] = [];
   const client = new LauncherBrowserHelperClient({
     appName: "Codex Native2 DEV",
+    maxBrowserSessions: 8,
     browserHost: "launcher",
     browserHostDescriptorPath: "/durable/launcher.json",
     storageStatePath: "/durable/unused-state.json",
@@ -247,6 +250,7 @@ test("launcher helper protocol preserves multipart context and the compaction fl
   const internal = client as unknown as {
     pending: Map<string, { resolve(value: string): void }>;
     child?: unknown;
+    helperFeatures: Set<string>;
     ensureChild(): Promise<void>;
     send(message: Record<string, unknown>): Promise<void>;
     finish(id: string): void;
@@ -254,6 +258,7 @@ test("launcher helper protocol preserves multipart context and the compaction fl
   };
   const child = {};
   internal.child = child;
+  internal.helperFeatures = new Set(["browser-session-cap-v1"]);
   internal.ensureChild = async () => {};
   internal.send = async message => {
     sent.push(message);
@@ -292,6 +297,7 @@ test("launcher helper protocol preserves multipart context and the compaction fl
 
   expect(sent[0]).toMatchObject({
     type: "run",
+    config: { maxBrowserSessions: 8 },
     turn: {
       compaction: true,
     },
@@ -306,12 +312,36 @@ test("launcher helper protocol preserves multipart context and the compaction fl
   });
 });
 
+test("an older helper cannot silently accept an eight-session setting", async () => {
+  const client = new LauncherBrowserHelperClient({
+    appName: "Codex Native2", maxBrowserSessions: 8,
+    browserHost: "launcher", browserHostDescriptorPath: "/durable/launcher.json",
+    storageStatePath: "/durable/unused-state.json", chromeExecutablePath: "/durable/chrome",
+    headed: true, autoApproveToolCalls: false, useSavedChats: false,
+  });
+  const internal = client as unknown as { ensureChild(): Promise<void>; helperFeatures: Set<string> };
+  internal.ensureChild = async () => {};
+  internal.helperFeatures = new Set(["multipart-stage-ack"]);
+  let prepared = false;
+  await expect(client.run({
+    traceId: "legacy_helper_eight", modelId: "gpt-5.6-sol",
+    capabilities: { localToolsEnabled: false, solAvailable: true, extraHighAvailable: false, proAvailable: false },
+    prepare: async () => {
+      prepared = true;
+      return { text: "test", images: [], release() {} };
+    },
+    onTextDelta() {},
+  })).rejects.toThrow("cannot enforce maxBrowserSessions above 5");
+  expect(prepared).toBeFalse();
+});
+
 test("an abort dispatched during run submission cannot overtake the run frame", async () => {
   const controller = new AbortController();
   const messages: string[] = [];
   let released = false;
   const client = new LauncherBrowserHelperClient({
     appName: "Codex Native",
+    maxBrowserSessions: 5,
     browserHost: "launcher",
     browserHostDescriptorPath: "/durable/launcher.json",
     storageStatePath: "/durable/unused-state.json",
@@ -359,6 +389,7 @@ test("an abort dispatched during run submission cannot overtake the run frame", 
 test("structured helper errors preserve the ChatGPT adapter failure contract", async () => {
   const client = new LauncherBrowserHelperClient({
     appName: "Codex Native",
+    maxBrowserSessions: 5,
     browserHost: "launcher",
     browserHostDescriptorPath: "/durable/launcher.json",
     storageStatePath: "/durable/unused-state.json",
@@ -416,7 +447,7 @@ test("structured helper errors preserve the ChatGPT adapter failure contract", a
 
 test("an older helper cannot silently drop selected skill files and releases the prepared turn", async () => {
   const client = new LauncherBrowserHelperClient({
-    appName: "Codex Native2", browserHost: "launcher", browserHostDescriptorPath: "/durable/launcher.json",
+    appName: "Codex Native2", maxBrowserSessions: 5, browserHost: "launcher", browserHostDescriptorPath: "/durable/launcher.json",
     storageStatePath: "/durable/unused.json", chromeExecutablePath: "/durable/chrome", headed: true, autoApproveToolCalls: false, useSavedChats: false,
   });
   const internal = client as unknown as {

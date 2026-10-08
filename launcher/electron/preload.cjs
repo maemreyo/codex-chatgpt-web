@@ -51,6 +51,13 @@ contextBridge.exposeInMainWorld("codexWebLauncher", {
   setZeroRiskPro: (enabled) => ipcRenderer.invoke("launcher:zero-risk-pro", enabled),
   setBrowserInteractionMode: (mode) => ipcRenderer.invoke("launcher:browser-interaction-mode", mode),
   setPreference: (key, value) => ipcRenderer.invoke("launcher:set-preference", key, value),
+  setMaxBrowserSessions: (value) => ipcRenderer.invoke("launcher:max-browser-sessions", value),
+  agents: {
+    inspect: () => ipcRenderer.invoke("launcher:agents-inspect"),
+    preview: (request) => ipcRenderer.invoke("launcher:agents-preview", request),
+    apply: (id) => ipcRenderer.invoke("launcher:agents-apply", id),
+    recover: () => ipcRenderer.invoke("launcher:agents-recover"),
+  },
   setSidebarState: (state) => ipcRenderer.invoke("launcher:sidebar-state", state),
   logs: (limit) => ipcRenderer.invoke("launcher:logs", limit),
   exportLogs: () => ipcRenderer.invoke("launcher:export-logs"),
