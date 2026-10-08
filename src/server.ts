@@ -38,6 +38,9 @@ import {
 } from "./chatgpt-web-models";
 import { forwardNativeCodexRequest, type NativeFetch, type NativeImageEndpoint } from "./native-passthrough";
 import { fetchNativeCodex } from "./native-network";
+import { NativeQuotaGuard } from "./native-quota-guard";
+import { getConfigDir } from "./config";
+import { join } from "node:path";
 import {
   buildCompactV1Output,
   COMPACT_PROMPT,
@@ -361,6 +364,8 @@ export interface ResponseRequestOptions {
   onAdapterEvent?: (event: AdapterEvent) => void;
   /** Bind the physical HTTP stream to the exact native Codex turn that owns it. */
   onTurnIdentity?: (identity: NativeCodexTurnIdentity) => void;
+  fetchUpstream?: NativeFetch;
+  nativeQuotaGuard?: NativeQuotaGuard;
 }
 
 export function routeChatGptWebRequest(parsed: CodexParsedRequest, config: AppConfig): ChatGptWebModelRoute {
@@ -508,7 +513,8 @@ export async function responseRequest(
   }
   if (typeof requestedModel === "string" && !isChatGptWebModelSlug(requestedModel)) {
     try {
-      return await forwardNativeCodexRequest(nativeRequest, "responses", undefined, raw);
+      const forward = () => forwardNativeCodexRequest(nativeRequest, "responses", options.fetchUpstream, raw);
+      return options.nativeQuotaGuard ? await options.nativeQuotaGuard.run(nativeRequest, forward) : await forward();
     } catch (error) {
       return formatErrorResponse(502, "upstream_error", error instanceof Error ? error.message : String(error));
     }
@@ -699,7 +705,7 @@ export async function compactRequest(
   req: Request,
   config: AppConfig,
   adapterFactory: ChatGptWebAdapterFactory = createChatGptWebAdapter,
-  options: Pick<ResponseRequestOptions, "onTurnIdentity"> = {},
+  options: Pick<ResponseRequestOptions, "onTurnIdentity" | "fetchUpstream" | "nativeQuotaGuard"> = {},
 ): Promise<Response> {
   const nativeRequest = req.clone();
   let raw: Record<string, unknown>;
@@ -743,7 +749,8 @@ export async function compactRequest(
   }
   if (!isChatGptWebModelSlug(raw.model)) {
     try {
-      return await forwardNativeCodexRequest(nativeRequest, "responses/compact", undefined, raw);
+      const forward = () => forwardNativeCodexRequest(nativeRequest, "responses/compact", options.fetchUpstream, raw);
+      return options.nativeQuotaGuard ? await options.nativeQuotaGuard.run(nativeRequest, forward) : await forward();
     } catch (error) {
       return formatErrorResponse(502, "upstream_error", error instanceof Error ? error.message : String(error));
     }
@@ -814,7 +821,7 @@ export async function compactRequest(
 
 export function startServer(
   config: AppConfig,
-  dependencies: { fetchUpstream?: NativeFetch; adapterFactory?: ChatGptWebAdapterFactory } = {},
+  dependencies: { fetchUpstream?: NativeFetch; adapterFactory?: ChatGptWebAdapterFactory; nativeQuotaGuard?: NativeQuotaGuard } = {},
 ): ReturnType<typeof Bun.serve> {
   if (config.purpose === "dev-harness") {
     throw new Error("DEV harness configuration cannot start a Responses listener");
@@ -837,6 +844,11 @@ export function startServer(
     request: number; at: string; status: number; failure?: ModelCatalogFailure;
   } | null = null;
   const httpTurns = new HttpTurnCounter();
+  const nativeQuotaGuard = config.nativeQuotaReserveEnabled === true
+    ? (dependencies.nativeQuotaGuard ?? new NativeQuotaGuard(dependencies.fetchUpstream ?? fetchNativeCodex, {
+      stateFile: join(getConfigDir(), "native-quota-guard-state.json"),
+      policy: config.nativeQuotaReserve,
+    })) : undefined;
   const activity = () => ({
     active_http_turns: httpTurns.count(),
     active_browser_turns: chatGptTurnSessions.activeCount() + (turnBroker?.externalOwnerActiveCount() ?? 0),
@@ -1073,7 +1085,7 @@ export function startServer(
             new Request(req, { signal }),
             config,
             dependencies.adapterFactory,
-            { onTurnIdentity: bindIdentity },
+            { onTurnIdentity: bindIdentity, fetchUpstream: dependencies.fetchUpstream, nativeQuotaGuard },
           ),
           req.signal,
           process.platform,
@@ -1087,7 +1099,7 @@ export function startServer(
             new Request(req, { signal }),
             config,
             dependencies.adapterFactory,
-            { onTurnIdentity: bindIdentity },
+            { onTurnIdentity: bindIdentity, fetchUpstream: dependencies.fetchUpstream, nativeQuotaGuard },
           ),
           req.signal,
           process.platform,
@@ -1097,7 +1109,11 @@ export function startServer(
       if (req.method === "POST" && url.pathname === "/v1/alpha/search") {
         if (draining) return formatErrorResponse(503, "server_error", "codex-chatgpt-web is draining for a requested service operation");
         return httpTurns.track(
-          signal => nativeSearchRequest(new Request(req, { signal }), dependencies.fetchUpstream),
+          signal => {
+            const request = new Request(req, { signal });
+            const forward = () => nativeSearchRequest(request, dependencies.fetchUpstream);
+            return nativeQuotaGuard ? nativeQuotaGuard.run(request, forward) : forward();
+          },
           req.signal,
           process.platform,
           "search",
@@ -1110,7 +1126,11 @@ export function startServer(
           ? "images/generations"
           : "images/edits";
         return httpTurns.track(
-          signal => nativeImagesRequest(new Request(req, { signal }), endpoint, dependencies.fetchUpstream),
+          signal => {
+            const request = new Request(req, { signal });
+            const forward = () => nativeImagesRequest(request, endpoint, dependencies.fetchUpstream);
+            return nativeQuotaGuard ? nativeQuotaGuard.run(request, forward) : forward();
+          },
           req.signal,
           process.platform,
           endpoint,

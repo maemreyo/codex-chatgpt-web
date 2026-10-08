@@ -16,6 +16,48 @@ export type BrowserHostMode = "managed-chrome" | "launcher";
 export type BrowserInteractionMode = "automatic" | "manual";
 export type SubagentProtocol = "compatibility-v1" | "native";
 
+export interface NativeQuotaReserveSettings {
+  /** Strict rejects every native quota-consuming request; conservative is best-effort. */
+  mode: "strict" | "conservative";
+  fiveHourReservePercent: number;
+  weeklyReservePercent: number;
+  /** Refuse new requests at or below these remaining-percent admission levels. */
+  fiveHourAdmissionPercent: number;
+  weeklyAdmissionPercent: number;
+}
+
+export const DEFAULT_NATIVE_QUOTA_RESERVE_SETTINGS: Readonly<NativeQuotaReserveSettings> = {
+  mode: "strict",
+  fiveHourReservePercent: 5,
+  weeklyReservePercent: 3,
+  fiveHourAdmissionPercent: 20,
+  weeklyAdmissionPercent: 10,
+};
+
+export function parseNativeQuotaReserveSettings(value: unknown): NativeQuotaReserveSettings {
+  if (value === undefined) return { ...DEFAULT_NATIVE_QUOTA_RESERVE_SETTINGS };
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    throw new Error("nativeQuotaReserve must be a settings object");
+  }
+  const input = value as Partial<Record<keyof NativeQuotaReserveSettings, unknown>>;
+  const result = { ...DEFAULT_NATIVE_QUOTA_RESERVE_SETTINGS, ...input };
+  if (result.mode !== "strict" && result.mode !== "conservative") {
+    throw new Error("nativeQuotaReserve.mode must be strict or conservative");
+  }
+  for (const key of ["fiveHourReservePercent", "weeklyReservePercent", "fiveHourAdmissionPercent", "weeklyAdmissionPercent"] as const) {
+    const level = result[key];
+    if (typeof level !== "number" || !Number.isFinite(level) || level < 0 || level > 100) {
+      throw new Error(`nativeQuotaReserve.${key} must be a percentage between 0 and 100`);
+    }
+  }
+  const levels = result as NativeQuotaReserveSettings;
+  if (levels.fiveHourAdmissionPercent <= levels.fiveHourReservePercent
+    || levels.weeklyAdmissionPercent <= levels.weeklyReservePercent) {
+    throw new Error("nativeQuotaReserve admission levels must be higher than their reserve levels");
+  }
+  return levels;
+}
+
 /**
  * ChatGPT caches a connector's public MCP contract by connector identity. The direct turn-token
  * contract therefore has a new identity instead of mutating the retired connector in place.
@@ -125,6 +167,9 @@ export interface AppConfig {
   experimentalFreshConversationPerTurn: boolean;
   /** Experimental semantic projection/epoch memory. Disabled by default until rollout gates pass. */
   experimentalSemanticMemory: boolean;
+  /** Optional protection for native Codex quota. Disabled unless explicitly enabled. */
+  nativeQuotaReserveEnabled?: boolean;
+  nativeQuotaReserve?: NativeQuotaReserveSettings;
   useSavedChats: boolean;
   /** Explicitly install the additional Pro-sized model row while Zero Risk is active. */
   zeroRiskProEnabled: boolean;
@@ -260,6 +305,8 @@ export function defaultConfig(mode: RuntimeMode = "browser-only"): AppConfig {
     experimentalSkillAttachments: false,
     experimentalFreshConversationPerTurn: false,
     experimentalSemanticMemory: false,
+    nativeQuotaReserveEnabled: false,
+    nativeQuotaReserve: { ...DEFAULT_NATIVE_QUOTA_RESERVE_SETTINGS },
     useSavedChats: false,
     zeroRiskProEnabled: false,
     autoApproveToolCalls: false,
@@ -571,6 +618,10 @@ function parseConfig(value: unknown, path: string): AppConfig {
     throw new Error(`Invalid experimentalSemanticMemory in ${path}`);
   }
   const experimentalSemanticMemory = parsed.experimentalSemanticMemory === true;
+  if (parsed.nativeQuotaReserveEnabled !== undefined && typeof parsed.nativeQuotaReserveEnabled !== "boolean") {
+    throw new Error(`Invalid nativeQuotaReserveEnabled in ${path}`);
+  }
+  const nativeQuotaReserve = parseNativeQuotaReserveSettings(parsed.nativeQuotaReserve);
   if (parsed.useSavedChats !== undefined && typeof parsed.useSavedChats !== "boolean") {
     throw new Error(`Invalid useSavedChats in ${path}`);
   }
@@ -605,6 +656,7 @@ function parseConfig(value: unknown, path: string): AppConfig {
     experimentalSkillAttachments,
     experimentalFreshConversationPerTurn,
     experimentalSemanticMemory,
+    nativeQuotaReserve,
     useSavedChats,
     zeroRiskProEnabled,
   } as AppConfig;
