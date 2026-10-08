@@ -11,7 +11,11 @@ const protocol = process.argv.includes("--v1") ? "v1" : "v2";
 const explicitChildModel = "gpt-5.6-sol";
 const explicitChildReasoningEffort = "max";
 const codexArg = process.argv.slice(2).find(argument => argument !== "--v1" && argument !== "--v2");
-const codex = resolve(codexArg ?? "/Applications/ChatGPT.app/Contents/Resources/codex");
+const bundledCodexPaths = [
+  "/Applications/ChatGPT.app/Contents/Resources/codex",
+  "/Applications/ChatGPT.app/Contents/Resources/codex-cli/CodexCLI.app/Contents/MacOS/codex",
+];
+const codex = resolve(codexArg ?? bundledCodexPaths.find(existsSync) ?? bundledCodexPaths[0]);
 if (!existsSync(codex)) throw new Error(`Codex executable is missing: ${codex}`);
 
 const bundled = spawnSync(codex, ["debug", "models", "--bundled"], {
@@ -158,7 +162,8 @@ function spawnedAgentId(body: Record<string, unknown>): string {
   throw new Error("V1 lifecycle could not find the spawned agent id");
 }
 
-async function* toolCall(name: string, args: Record<string, unknown>): AsyncGenerator<AdapterEvent> {
+async function* toolCall(name: string, args: Record<string, unknown>, delayMs = 0): AsyncGenerator<AdapterEvent> {
+  if (delayMs > 0) await new Promise(resolve => setTimeout(resolve, delayMs));
   yield { type: "tool_call_start", id: `call_${name}_${crypto.randomUUID()}`, name };
   yield { type: "tool_call_delta", arguments: JSON.stringify(args) };
   yield { type: "tool_call_end" };
@@ -198,6 +203,12 @@ function responseFor(role: Role, step: number, body: Record<string, unknown>): A
     if (step === 3) return toolCall("wait_agent", protocol === "v1"
       ? { targets: [spawnedAgentId(body)], timeout_ms: 500 }
       : { timeout_ms: 500 });
+    // Native V2 can report an already completed child before its queued follow-up
+    // turn has reached the stub. Keep the parent alive until that turn is observed;
+    // otherwise Codex may stop the child as soon as ROOT_LIFECYCLE_OK is emitted.
+    if (protocol === "v2" && !observed.has("child:3") && step < 24) {
+      return toolCall("wait_agent", { timeout_ms: 500 }, 250);
+    }
     return finalAnswer("ROOT_LIFECYCLE_OK");
   }
   if (role === "child") {

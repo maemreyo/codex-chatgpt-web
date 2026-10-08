@@ -43,6 +43,10 @@ test("Electron agent bridge inspects and previews metadata without modifying nat
   assert.equal(result.applied, true);
   assert.equal(result.requiresRestart, true);
   assert.match(readFileSync(path.join(codexHome, "config.toml"), "utf8"), /max_concurrent_threads_per_session = 3/);
+  const custom = await native.preview({ preset: "custom", maxConcurrentThreads: 5, enrollMissingRoles: false });
+  assert.equal(custom.changes.length, 1);
+  assert.equal((await native.apply(custom.id)).applied, true);
+  assert.equal((await native.inspect()).maxConcurrentThreads, 5);
   assert.match(readFileSync(path.join(codexHome, "config.toml"), "utf8"), /Preserve personal settings/);
   await assert.rejects(() => native.apply(preview.id), /missing or expired/);
 });
@@ -91,6 +95,10 @@ test("Electron agent editor previews and applies scoped role edits without chang
   assert.equal((await native.apply(preview.id)).applied, true);
   const result = await native.inspect();
   assert.equal(result.maxConcurrentThreads, 6);
+  const balanced = await native.preview({ preset: "balanced", maxConcurrentThreads: 4, enrollMissingRoles: false });
+  assert.equal(balanced.changes.length, 1);
+  assert.equal((await native.apply(balanced.id)).applied, true);
+  assert.equal((await native.inspect()).maxConcurrentThreads, 4);
   const builder = result.roles.find(role => role.name === "zam-builder");
   assert.equal(builder.reasoningEffort, "medium");
   assert.equal(builder.developerInstructions, "Implement bounded changes with explicit review.");

@@ -1845,9 +1845,33 @@ function SettingsSurface({
   };
 
   return (
-    <ContentSurface narrow title={devProfile ? copy.devSettingsTitle : copy.settingsTitle}>
-      <SectionHeading label={copy.general} />
-      <div className="settings-list">
+    <ContentSurface dashboard title={devProfile ? copy.devSettingsTitle : copy.settingsTitle}>
+      <div className="settings-dashboard">
+        <section className="settings-card settings-runtime-card" aria-label={copy.agentTitle}>
+          <SectionHeading label={copy.agentTitle} />
+          <div className="settings-list">
+            <SettingRow body={capacityBody} label={copy.browserCapacityTitle}>
+              <select
+                aria-label={copy.browserCapacityTitle}
+                className="browser-capacity-select"
+                disabled={capacityBusy || busy}
+                onChange={event => void changeCapacity(Number(event.target.value))}
+                value={requestedCapacity}
+              >
+                {[5, 6, 7, 8].map(value => <option key={value} value={value}>{value}</option>)}
+              </select>
+            </SettingRow>
+            {api?.agents ? <AgentManagerPanel api={api.agents} language={language}
+              browserCapacity={requestedCapacity} effectiveBrowserCapacity={effectiveCapacity} onSetBrowserCapacity={changeCapacity} />
+              : <p className="agent-manager-placeholder">{copy.agentManagerPlaceholder}</p>}
+          </div>
+          {!devProfile && snapshot.state.codexRestartRequired ? (
+            <NoticeRow icon="alert" tone="warning">{copy.restartCodex}</NoticeRow>
+          ) : null}
+        </section>
+        <section className="settings-card settings-general-card" aria-label={copy.general}>
+          <SectionHeading label={copy.general} />
+          <div className="settings-list">
         {!devProfile ? <SettingRow body={copy.launchAtLoginBody} flushAfter label={copy.launchAtLogin}>
           <Switch
             checked={snapshot.state.autoStart}
@@ -1904,6 +1928,11 @@ function SettingsSurface({
               .catch((cause) => setError(messageOf(cause)))}
           />
         </SettingRow>
+          </div>
+        </section>
+        <section className="settings-card settings-preferences-card" aria-label={copy.configuration}>
+          <SectionHeading label={copy.configuration} />
+          <div className="settings-list">
         <SettingRow
           body={snapshot.state.browserInteractionMode === "manual"
             ? copy.manualBiggerContextUnavailable
@@ -1955,33 +1984,10 @@ function SettingsSurface({
         <SettingRow body={copy.chooseLanguageHint} label={copy.language}>
           <LanguageMenu copy={copy} language={language} onChange={(next) => void updateLanguage(next)} />
         </SettingRow>
-      </div>
-
-      <SectionHeading label={copy.agentTitle} spaced />
-      <div className="settings-list">
-        <SettingRow body={capacityBody} label={copy.browserCapacityTitle}>
-          <select
-            aria-label={copy.browserCapacityTitle}
-            className="browser-capacity-select"
-            disabled={capacityBusy || busy}
-            onChange={event => void changeCapacity(Number(event.target.value))}
-            value={requestedCapacity}
-          >
-            {[5, 6, 7, 8].map(value => <option key={value} value={value}>{value}</option>)}
-          </select>
-        </SettingRow>
-        {api?.agents ? <AgentManagerPanel api={api.agents} language={language}
-          browserCapacity={requestedCapacity} onSetBrowserCapacity={changeCapacity} />
-          : <p className="agent-manager-placeholder">{copy.agentManagerPlaceholder}</p>}
-      </div>
-
-      {!devProfile && snapshot.state.codexRestartRequired ? (
-        <NoticeRow icon="alert" tone="warning">
-          {copy.restartCodex}
-        </NoticeRow>
-      ) : null}
-
-      <SectionHeading label={copy.diagnostics} spaced />
+          </div>
+        </section>
+        <section className="settings-card settings-diagnostics-card" aria-label={copy.diagnostics}>
+          <SectionHeading label={copy.diagnostics} />
       <button className="diagnostic-row" disabled={busy} onClick={() => void runDoctor()} type="button">
         <Icon name="activity" />
         <span>
@@ -2007,7 +2013,8 @@ function SettingsSurface({
         <Icon name="chevron" />
       </button> : null}
       {doctor ? <DoctorSummary copy={copy} language={language} report={doctor} /> : null}
-
+        </section>
+        <section className="settings-card settings-about-card" aria-label={copy.product}>
       <div className="about-row">
         <BrandMark small />
         <span>
@@ -2018,12 +2025,15 @@ function SettingsSurface({
           </small>
         </span>
       </div>
+        </section>
+      </div>
     </ContentSurface>
   );
 }
 
 function ContentSurface({
   children,
+  dashboard = false,
   eyebrow,
   fit = false,
   narrow = false,
@@ -2031,6 +2041,7 @@ function ContentSurface({
   title,
 }: {
   children: ReactNode;
+  dashboard?: boolean;
   eyebrow?: string;
   fit?: boolean;
   narrow?: boolean;
@@ -2039,7 +2050,7 @@ function ContentSurface({
 }) {
   return (
     <section className="content-surface">
-      <div className={`content-scroll${narrow ? " is-narrow" : ""}${fit ? " is-fit" : ""}`}>
+      <div className={`content-scroll${narrow ? " is-narrow" : ""}${fit ? " is-fit" : ""}${dashboard ? " is-dashboard" : ""}`}>
         <header className="surface-header">
           {eyebrow ? <span>{eyebrow}</span> : null}
           <h1>{title}</h1>
