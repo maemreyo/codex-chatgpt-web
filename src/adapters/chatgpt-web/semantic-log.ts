@@ -30,7 +30,7 @@ export type SemanticLogEvent =
       reason: "unknown_occupancy" | "model_family_change";
       firstMessageTokens: number;
       firstMessageChars: number;
-      fitsSingleMessage: true;
+      fitsSingleMessage: boolean;
       maskedResults: number;
       maskedTokensEst: number;
       ledgerFiles: number;
@@ -70,7 +70,7 @@ export type SemanticLogEvent =
       epochRotations: 0 | 1;
       reseedInputTokensEst: number;
       webCompactionSubmissions: 0;
-      extraStageSubmissions: 0;
+      extraStageSubmissions: number;
       maskedResults: number;
       maskedTokensEst: number;
       discardedTails: 0;

@@ -29,6 +29,7 @@ test("daemon streams browser lifecycle through the real helper process", async (
       if (prepared.skillFiles?.[0]?.text !== "<skill>\\n<name>ipc</name>\\n<path>/skills/ipc/SKILL.md</path>\\ncheck IPC\\n</skill>") throw new Error("Skill file lost in IPC");
       if (prepared.multipart.parts.length !== 6) throw new Error("Multipart context was lost");
       for (let index = 1; index < prepared.multipart.parts.length; index++) {
+        await turn.onMultipartStageSubmitted?.(index);
         await turn.onMultipartStageAcknowledged?.(index);
       }
       await turn.onSendActivated();
@@ -88,6 +89,7 @@ test("daemon streams browser lifecycle through the real helper process", async (
   const deltas: string[] = [];
   const checkpoints: unknown[] = [];
   const acknowledgedStages: number[] = [];
+  const submittedStages: number[] = [];
   let sendActivated = false;
   let submitted = false;
   let released = false;
@@ -108,6 +110,7 @@ test("daemon streams browser lifecycle through the real helper process", async (
         release: () => { released = true; },
       }),
       onMultipartStageAcknowledged: stage => { acknowledgedStages.push(stage); },
+      onMultipartStageSubmitted: stage => { submittedStages.push(stage); },
       onSendActivated: () => { sendActivated = true; },
       onSubmitted: () => { submitted = true; },
       onReasoningSummary: (text, continuation) => reasoning.push({ text, continuation: continuation === true }),
@@ -124,6 +127,7 @@ test("daemon streams browser lifecycle through the real helper process", async (
     expect(sendActivated).toBe(true);
     expect(submitted).toBe(true);
     expect(acknowledgedStages).toEqual([1, 2, 3, 4, 5]);
+    expect(submittedStages).toEqual([1, 2, 3, 4, 5]);
     expect(checkpoints).toEqual([{
       answerHash: "a".repeat(64),
       checkpoint: {

@@ -7,6 +7,17 @@ export type LauncherProfile = "production" | "development";
 export type BrowserInteractionMode = "automatic" | "manual";
 export type Surface = "browser" | "setup" | "mcp" | "activity" | "limits" | "settings";
 
+export interface QuotaSettings {
+  enabled: boolean;
+  policy: {
+    mode: "strict" | "conservative";
+    fiveHourReservePercent: number;
+    weeklyReservePercent: number;
+    fiveHourAdmissionPercent: number;
+    weeklyAdmissionPercent: number;
+  };
+}
+
 export interface LauncherState {
   version: 1;
   language: Language | null;
@@ -180,6 +191,8 @@ export interface LauncherApi {
   setAutostart(enabled: boolean): Promise<{ state: LauncherState; supported: boolean; enabled: boolean }>;
   setBiggerContext(enabled: boolean): Promise<LauncherState>;
   setSemanticMemory(enabled: boolean): Promise<LauncherState>;
+  getQuotaSettings(): Promise<QuotaSettings>;
+  setQuotaSettings(request: QuotaSettings): Promise<QuotaSettings & { changed: boolean }>;
   setSkillAttachments(enabled: boolean): Promise<LauncherState>;
   setAutoApproveToolCalls(enabled: boolean): Promise<LauncherState>;
   setFreshConversationPerTurn(enabled: boolean): Promise<LauncherState>;

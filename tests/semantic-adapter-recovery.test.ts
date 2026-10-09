@@ -162,6 +162,34 @@ test("S8: valid persisted epoch survives process restart with oversized canonica
   }
 });
 
+test("SEM and Bigger Context retain canonical compaction handoff after epoch rotation", async () => {
+  const fixture = makeFixture();
+  fixture.provider.chatgptWeb!.experimentalBiggerContext = true;
+  try {
+    const { second } = await seedOversizedHistory(fixture);
+    const sourceKey = `${chatGptWebExecutionNamespace(fixture.provider)}:${chatGptTurnExecutionKey(second)}`;
+    const source = chatGptTurnSessions.find(sourceKey);
+    expect(source).toBeDefined();
+    // The fake worker has no real launcher lease to release after handoff.
+    source!.runtime.releaseRetainedConversation = async () => {};
+    const compact = request("s8_compact_bigger", [
+      ...rawInput(second), { type: "compaction_trigger" },
+    ], true);
+    const events: AdapterEvent[] = [];
+    await createChatGptWebAdapter(fixture.provider).runTurn!(
+      compact, { headers: new Headers() }, event => events.push(event),
+    );
+    expect(events.at(-1)).toMatchObject({ type: "done", stopReason: "stop" });
+    expect(events.some(event => event.type === "text_delta"
+      && event.text.includes("S8 verified canonical compact summary"))).toBeTrue();
+    expect(fixture.retainedHandoffs).toBe(1);
+    expect(fixture.ordinarySubmissions).toBe(2);
+    expect(fixture.prompts.at(-1)).not.toContain("S8-EXACT-OLD-EVIDENCE");
+  } finally {
+    await fixture.close();
+  }
+});
+
 test("S8: ninth turn reuses a verified persisted epoch after restart at 220-240k canonical tokens", async () => {
   const fixture = makeFixture();
   const environment = `<environment_context><cwd>${fixture.dir}</cwd><filesystem><workspace_roots><root>${fixture.dir}</root></workspace_roots><permission_profile type="disabled"><file_system type="unrestricted" /></permission_profile></filesystem></environment_context>`;

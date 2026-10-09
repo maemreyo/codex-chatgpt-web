@@ -1386,6 +1386,8 @@ export interface BrowserTurn {
   onSendActivated?: () => void | Promise<void>;
   /** Semantic submission evidence proved that ChatGPT accepted the prompt. */
   onSubmitted?: () => void | Promise<void>;
+  /** One inert multipart stage has browser submission-accepted evidence. */
+  onMultipartStageSubmitted?: (stageIndex: number) => void | Promise<void>;
   /** Numeric-only size-rejection observation from the owned browser submission. */
   onSizeRejection?: (observation: ChatGptSubmissionRejectionObservation) => void;
   /** One inert Bigger Context stage completed its exact acknowledgement boundary. */
@@ -5352,7 +5354,10 @@ export class ChatGptBrowserWorker {
               checkpoint => diagnostics.capture(page, `multipart-${index + 1}-${checkpoint}`),
               turn.abortSignal ? AbortSignal.any([stageSignal, turn.abortSignal]) : stageSignal,
               undefined,
-              { onSubmitted: recordStageUsage, onSendActivated: async () => {
+              { onSubmitted: async () => {
+                await turn.onMultipartStageSubmitted?.(index + 1);
+                await recordStageUsage?.();
+              }, onSendActivated: async () => {
                 await this.assertSelectedEffort(page, mode);
                 submissionRejection.begin(page, {
                   modelId: turn.modelId, effort: mode.effort, capabilities: browserCapabilities,

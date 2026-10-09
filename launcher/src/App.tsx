@@ -15,6 +15,7 @@ import { copyFor, localizeRuntimeMessage, type Copy } from "./i18n";
 import { Icon, type IconName } from "./icons";
 import { LimitsSurface } from "./LimitsSurface";
 import { AgentManagerPanel } from "./AgentManagerPanel";
+import { QuotaProtectionPanel } from "./QuotaProtectionPanel";
 import { limitsCopyFor } from "./limits-copy";
 import { useLimits } from "./useLimits";
 import { describeTurnActivity } from "./turn-activity";
@@ -2012,6 +2013,10 @@ function SettingsSurface({
             </SettingRow>
           </div>
           <p className="settings-experiments-note" role="status">{copy.semanticLogicalWindowPending}</p>
+        </section>
+        <section className="settings-card settings-quota-card" aria-label={copy.quotaTitle}>
+          <SectionHeading label={copy.quotaTitle} />
+          <QuotaProtectionPanel api={api!} copy={copy} available={snapshot.state.coreSetupComplete === true} />
         </section>
         <section className="settings-card settings-diagnostics-card" aria-label={copy.diagnostics}>
           <SectionHeading label={copy.diagnostics} />

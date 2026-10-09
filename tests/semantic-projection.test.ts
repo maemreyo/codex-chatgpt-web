@@ -118,6 +118,39 @@ test("semantic first-message preflight uses unchanged physical limits", () => {
     .toThrow("composer boundary");
 });
 
+test("SEM and Bigger Context stage a large exact current turn inside measured transport limits", () => {
+  const chunks = Array.from({ length: 260 }, (_, index) => ({
+    type: "message", role: "user", id: `current_${index}`,
+    content: `EXACT-CURRENT-${index} ${"alpha beta gamma delta ".repeat(90)}`,
+    ...turn("turn_long"),
+  }));
+  const parsed = parseRequest({
+    model: CHATGPT_WEB_MODEL_ID,
+    stream: true,
+    reasoning: { effort: "high" },
+    client_metadata: { "x-codex-turn-metadata": JSON.stringify({ thread_id: "sem_bigger", turn_id: "turn_long" }) },
+    input: [{ type: "message", role: "developer", content: "Authority must remain exact." }, ...chunks],
+  });
+  parsed._chatgptModelFamily = "6";
+  const plus = { ...capabilities, proAvailable: false };
+  const mode = resolveChatGptWebModelMode(parsed.modelId, parsed.options.reasoning, plus);
+
+  expect(() => preflightSemanticProjection(parsed, plus, mode, false))
+    .toThrow();
+  const combined = preflightSemanticProjection(parsed, plus, mode, false, true);
+  expect(combined.compiled.multipart?.parts.length).toBeGreaterThanOrEqual(2);
+  expect(combined.metrics.physicalLimit).toBe(240_000);
+  expect(combined.metrics.estimatedInputTokens).toBeGreaterThan(combined.metrics.firstMessageTokens);
+  expect(combined.metrics.stagingEffort).toBe("low");
+  expect(combined.metrics.maxStageMessageTokens).toBeGreaterThan(0);
+  expect(combined.metrics.finalMessageTokens).toBeGreaterThan(0);
+  expect(combined.metrics.firstMessageTokens).toBe(Math.max(
+    combined.metrics.maxStageMessageTokens!, combined.metrics.finalMessageTokens!,
+  ));
+  expect(JSON.stringify(combined.compiled.multipart?.parts)).toContain("EXACT-CURRENT-259");
+  expect(JSON.stringify(combined.compiled.multipart?.parts)).toContain("Authority must remain exact.");
+});
+
 test("retained conversation identity changes only when semantic epoch changes", () => {
   const parsed = semanticRequest();
   const namespace = "semantic-test-namespace";

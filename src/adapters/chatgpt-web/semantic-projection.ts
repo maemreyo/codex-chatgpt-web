@@ -20,15 +20,27 @@ import {
   estimateCompiledChatGptWebInputTokens,
   estimateCompiledChatGptWebMessageTokens,
   compiledChatGptWebMaxMessageChars,
+  compiledChatGptWebMessages,
+  estimateChatGptWebImageTokens,
 } from "./input-tokens";
+import { skillFileTokens } from "./skill-attachments";
 import { CHATGPT_WEB_MODEL_ID, type ChatGptWebCapabilities, type ChatGptWebModelMode } from "./model";
-import { compileChatGptWebPrompt, type CompiledChatGptWebPrompt } from "./prompt";
+import {
+  compileChatGptWebPrompt, formatChatGptWebMultipartCommit,
+  type CompiledChatGptWebPrompt,
+} from "./prompt";
+import { estimateTokens } from "../../lib/token-estimate";
+import { resolveBiggerContextMultipartParts } from "./usage";
 import {
   SEMANTIC_PROJECTION_POLICY_VERSION,
   validateSemanticEpochRecord,
   type StoredChatGptSemanticEpochV1,
 } from "./semantic-epoch-store";
-import { assertChatGptWebInputWithinLimits } from "./browser-worker";
+import {
+  assertChatGptWebInputWithinLimits,
+  assertChatGptWebMultipartInputWithinLimits,
+  resolveChatGptWebMultipartStagingMode,
+} from "./browser-worker";
 
 const SEMANTIC_ESTIMATE_TURN_TOKEN = "turn_00000000000000000000000000000000";
 
@@ -53,6 +65,10 @@ export interface SemanticProjectionMetrics {
   firstMessageChars: number;
   estimatedInputTokens: number;
   physicalLimit: number;
+  multipartParts?: 2 | 6;
+  stagingEffort?: ChatGptWebModelMode["effort"];
+  maxStageMessageTokens?: number;
+  finalMessageTokens?: number;
 }
 
 export interface SemanticProjectedRequest {
@@ -62,7 +78,7 @@ export interface SemanticProjectedRequest {
 
 export interface SemanticPreflightResult {
   compiled: CompiledChatGptWebPrompt;
-  metrics: Pick<SemanticProjectionMetrics, "firstMessageTokens" | "firstMessageChars" | "estimatedInputTokens" | "physicalLimit">;
+  metrics: Pick<SemanticProjectionMetrics, "firstMessageTokens" | "firstMessageChars" | "estimatedInputTokens" | "physicalLimit" | "multipartParts" | "stagingEffort" | "maxStageMessageTokens" | "finalMessageTokens">;
 }
 
 function record(value: unknown): Record<string, unknown> | undefined {
@@ -307,15 +323,21 @@ export function preflightSemanticProjection(
   capabilities: ChatGptWebCapabilities,
   mode: ChatGptWebModelMode,
   experimentalSkillAttachments: boolean,
+  experimentalBiggerContext = false,
 ): SemanticPreflightResult {
   if (projected.modelId !== CHATGPT_WEB_MODEL_ID) {
     throw new Error("Semantic epoch preflight supports Sol only");
   }
+  // SEM projects the browser-facing clone first. Bigger Context then stages that
+  // projection using exactly the same part selection as normal Web submissions.
+  const parts = experimentalBiggerContext
+    ? resolveBiggerContextMultipartParts(projected, capabilities, experimentalSkillAttachments)
+    : undefined;
   const compiled = compileChatGptWebPrompt(
     projected,
     capabilities,
     mode.localTools ? SEMANTIC_ESTIMATE_TURN_TOKEN : undefined,
-    { experimentalSkillAttachments },
+    { experimentalSkillAttachments, experimentalMultipartParts: parts },
   );
   if (projected._compactionRequest && compiled.trimmedCompactionMessages) {
     // A missing or unverified checkpoint cannot turn an oversized canonical
@@ -323,22 +345,51 @@ export function preflightSemanticProjection(
     // source messages. Recovery must keep the exact canonical evidence.
     throw new Error("Semantic compaction preflight cannot discard canonical history");
   }
-  if (compiled.multipart) throw new Error("Semantic epoch preflight does not support Bigger Context");
   const estimatedInputTokens = estimateCompiledChatGptWebInputTokens(compiled, projected.modelId);
   const firstMessageTokens = estimateCompiledChatGptWebMessageTokens(compiled, projected.modelId);
   const firstMessageChars = compiledChatGptWebMaxMessageChars(compiled);
-  assertChatGptWebInputWithinLimits(
-    estimatedInputTokens,
-    firstMessageTokens,
-    projected.modelId,
-    mode.effort,
-    capabilities,
-    firstMessageChars,
-  );
+  let multipartMessageMetrics: Pick<SemanticProjectionMetrics, "stagingEffort" | "maxStageMessageTokens" | "finalMessageTokens"> = {};
+  if (compiled.multipart) {
+    const messages = compiledChatGptWebMessages(compiled);
+    const stages = messages.slice(0, -1);
+    const maxStageTokens = Math.max(...stages.map(text => estimateTokens(text, projected.modelId)));
+    const maxStageChars = Math.max(...stages.map(text => text.length));
+    const stagingMode = resolveChatGptWebMultipartStagingMode(
+      projected.modelId, capabilities, maxStageTokens, maxStageChars,
+    );
+    const final = formatChatGptWebMultipartCommit(compiled.multipart, `ctx_${"0".repeat(32)}`);
+    const finalMessageTokens = estimateTokens(final, projected.modelId)
+      + skillFileTokens(compiled.skillFiles, projected.modelId);
+    multipartMessageMetrics = {
+      stagingEffort: stagingMode.effort,
+      maxStageMessageTokens: maxStageTokens,
+      finalMessageTokens,
+    };
+    assertChatGptWebMultipartInputWithinLimits(
+      estimatedInputTokens, firstMessageTokens, projected.modelId, mode.effort,
+      capabilities, firstMessageChars, compiled.multipart.parts.length,
+      {
+        stagingEffort: stagingMode.effort,
+        maxStageMessageTokens: maxStageTokens,
+        maxStageChars,
+        finalMessageTokens,
+        finalMessageChars: final.length,
+        finalImageTokens: estimateChatGptWebImageTokens(compiled),
+      },
+      projected._chatgptModelFamily,
+    );
+  } else {
+    // An inline submission must still fit the unchanged one-message boundary.
+    assertChatGptWebInputWithinLimits(
+      estimatedInputTokens, firstMessageTokens, projected.modelId, mode.effort,
+      capabilities, firstMessageChars,
+    );
+  }
   const { contextWindow } = resolveChatGptWebPhysicalContextLimits(
     projected.modelId,
     mode.effort,
-    capabilities,
+    { ...capabilities, experimentalBiggerContext },
+    projected._chatgptModelFamily,
   );
   return {
     compiled,
@@ -347,6 +398,8 @@ export function preflightSemanticProjection(
       firstMessageChars,
       estimatedInputTokens,
       physicalLimit: contextWindow,
+      ...multipartMessageMetrics,
+      ...(compiled.multipart ? { multipartParts: compiled.multipart.parts.length as 2 | 6 } : {}),
     },
   };
 }

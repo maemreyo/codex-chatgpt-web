@@ -22,13 +22,14 @@ interface PendingTurn {
   localFailure?: Error;
   progressForwarding?: AbortController;
   acknowledgedMultipartStage?: number;
+  submittedMultipartStage?: number;
 }
 
 type HelperMessage =
   | { type: "ready"; features?: string[] }
   | { type: "event"; id: string; event: "heartbeat" | "send_activated" | "submitted" | "reasoning" | "commentary" | "text"; text?: string; continuation?: boolean }
   | { type: "event"; id: string; event: "tool_batch_observed"; revision: number }
-  | { type: "event"; id: string; event: "multipart_stage_acknowledged"; stageIndex: number }
+  | { type: "event"; id: string; event: "multipart_stage_acknowledged" | "multipart_stage_submitted"; stageIndex: number }
   | { type: "event"; id: string; event: "completion_fence_begin"; requestId: number }
   | { type: "event"; id: string; event: "completion_fence_commit"; requestId: number; revision: number }
   | { type: "event"; id: string; event: "prepared_selected"; reused: boolean }
@@ -64,7 +65,7 @@ function parseHelperMessage(line: string): HelperMessage {
   }
   if (message.type === "event") {
     const event = message.event;
-    if (event === "multipart_stage_acknowledged") {
+    if (event === "multipart_stage_acknowledged" || event === "multipart_stage_submitted") {
       if (!Number.isSafeInteger(message.stageIndex) || (message.stageIndex as number) <= 0) {
         throw new Error("Launcher browser helper multipart stage index is invalid");
       }
@@ -221,6 +222,9 @@ export class LauncherBrowserHelperClient {
       throw new Error(
         "Launcher browser helper does not support multipart acknowledgement forwarding; update or restart the launcher",
       );
+    }
+    if (turn.onMultipartStageSubmitted && !this.helperFeatures.has("multipart-stage-submitted")) {
+      throw new Error("Launcher browser helper cannot report multipart stage submissions; update or restart the launcher");
     }
     if (turn.externalProgress && !this.helperFeatures.has("tool-boundary-ack")) {
       throw new Error(
@@ -497,6 +501,26 @@ export class LauncherBrowserHelperClient {
         ));
       }
       else if (message.event === "submitted") pending.turn.onSubmitted?.();
+      else if (message.event === "multipart_stage_submitted") {
+        const multipart = pending.prepared?.multipart;
+        if (!multipart
+          || message.stageIndex >= multipart.parts.length
+          || message.stageIndex !== (pending.submittedMultipartStage ?? 0) + 1) {
+          this.abortWithLocalFailure(
+            message.id,
+            new Error("Launcher browser helper submitted an unexpected multipart stage"),
+            pending,
+          );
+          return;
+        }
+        pending.submittedMultipartStage = message.stageIndex;
+        void Promise.resolve().then(() => pending.turn.onMultipartStageSubmitted?.(message.stageIndex))
+          .catch(error => this.abortWithLocalFailure(
+            message.id,
+            error instanceof Error ? error : new Error(String(error)),
+            pending,
+          ));
+      }
       else if (message.event === "multipart_stage_acknowledged") {
         const multipart = pending.prepared?.multipart;
         if (!multipart

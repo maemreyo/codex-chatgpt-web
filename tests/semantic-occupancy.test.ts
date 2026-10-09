@@ -59,6 +59,21 @@ test("ledger is shared for one retained epoch key but recreated for a new epoch"
   expect(semanticEpochOccupancies.forConversation(`${key}:old-restart`, false, 90_000, "chatgpt-web-sol").confidence).toBe("unknown");
 });
 
+test("lost retained tab rebases a known or unknown epoch ledger before charging the new full projection", () => {
+  for (const known of [true, false]) {
+    const ledger = new SemanticEpochOccupancy(60_000, known, "chatgpt-web-sol");
+    ledger.record("old-prompt", 31_000);
+    ledger.recordOutput("old response");
+    ledger.markRejected();
+    ledger.resetForFreshConversation();
+    expect(ledger.confidence).toBe("known");
+    expect(ledger.value).toBe(0);
+    ledger.record("old-prompt", 9_000);
+    expect(ledger.value).toBe(9_000);
+    expect(ledger.canDeliverBatch([{ callId: "new", content: "small" }])).toBe(true);
+  }
+});
+
 test("pressure replay leaves the full batch intact until canonical compaction settles each call once", async () => {
   const occupancy = new SemanticEpochOccupancy(30_000, true, "chatgpt-web-sol");
   occupancy.record("existing-epoch", 27_000);

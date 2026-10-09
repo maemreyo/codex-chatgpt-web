@@ -201,21 +201,33 @@ export function AgentManagerPanel({ api, language = "en", browserCapacity, effec
           </div>}
         </div>
         <div className="agent-panel-heading agent-roles-heading">
-          <h3>{copy.agentCurrent}</h3>
-          <code title={inspection.codexHome}>{inspection.codexHome}</code>
+          <h3>{copy.agentCurrent} <span className="agent-role-count" title={inspection.codexHome}>{inspection.roles.length}</span></h3>
         </div>
         {inspection.roles.length === 0 ? <p>{copy.agentNoAgents}</p> : (
           <div className="agent-roles-grid">
             {inspection.roles.map((role) => (
               <div className="agent-role-row" key={`${role.scope}:${role.name}`}>
                 <div className="agent-role-summary">
-                  <strong>{role.name}</strong>
-                  <small>{copy.agentModel}: {role.model} · {copy.agentEffort}: {role.reasoningEffort ?? "—"}</small>
-                  <small>{copy.agentStatus}: {localizeAgentStatus(copy, role.status)} · {role.managed ? copy.agentManaged : copy.agentUnmanaged}</small>
-                  <small><code>{role.configPath}</code></small>
+                  <span className="agent-role-avatar" aria-hidden="true">
+                    {role.name === "zam-reviewer" ? "RV" : role.name.split("-").at(-1)?.slice(0, 2).toUpperCase()}
+                  </span>
+                  <div className="agent-role-identity">
+                    <strong>{role.name}</strong>
+                    <span className="agent-role-source">{role.managed ? copy.agentManaged : copy.agentUnmanaged}</span>
+                  </div>
+                  <span className="agent-role-status" title={copy.agentStatus}>
+                    <span className="agent-role-status-dot" aria-hidden="true" />
+                    {localizeAgentStatus(copy, role.status)}
+                  </span>
                 </div>
+                <dl className="agent-role-facts">
+                  <div><dt>{copy.agentModel}</dt><dd title={role.model}>{role.model}</dd></div>
+                  <div><dt>{copy.agentEffort}</dt><dd>{role.reasoningEffort ?? "—"}</dd></div>
+                  <div><dt>{copy.agentRoleSandbox}</dt><dd>{role.sandboxMode ?? "—"}</dd></div>
+                </dl>
                 {role.configPath !== "—" && <details className="agent-role-details">
                   <summary>{copy.agentEdit}</summary>
+                  <p className="agent-role-config-path"><code title={role.configPath}>{role.configPath}</code></p>
                   <p>{copy.agentPermission}</p>
                   {role.policy !== "web-only" && <>
                     <p role="alert">{copy.agentRouteWarning}</p>

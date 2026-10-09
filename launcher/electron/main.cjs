@@ -37,6 +37,7 @@ const { RuntimeHost } = require("./runtime.cjs");
 const { ensurePackagedRuntime, waitForPackagedRuntimeSource } = require("./runtime-install.cjs");
 const { RuntimeSupervisor } = require("./runtime-supervisor.cjs");
 const { setSemanticMemoryPreference } = require("./semantic-settings.cjs");
+const { readQuotaSettings, setQuotaSettings } = require("./quota-settings.cjs");
 const { DEVELOPMENT_PROFILE, resolveLauncherProfile } = require("./profile.cjs");
 const { runtimeBundlePaths } = require("./runtime-command.cjs");
 const { createUpdateController } = require("./update.cjs");
@@ -537,13 +538,14 @@ function syncBrowserPreferences(stateStore, config) {
 function registerIpc({ logger, stateStore }) {
   // Lazy setup keeps launcher IPC boot tests and unconfigured DEV profiles safe.
   let nativeAgentManager;
+  let runtimeSettingsUpdateActive = false;
   const agents = () => nativeAgentManager ??= createAgentManager({
     runtimeCommand: args => runtimeSupervisor.runtimeCommand(args),
     codexHome: LAUNCHER_PROFILE.codexHome,
   });
   const runtimeChannels = new Set([
     "launcher:setup-core", "launcher:setup-mcp", "launcher:uninstall-integration",
-    "launcher:bigger-context", "launcher:semantic-memory", "launcher:skill-attachments", "launcher:fresh-conversation-per-turn",
+    "launcher:bigger-context", "launcher:semantic-memory", "launcher:quota-guard-get", "launcher:quota-guard-save", "launcher:skill-attachments", "launcher:fresh-conversation-per-turn",
     "launcher:use-saved-chats", "launcher:zero-risk-pro", "launcher:browser-interaction-mode",
     "launcher:auto-approve-tool-calls",
     "launcher:connector-name", "launcher:mcp-verify", "launcher:doctor", "launcher:cancel-turns",
@@ -552,9 +554,20 @@ function registerIpc({ logger, stateStore }) {
     "launcher:max-browser-sessions",
     "launcher:agents-inspect", "launcher:agents-preview", "launcher:agents-apply", "launcher:agents-recover",
   ]);
+  const configMutationChannels = new Set([
+    "launcher:setup-core", "launcher:setup-mcp", "launcher:uninstall-integration",
+    "launcher:bigger-context", "launcher:semantic-memory", "launcher:quota-guard-save",
+    "launcher:skill-attachments", "launcher:fresh-conversation-per-turn", "launcher:use-saved-chats",
+    "launcher:zero-risk-pro", "launcher:browser-interaction-mode", "launcher:auto-approve-tool-calls",
+    "launcher:connector-name",
+  ]);
   const handle = (channel, handler) => registerLoggedIpc(ipcMain, logger, channel, async (...args) => {
     if (runtimeChannels.has(channel)) await runtimeStartup;
-    return handler(...args);
+    if (!configMutationChannels.has(channel)) return handler(...args);
+    if (runtimeSettingsUpdateActive) throw new Error("Finish the other runtime settings update before changing configuration");
+    runtimeSettingsUpdateActive = true;
+    try { return await handler(...args); }
+    finally { runtimeSettingsUpdateActive = false; }
   });
   handle("launcher:agents-inspect", () => agents().inspect());
   handle("launcher:agents-preview", (_event, input) => agents().preview(input));
@@ -957,6 +970,13 @@ function registerIpc({ logger, stateStore }) {
     const state = stateStore.update({ experimentalSemanticMemory: result.enabled });
     send("launcher:state-changed", state);
     return state;
+  });
+  handle("launcher:quota-guard-get", () => readQuotaSettings(runtimeSupervisor));
+  handle("launcher:quota-guard-save", async (_event, request) => {
+    if (browserHost.activeTraceId || browserHost.currentOperation() || runtimeHost.currentOperation()) {
+      throw new Error("Finish active ChatGPT turns and launcher operations before changing native quota protection");
+    }
+    return setQuotaSettings(runtimeSupervisor, request);
   });
   handle("launcher:skill-attachments", async (_event, enabled) => {
     if (browserHost.activeTraceId || browserHost.currentOperation()) {

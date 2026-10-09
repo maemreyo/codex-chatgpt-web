@@ -10,6 +10,8 @@ import { TurnBroker } from "../src/adapters/chatgpt-web/turn-broker";
 import { defaultBrokerEndpoint } from "../src/config";
 import { parseRequest } from "../src/responses/parser";
 import { estimateTokens } from "../src/lib/token-estimate";
+import { estimateCompiledChatGptWebInputTokens } from "../src/adapters/chatgpt-web/input-tokens";
+import { semanticEpochOccupancies } from "../src/adapters/chatgpt-web/semantic-occupancy";
 import type { CodexParsedRequest, CodexProviderConfig } from "../src/types";
 
 const root = join(tmpdir(), `semantic-adapter-${process.pid}-${Date.now()}`);
@@ -66,6 +68,7 @@ test("hidden semantic mode rotates between completed native turns without an ext
       extraHighAvailable: true,
       proAvailable: true,
       experimentalSemanticMemory: true,
+      experimentalBiggerContext: true,
       semanticCheckpointStatePath: statePath,
     },
   };
@@ -74,11 +77,25 @@ test("hidden semantic mode rotates between completed native turns without an ext
   const prompts: string[] = [];
   const keys: string[] = [];
   const hasSizeRejectionHook: boolean[] = [];
+  const restartedFullCharges: Array<{ ledger: number | null; actual: number }> = [];
   let browserSubmissions = 0;
   (worker as unknown as { run: (turn: BrowserTurn) => Promise<string> }).run = async turn => {
     browserSubmissions += 1;
     hasSizeRejectionHook.push(typeof turn.onSizeRejection === "function");
     const prepared = await turn.prepare();
+    if ((browserSubmissions === 2 || browserSubmissions === 3) && turn.conversationKey) {
+      // Same semantic epoch key, but the launcher lost its physical tab before
+      // the third request. The full projection must replace the old occupancy.
+      await turn.onPreparedSelected?.(false);
+      await turn.onSubmitted?.();
+      const ledger = semanticEpochOccupancies.forConversation(
+        turn.conversationKey, false, 240_000, turn.modelId,
+      );
+      restartedFullCharges.push({
+        ledger: ledger.value,
+        actual: estimateCompiledChatGptWebInputTokens(prepared, turn.modelId),
+      });
+    }
     prompts.push(prepared.text);
     keys.push(turn.conversationKey ?? "missing");
     prepared.release();
@@ -127,6 +144,12 @@ test("hidden semantic mode rotates between completed native turns without an ext
     expect(keys[1]).not.toBe(keys[0]);
     expect(keys[2]).toBe(keys[1]);
     expect(keys[3]).not.toBe(keys[2]);
+    expect(restartedFullCharges).toHaveLength(2);
+    expect(restartedFullCharges[0].ledger).toBeGreaterThanOrEqual(restartedFullCharges[0].actual - 100);
+    expect(restartedFullCharges[1].ledger).toBeGreaterThanOrEqual(restartedFullCharges[1].actual - 100);
+    expect(restartedFullCharges[1].ledger).toBeLessThan(
+      restartedFullCharges[0].ledger! + restartedFullCharges[1].actual,
+    );
     expect(hasSizeRejectionHook).toEqual([true, true, true, true]);
     expect(prompts[0]).toContain("OLD-SECRET-BODY");
     expect(prompts[1]).toContain("[tool result omitted: tool=exec_command");
@@ -260,4 +283,4 @@ test("canonical history reaches the guarded 220-240k target across multiple phys
     chatGptTurnSessions.clear();
     await TurnBroker.forSocket(socketPath).close();
   }
-});
+}, 20_000);

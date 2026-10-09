@@ -469,8 +469,16 @@ export function createChatGptWebAdapter(
   const semanticPreflight = (
     value: CodexParsedRequest, capabilities: ChatGptWebCapabilities, mode: ChatGptWebModelMode,
   ) => {
-    const result = preflightSemanticProjection(value, capabilities, mode, experimentalSkillAttachments === true);
-    semanticCeilings?.assertWithin("sol", mode.effort, accountTier, result.metrics.firstMessageTokens);
+    const result = preflightSemanticProjection(
+      value, capabilities, mode,
+      experimentalSkillAttachments === true, experimentalBiggerContext === true,
+    );
+    semanticCeilings?.assertWithin("sol", mode.effort, accountTier,
+      result.metrics.finalMessageTokens ?? result.metrics.firstMessageTokens);
+    if (result.metrics.stagingEffort && result.metrics.maxStageMessageTokens !== undefined) {
+      semanticCeilings?.assertWithin("sol", result.metrics.stagingEffort, accountTier,
+        result.metrics.maxStageMessageTokens);
+    }
     return result;
   };
   const currentUsageInput = (parsed: CodexParsedRequest): CodexParsedRequest => (
@@ -514,7 +522,7 @@ export function createChatGptWebAdapter(
     const identity = extractChatGptTurnIdentity(parsed);
     const threadHash = identity.threadId ? semanticThreadHash(identity.threadId) : "missing";
     if (parsed._compactionRequest && identity.threadId && parsed._chatgptModelFamily
-      && !manualInteraction && !experimentalBiggerContext) {
+      && !manualInteraction) {
       const active = semanticEpochStore.get(identity.threadId, true);
       if (active) {
         try {
@@ -550,7 +558,6 @@ export function createChatGptWebAdapter(
       || !environment
       || !retainedLauncherDescriptor
       || freshConversationPerTurn
-      || experimentalBiggerContext === true
       || !identity.threadId;
     if (ineligible) {
       emitSemanticLog({ event: "semantic_skip", threadHash, reason: "ineligible" });
@@ -670,7 +677,7 @@ export function createChatGptWebAdapter(
           // A cap-hit reuse still extends a retained browser conversation. A
           // fitting single message alone does not prove remaining physical room.
           if (occupancy && occupancy.confidence === "known" && occupancy.value !== null
-            && occupancy.value + preflight.metrics.firstMessageTokens + 12_288 < preflight.metrics.physicalLimit) {
+            && occupancy.value + preflight.metrics.estimatedInputTokens + 12_288 < preflight.metrics.physicalLimit) {
             return { parsed: activeProjected.parsed, epoch: active, threadHash,
               metrics: { ...activeProjected.metrics, ...preflight.metrics } };
           }
@@ -713,7 +720,7 @@ export function createChatGptWebAdapter(
         reason: rotationReason,
         firstMessageTokens: preflight.metrics.firstMessageTokens,
         firstMessageChars: preflight.metrics.firstMessageChars,
-        fitsSingleMessage: true,
+        fitsSingleMessage: preflight.metrics.multipartParts === undefined,
         maskedResults: projected.metrics.maskedResults,
         maskedTokensEst: projected.metrics.maskedTokensEst,
         ledgerFiles: projected.metrics.ledgerFiles,
@@ -778,6 +785,18 @@ export function createChatGptWebAdapter(
         conversationKey, semantic.rotated === true, semantic.metrics.physicalLimit, parsed.modelId,
       )
       : undefined;
+    let selectedSemanticMetrics = semantic.metrics;
+    const onPreparedSelected = semantic.epoch && semanticOccupancy
+      ? (reused: boolean): void => {
+        if (reused) return;
+        if (!("effort" in mode)) throw new Error("Semantic browser recovery requires automatic mode");
+        // The launcher can lose a retained tab and submit the full projection
+        // instead of the continuation. Validate and charge the actual payload.
+        const full = semanticPreflight(browserInput, turnCapabilities, mode);
+        selectedSemanticMetrics = { ...semantic.metrics!, ...full.metrics };
+        semanticOccupancy.resetForFreshConversation();
+      }
+      : undefined;
     const resumeInput = conversationKey
       ? retainedConversationResumeRequest(browserInput)
       : undefined;
@@ -817,11 +836,16 @@ export function createChatGptWebAdapter(
         epoch: semantic.epoch.semanticEpoch,
         tier: 0,
         canonicalTokens,
-        nextWireTokens: semantic.metrics.firstMessageTokens,
+        nextWireTokens: semantic.metrics.multipartParts
+          ? semantic.metrics.estimatedInputTokens : semantic.metrics.firstMessageTokens,
         estimatedEpochOccupancy: semanticOccupancy?.value ?? null,
         occupancyConfidence: semanticOccupancy?.confidence ?? "unknown",
         physicalLimit: semantic.metrics.physicalLimit,
       });
+    }
+    const submittedStages = new Set<number>();
+    const emitSemanticCost = (): void => {
+      if (parsed._compactionRequest || !semantic.epoch || !semantic.metrics || !semantic.threadHash) return;
       emitSemanticLog({
         event: "semantic_cost",
         threadHash: semantic.threadHash,
@@ -829,15 +853,17 @@ export function createChatGptWebAdapter(
         checkpointTailRequests: 0,
         checkpointTailTokensEst: 0,
         epochRotations: semantic.rotated ? 1 : 0,
-        reseedInputTokensEst: semantic.rotated ? semantic.metrics.estimatedInputTokens : 0,
+        reseedInputTokensEst: semantic.rotated ? selectedSemanticMetrics!.estimatedInputTokens : 0,
         webCompactionSubmissions: 0,
-        extraStageSubmissions: 0,
+        // Count stage submissions backed by browser acceptance, even if the
+        // later assistant acknowledgement never arrives.
+        extraStageSubmissions: submittedStages.size,
         maskedResults: semantic.rotated ? semantic.metrics.maskedResults : 0,
         maskedTokensEst: semantic.rotated ? semantic.metrics.maskedTokensEst : 0,
         discardedTails: 0,
         legacyEquivalentSubmissions: 1,
       });
-    }
+    };
     let capturedCheckpoint: CapturedChatGptLunaCheckpoint | undefined;
     let checkpointCaptureError: Error | undefined;
     const captureCheckpoint = (captured: CapturedChatGptLunaCheckpoint): void => {
@@ -920,14 +946,23 @@ export function createChatGptWebAdapter(
       } : {}),
       onSubmitted: () => {
         if (!parsed._compactionRequest) submission.phase = "accepted";
-        if (semanticOccupancy && semantic.metrics) {
-          semanticOccupancy.record(`submit:${traceId}`, semantic.metrics.firstMessageTokens);
+        if (semanticOccupancy && selectedSemanticMetrics) {
+          // Multi-part Bigger Context stages all belong to the retained chat.
+          // Charge the entire transaction to SEM physical occupancy.
+          semanticOccupancy.record(`submit:${traceId}`, selectedSemanticMetrics.estimatedInputTokens);
         }
         hooks.onCompactionProgress?.();
       },
     };
-    const multipartProgressLifecycle = hooks.onCompactionProgress
-      ? { onMultipartStageAcknowledged: hooks.onCompactionProgress }
+    const multipartProgressLifecycle = (experimentalBiggerContext && semantic.epoch) || hooks.onCompactionProgress
+      ? {
+        ...(experimentalBiggerContext && semantic.epoch ? {
+          onMultipartStageSubmitted: (index: number) => { submittedStages.add(index); },
+        } : {}),
+        onMultipartStageAcknowledged: (_index: number) => {
+        hooks.onCompactionProgress?.();
+        },
+      }
       : {};
     if (manualRequest) {
       if (!environment) throw new Error("ChatGPT Zero Risk requires a trusted Codex environment");
@@ -1175,6 +1210,7 @@ export function createChatGptWebAdapter(
       prepare: () => prepareWith(browserInput),
       ...(resumeInput ? { prepareResume: () => prepareWith(resumeInput) } : {}),
       ...(retainConversation ? { retainConversation: true, conversationKey } : {}),
+      ...(onPreparedSelected ? { onPreparedSelected } : {}),
       ...(onSemanticSizeRejection ? { onSizeRejection: onSemanticSizeRejection } : {}),
       abortSignal: browserAbort.signal,
       ...(parsed._compactionRequest ? { compaction: true } : {}),
@@ -1198,7 +1234,7 @@ export function createChatGptWebAdapter(
         captureLunaCheckpoint: true,
         onLunaCheckpoint: captureCheckpoint,
       } : {}),
-    }))), browserAbort);
+    })).finally(emitSemanticCost)), browserAbort);
     void browserTurn.browser.catch(error => {
       if (!tokenSettled) {
         tokenSettled = true;

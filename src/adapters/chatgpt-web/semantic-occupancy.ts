@@ -9,9 +9,19 @@ export class SemanticEpochOccupancy {
 
   constructor(
     readonly physicalLimit: number,
-    readonly known: boolean,
+    public known: boolean,
     private readonly modelId: string,
   ) {}
+
+  /** A lost retained tab is replaced with a new physical conversation under the
+   * same logical epoch key. The old token ledger cannot describe that new tab. */
+  resetForFreshConversation(): void {
+    this.seen.clear();
+    this.totalTokens = 0;
+    this.outputChars = 0;
+    this.atLimit = false;
+    this.known = true;
+  }
 
   get confidence(): "known" | "unknown" { return this.known && !this.atLimit ? "known" : "unknown"; }
   get value(): number | null { return this.known ? this.totalTokens : null; }

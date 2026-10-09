@@ -634,7 +634,7 @@ test("browser preference controls are translated, disabled in Zero Risk, and inv
     },
     messageOf: String, platformLabel: String,
   };
-  for (const name of ["ContentSurface", "SectionHeading", "SettingRow", "PrimaryButton", "SecondaryButton", "Switch", "InteractionModePicker", "LanguageMenu", "NoticeRow", "Icon", "DoctorSummary", "BrandMark"]) sandbox[name] = name;
+  for (const name of ["ContentSurface", "SectionHeading", "SettingRow", "PrimaryButton", "SecondaryButton", "Switch", "InteractionModePicker", "LanguageMenu", "NoticeRow", "Icon", "DoctorSummary", "BrandMark", "QuotaProtectionPanel"]) sandbox[name] = name;
   vm.runInNewContext(transpile(settings, "settings.tsx") + "\nrender = SettingsSurface;", Object.assign(sandbox, { render }));
   render = sandbox.render;
   const visit = tree => Array.isArray(tree) ? tree.flatMap(visit) : tree && typeof tree === "object"
@@ -672,6 +672,22 @@ test("browser preference controls are translated, disabled in Zero Risk, and inv
         }
       }
     }
+    const combined = render({ copy, devProfile: false, language, configureInteractionMode() {}, setError() {},
+      snapshot: { connectorNames: { automatic: "Codex Native2", manual: "Codex Zero Risk" }, state: {
+        browserInteractionMode: "automatic", coreSetupComplete: true, biggerContextAvailable: true,
+        experimentalSemanticMemory: true, experimentalBiggerContext: true,
+      } }, updateState() {},
+    });
+    const nodes = visit(combined);
+    const semanticRow = nodes.find(node => node.type === "SettingRow" && node.props.label === copy.semanticMemory);
+    assert.ok(semanticRow, `${language}: SEM setting exists with Bigger Context enabled`);
+    assert.equal(semanticRow.props.body, copy.semanticMemoryBody);
+    assert.equal(visit(semanticRow).find(node => node.type === "Switch").props.checked, true);
+    assert.match(copy.semanticMemoryBody, /Bigger Context/);
+    assert.match(copy.semanticMemoryBody, /3\s*(?:×|倍|배)/);
+    assert.equal(copy.semanticBiggerContextConflict, undefined);
+    assert.equal(nodes.some(node => node.props.role === "status" && node.props.className?.includes("is-warning")), false,
+      `${language}: simultaneous SEM and Bigger Context must not show a conflict warning`);
   }
 });
 
@@ -782,7 +798,7 @@ test("plugin name editor fixes Codex and edits Native2 before asking to reconfig
     useEffect() {}, messageOf: String, platformLabel: String,
     api: { setConnectorNameSuffix: async suffix => { submitted = suffix; return { mcpSetupComplete: false }; } },
   };
-  for (const name of ["ContentSurface", "SectionHeading", "SettingRow", "PrimaryButton", "SecondaryButton", "Switch", "InteractionModePicker", "LanguageMenu", "NoticeRow", "Icon", "DoctorSummary", "BrandMark"]) sandbox[name] = name;
+  for (const name of ["ContentSurface", "SectionHeading", "SettingRow", "PrimaryButton", "SecondaryButton", "Switch", "InteractionModePicker", "LanguageMenu", "NoticeRow", "Icon", "DoctorSummary", "BrandMark", "QuotaProtectionPanel"]) sandbox[name] = name;
   const settings = appSource.slice(appSource.indexOf("function SettingsSurface("), appSource.indexOf("function ContentSurface("));
   vm.runInNewContext(transpile(settings, "settings.tsx") + "\nrender = SettingsSurface;", sandbox);
   const visit = tree => Array.isArray(tree) ? tree.flatMap(visit) : tree && typeof tree === "object"
