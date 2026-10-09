@@ -6,6 +6,7 @@ import {
   SEMANTIC_DIGEST_POLICY_VERSION,
   SEMANTIC_MASKING_POLICY_VERSION,
   semanticCoveredHistoryDigest,
+  semanticCoveredToolCallsExist,
   semanticHash,
   type ChatGptArtifactLedgerV1,
 } from "../../responses/semantic-provenance";
@@ -30,7 +31,7 @@ export interface ChatGptSemanticCheckpointPayloadV1 {
 export interface StoredChatGptSemanticEpochV1 {
   version: 1;
   projectionPolicyVersion: 1;
-  digestPolicyVersion: 1;
+  digestPolicyVersion: 1 | 2 | 3;
   threadId: string;
   semanticEpoch: number;
   sourceTurnId: string;
@@ -138,7 +139,7 @@ function validateStoredEpoch(value: unknown): StoredChatGptSemanticEpochV1 {
   if (!epoch
     || epoch.version !== 1
     || epoch.projectionPolicyVersion !== SEMANTIC_PROJECTION_POLICY_VERSION
-    || epoch.digestPolicyVersion !== SEMANTIC_DIGEST_POLICY_VERSION
+    || ![1, 2, SEMANTIC_DIGEST_POLICY_VERSION].includes(Number(epoch.digestPolicyVersion))
     || epoch.maskingPolicyVersion !== SEMANTIC_MASKING_POLICY_VERSION
     || typeof epoch.threadId !== "string" || !epoch.threadId
     || typeof epoch.semanticEpoch !== "number" || !Number.isInteger(epoch.semanticEpoch) || epoch.semanticEpoch < 1
@@ -191,7 +192,12 @@ export function validateSemanticEpochRecord(
   if (!provenance) throw new Error("Semantic provenance is unavailable");
   const anchor = provenance.items.find(item => item.ref === epoch.coveredThroughRef);
   if (!anchor) throw new Error("Semantic epoch anchor is missing");
-  if (semanticCoveredHistoryDigest(provenance, epoch.coveredThroughRef) !== epoch.coveredHistoryDigest) {
+  // V2 ignored the entire live tool registry. An older tool-using epoch
+  // cannot retroactively prove that its executed tool schema was stable.
+  if (epoch.digestPolicyVersion === 2 && semanticCoveredToolCallsExist(provenance, epoch.coveredThroughRef)) {
+    throw new Error("Semantic epoch v2 tool registry is not bound; canonical fallback required");
+  }
+  if (semanticCoveredHistoryDigest(provenance, epoch.coveredThroughRef, epoch.digestPolicyVersion) !== epoch.coveredHistoryDigest) {
     throw new Error("Semantic epoch covered-history digest mismatch");
   }
   if (options.sourceAnswerHash !== undefined && options.sourceAnswerHash !== epoch.sourceAnswerHash) {

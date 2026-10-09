@@ -32,6 +32,26 @@ test("archive accepts only a bounded allowlist of content-free semantic and tool
     event: "semantic_reject", threadHash, kind: "http_413", effort: "high",
     messageChars: 999, class: "D",
   });
+  const skip = safeObservation(wrapped(semantic("semantic_skip", {
+    reason: "ineligible", detail: "missing_turn_provenance", prompt: secret,
+  })));
+  assert.deepEqual(JSON.parse(skip.detail.line), {
+    event: "semantic_skip", threadHash, reason: "ineligible", detail: "missing_turn_provenance",
+  });
+  const unsafeSkip = safeObservation(wrapped(semantic("semantic_skip", {
+    reason: "ineligible", detail: secret,
+  })));
+  assert.deepEqual(JSON.parse(unsafeSkip.detail.line), {
+    event: "semantic_skip", threadHash, reason: "ineligible",
+  });
+  for (const reason of ["no_fit", "cooldown", "low_pressure"]) {
+    const preserved = safeObservation(wrapped(semantic("semantic_skip", { reason })));
+    assert.equal(JSON.parse(preserved.detail.line).reason, reason);
+  }
+  const fallback = safeObservation(wrapped(semantic("semantic_fallback", {
+    to: "legacy", reason: "active_epoch_validation_failed",
+  })));
+  assert.equal(JSON.parse(fallback.detail.line).reason, "active_epoch_validation_failed");
   const tool = safeObservation(wrapped(JSON.stringify({
     event: "native_tool_diagnostic", stage: "broker_queued", diagnosticId: "diag_0123456789abcdef",
     traceId: "trace_0123456789abcdef", outcome: "is_error", elapsedMs: 12,

@@ -8,6 +8,7 @@ import {
 } from "../src/adapters/chatgpt-web/semantic-projection";
 import { parseRequest } from "../src/responses/parser";
 import { COMPACT_PROMPT } from "../src/responses/compaction";
+import { semanticCoveredHistoryDigest } from "../src/responses/semantic-provenance";
 
 const capabilities = { localToolsEnabled: true, solAvailable: true, extraHighAvailable: true, proAvailable: true };
 
@@ -49,6 +50,31 @@ function semanticRequest(currentText = "Continue with the exact current evidence
   parsed._chatgptModelFamily = "5.6";
   return parsed;
 }
+
+test("native Codex untagged history fails closed rather than inventing turn ownership", () => {
+  const body = structuredClone(semanticRequest()._rawBody) as {
+    input: Array<Record<string, unknown>>;
+  };
+  // Real native Codex continuations have native thread_id/turn_id at request
+  // level but need not stamp their individual historical input items.
+  for (const item of body.input) delete item.internal_chat_message_metadata_passthrough;
+  const parsed = parseRequest(body);
+  parsed._chatgptModelFamily = "5.6";
+  const before = JSON.stringify(parsed._rawBody);
+  expect(buildSemanticTier0Candidate(parsed, "5.6", undefined).reason)
+    .toBe("missing_turn_provenance");
+  expect(JSON.stringify(parsed._rawBody)).toBe(before);
+
+  // Even with an identifiable active turn, an unproven prior source revision
+  // cannot be assigned the active turn's identity to force a rotation.
+  const latest = body.input.findLast(item => item.role === "user");
+  expect(latest).toBeDefined();
+  latest!.internal_chat_message_metadata_passthrough = { turn_id: "turn_2" };
+  const partial = parseRequest(body);
+  partial._chatgptModelFamily = "5.6";
+  expect(buildSemanticTier0Candidate(partial, "5.6", undefined).reason)
+    .toBe("missing_source_revision");
+});
 
 test("Tier 0 projection preserves authority and exact suffix while masking only settled covered results", () => {
   const parsed = semanticRequest();
@@ -134,6 +160,62 @@ test("Tier 0 rotation refuses a covered range with an outstanding tool call", ()
     ],
   });
   expect(buildSemanticTier0Candidate(parsed, "5.6", undefined)).toEqual({ reason: "outstanding_tools" });
+});
+
+test("Tier 0 rejects duplicate, orphan, out-of-order and cross-kind tool results", () => {
+  const call = { type: "function_call", call_id: "bound", name: "codex_exec", arguments: "{}" };
+  const result = { type: "function_call_output", call_id: "bound", output: "verified" };
+  const parse = (history: unknown[]) => parseRequest({
+    model: CHATGPT_WEB_MODEL_ID,
+    client_metadata: { "x-codex-turn-metadata": JSON.stringify({
+      thread_id: "thread_semantic", turn_id: "turn_2", request_kind: "turn",
+    }) },
+    input: [
+      { type: "message", role: "user", id: "old", content: "old", ...turn("turn_1") },
+      ...history,
+      { type: "message", role: "assistant", content: [{ type: "output_text", text: "done" }] },
+      { type: "message", role: "user", id: "now", content: "next", ...turn("turn_2") },
+    ],
+  });
+  expect(buildSemanticTier0Candidate(parse([call, result]), "5.6", undefined).candidate)
+    .toBeDefined();
+
+  const corruptions = [
+    [result, call], // output before its call
+    [call, result, result], // duplicated output
+    [call, call, result], // duplicated call identity
+    [call, result, { ...result, call_id: "orphan" }],
+    [call, { ...result, type: "custom_tool_call_output" }], // mismatched kind
+    [call, { ...result, call_id: "" }], // missing identity
+  ];
+  for (const history of corruptions) {
+    expect(buildSemanticTier0Candidate(parse(history), "5.6", undefined))
+      .toEqual({ reason: "outstanding_tools" });
+  }
+  expect(buildSemanticTier0Candidate(parse([
+    { type: "local_shell_call", id: "shell_1", action: { type: "exec", command: ["pwd"] } },
+    { type: "function_call_output", call_id: "shell_1", output: "ok" },
+    { type: "tool_search_call", call_id: "search_1", arguments: {} },
+    { type: "tool_search_output", call_id: "search_1", status: "completed", tools: [] },
+  ]), "5.6", undefined).candidate).toBeDefined();
+});
+
+test("a persisted epoch with a matching digest still rejects historically unsafe tool pairing", () => {
+  const initial = semanticRequest();
+  const candidate = buildSemanticTier0Candidate(initial, "5.6", undefined, 1234).candidate!;
+  const raw = structuredClone(initial._rawBody) as { input: Array<Record<string, unknown>> };
+  const resultIndex = raw.input.findIndex(item => item.type === "function_call_output" && item.call_id === "call_old");
+  expect(resultIndex).toBeGreaterThan(-1);
+  raw.input.splice(resultIndex + 1, 0, structuredClone(raw.input[resultIndex]!));
+  const replay = parseRequest(raw);
+  replay._chatgptModelFamily = "5.6";
+  const legacyEpoch = {
+    ...candidate,
+    coveredHistoryDigest: semanticCoveredHistoryDigest(replay._semanticProvenance!, candidate.coveredThroughRef),
+  };
+  expect(legacyEpoch.coveredHistoryDigest).not.toBe(candidate.coveredHistoryDigest);
+  expect(() => projectSemanticEpoch(replay, legacyEpoch))
+    .toThrow("covered tool calls are not safely paired");
 });
 
 test("three offline rotations retain authority, decisions and verified outcomes without inventing success", () => {

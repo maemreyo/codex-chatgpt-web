@@ -42,7 +42,7 @@ function epoch(
   return {
     version: 1,
     projectionPolicyVersion: 1,
-    digestPolicyVersion: 1,
+    digestPolicyVersion: 3,
     threadId: "thread_a",
     semanticEpoch,
     sourceTurnId,
@@ -126,6 +126,20 @@ test("persisted legacy ledgers remain readable without claiming success from fai
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
+});
+
+test("legacy digest policy remains verifiable without silently migrating its evidence", () => {
+  const request = parsed();
+  const legacy = epoch(1, "turn_1", 1000, {
+    digestPolicyVersion: 1,
+    coveredHistoryDigest: semanticCoveredHistoryDigest(request._semanticProvenance!, request._semanticProvenance!.items[1]!.ref, 1),
+  });
+  expect(() => validateSemanticEpochRecord(request, legacy, { modelFamily: "5.6" })).not.toThrow();
+  const v2 = epoch(1, "turn_1", 1000, {
+    digestPolicyVersion: 2,
+    coveredHistoryDigest: semanticCoveredHistoryDigest(request._semanticProvenance!, request._semanticProvenance!.items[1]!.ref, 2),
+  });
+  expect(() => validateSemanticEpochRecord(request, v2, { modelFamily: "5.6" })).not.toThrow();
 });
 
 test("contradictory persisted ledger outcomes fail closed without overwriting state", () => {

@@ -22,7 +22,8 @@ test("semantic log report reads raw and launcher-wrapped events without surfacin
       launcher(semantic({ event: "semantic_turn", threadHash: threadA, epoch: 1 })),
       launcher(semantic({ event: "semantic_rotation", threadHash: threadA, maskedTokensEst: 900 })),
       launcher(semantic({ event: "semantic_turn", threadHash: threadA, epoch: 2 })),
-      launcher(semantic({ event: "semantic_skip", threadHash: threadB, reason: "ineligible" })),
+      launcher(semantic({ event: "semantic_skip", threadHash: threadB, reason: "ineligible",
+        detail: "missing_turn_provenance" })),
       launcher(semantic({ event: "semantic_skip", threadHash: threadA, reason: "no_fit" })),
       launcher(semantic({ event: "semantic_validation_failed", threadHash: threadA, reason: "digest_mismatch" })),
       launcher(semantic({ event: "semantic_validation_failed", threadHash: threadB, reason: "SECRET TRANSCRIPT CONTENT" })),
@@ -43,12 +44,14 @@ test("semantic log report reads raw and launcher-wrapped events without surfacin
       launcher(semantic({ event: "semantic_cost", threadHash: threadA,
         legacyEquivalentSubmissions: "SECRET TRANSCRIPT CONTENT", checkpointTailRequests: 30 })),
       launcher(semantic({ event: "semantic_skip", threadHash: "SECRET TRANSCRIPT CONTENT", reason: "SECRET TRANSCRIPT CONTENT" })),
+      launcher(semantic({ event: "semantic_skip", threadHash: threadA, reason: "ineligible",
+        detail: "SECRET TRANSCRIPT CONTENT" })),
       launcher(semantic({ event: "semantic_reject", threadHash: "SECRET TRANSCRIPT CONTENT", class: "SECRET TRANSCRIPT CONTENT" })),
       JSON.stringify({ at: "x", level: "info", event: "runtime.stdout", detail: { line: "SECRET TRANSCRIPT CONTENT" } }),
     ].join("\n"), "utf8");
 
     const report = semanticLogReport(path);
-    expect(report.events).toBe(17);
+    expect(report.events).toBe(18);
     expect(report.threads).toBe(2);
     expect(report.turns).toBe(3);
     expect(report.rotations).toBe(1);
@@ -59,7 +62,8 @@ test("semantic log report reads raw and launcher-wrapped events without surfacin
       webCompactionSubmissions: 1, extraStageSubmissions: 0, discardedTails: 0,
       additionalSubmissionsPer100Legacy: 200 / 3,
     });
-    expect(report.skipsByReason).toEqual({ ineligible: 1, no_fit: 1, unknown: 1 });
+    expect(report.skipsByReason).toEqual({ ineligible: 2, no_fit: 1, unknown: 1 });
+    expect(report.ineligibleDetails).toEqual({ missing_turn_provenance: 1, unknown: 1 });
     expect(report.validationFailuresByReason).toEqual({ digest_mismatch: 1, unknown: 1 });
     expect(report.rejectionsByClass).toEqual({ D: 2, unknown: 1 });
     expect(report.rejectionsAfterRotation).toBe(2);

@@ -23,6 +23,7 @@ export interface SemanticLogReport {
     additionalSubmissionsPer100Legacy: number | null;
   };
   skipsByReason: Record<string, number>;
+  ineligibleDetails: Record<string, number>;
   validationFailuresByReason: Record<string, number>;
   rejectionsByClass: Record<string, number>;
   rejectionsAfterRotation: number;
@@ -48,6 +49,12 @@ const KNOWN_EVENTS = new Set([
 ]);
 const SKIP_REASONS = new Set([
   "ineligible", "no_fit", "cooldown", "cap_hit", "outstanding_tools", "unknown_occupancy", "low_pressure",
+]);
+const INELIGIBLE_DETAILS = new Set([
+  "manual_interaction", "compaction", "model_mismatch", "model_family_missing",
+  "local_tools_disabled", "trusted_environment_missing", "launcher_missing",
+  "fresh_conversation", "thread_missing", "missing_turn_provenance",
+  "no_completed_turn", "missing_source_revision",
 ]);
 const VALIDATION_REASONS = new Set(["digest_mismatch", "anchor_missing", "schema", "corrupt_store"]);
 const REJECTION_CLASSES = new Set(["A", "B", "C", "D", "unknown"]);
@@ -119,6 +126,7 @@ export function semanticLogReport(path: string | readonly string[]): SemanticLog
   const rotationsByThread = new Map<string, number>();
   const epochTurnCounts = new Map<string, Map<number, number>>();
   const skipsByReason: Record<string, number> = {};
+  const ineligibleDetails: Record<string, number> = {};
   const validationFailuresByReason: Record<string, number> = {};
   const rejectionsByClass: Record<string, number> = {};
   const fallbacksByTarget: Record<string, number> = {};
@@ -164,6 +172,7 @@ export function semanticLogReport(path: string | readonly string[]): SemanticLog
     } else if (type === "semantic_skip") {
       const reason = enumValue(event.reason, SKIP_REASONS);
       increment(skipsByReason, reason);
+      if (reason === "ineligible") increment(ineligibleDetails, enumValue(event.detail, INELIGIBLE_DETAILS));
       if (reason === "no_fit") rotationPreflightNoFit += 1;
     } else if (type === "semantic_validation_failed") {
       increment(validationFailuresByReason, enumValue(event.reason, VALIDATION_REASONS));
@@ -231,6 +240,7 @@ export function semanticLogReport(path: string | readonly string[]): SemanticLog
         : null,
     },
     skipsByReason,
+    ineligibleDetails,
     validationFailuresByReason,
     rejectionsByClass,
     rejectionsAfterRotation,

@@ -1,4 +1,5 @@
 import { createHash, randomBytes } from "node:crypto";
+import { getCodexHome } from "../../codex-integration-shared";
 import { dirname, join, resolve } from "node:path";
 import { isChatGptWebZeroRiskBackendModel } from "../../chatgpt-web-models";
 import { defaultBrokerEndpoint, expandUserPath, getConfigDir, resolveBrokerEndpoint } from "../../config";
@@ -22,7 +23,8 @@ import type { ProviderAdapter } from "../base";
 import { parseDataUrl } from "../image";
 import { ChatGptWebAdapterError, chatGptToolTimeoutError } from "./adapter-error";
 import { ChatGptBrowserWorker, type ChatGptSubmissionRejectionObservation } from "./browser-worker";
-import { chatGptTurnUserRevisionHistory, extractChatGptTurnEnvironment, extractChatGptTurnIdentity, priorChatGptAbortedTurnIds } from "./environment";
+import { chatGptTurnUserRevisionHistory, extractChatGptTurnEnvironment, extractChatGptTurnIdentity, extractChatGptRootThreadMetadata, extractChatGptThreadSpawnLineage, priorChatGptAbortedTurnIds } from "./environment";
+import { verifiedCodexSemanticUserTurns } from "./codex-rollout-environment";
 import { CHATGPT_WEB_LUNA_MODEL_ID, CHATGPT_WEB_MODEL_ID, resolveChatGptWebModelMode, type ChatGptWebCapabilities, type ChatGptWebModelMode } from "./model";
 import { chatGptReadOnlyContextWarning, compileChatGptWebPrompt } from "./prompt";
 import { createChatGptStructuredOutputValidator } from "./output-validation";
@@ -65,6 +67,7 @@ import {
   emitSemanticLog,
   semanticThreadHash,
   semanticValidationReason,
+  type SemanticIneligibleDetail,
   type SemanticRotationReason,
 } from "./semantic-log";
 
@@ -536,9 +539,13 @@ export function createChatGptWebAdapter(
     candidate: StoredChatGptSemanticEpochV1,
   ): boolean => {
     const orderedTurnIds: string[] = [];
+    const verified = new Map(parsed._semanticProvenance?.items
+      .filter(item => item.type === "message" && item.role === "user" && item.itemId && item.turnId)
+      .map(item => [item.itemId!, item.turnId!] as const) ?? []);
     for (const revision of chatGptTurnUserRevisionHistory(parsed)) {
-      if (!revision.turnId || orderedTurnIds.at(-1) === revision.turnId) continue;
-      orderedTurnIds.push(revision.turnId);
+      const owner = revision.turnId ?? (revision.itemId ? verified.get(revision.itemId) : undefined);
+      if (!owner || orderedTurnIds.at(-1) === owner) continue;
+      orderedTurnIds.push(owner);
     }
     const activeIndex = orderedTurnIds.indexOf(active.sourceTurnId);
     const candidateIndex = orderedTurnIds.indexOf(candidate.sourceTurnId);
@@ -584,17 +591,19 @@ export function createChatGptWebAdapter(
       }
       return { parsed, threadHash };
     }
-    const ineligible = manualInteraction
-      || parsed._compactionRequest === true
-      || parsed.modelId !== CHATGPT_WEB_MODEL_ID
-      || !parsed._chatgptModelFamily
-      || !turnCapabilities.localToolsEnabled
-      || !environment
-      || !retainedLauncherDescriptor
-      || freshConversationPerTurn
-      || !identity.threadId;
-    if (ineligible) {
-      emitSemanticLog({ event: "semantic_skip", threadHash, reason: "ineligible" });
+    // Preserve eligibility ordering while logging only a fixed, content-free category.
+    const ineligibleDetail: SemanticIneligibleDetail | undefined = manualInteraction ? "manual_interaction"
+      : parsed._compactionRequest === true ? "compaction"
+      : parsed.modelId !== CHATGPT_WEB_MODEL_ID ? "model_mismatch"
+      : !parsed._chatgptModelFamily ? "model_family_missing"
+      : !turnCapabilities.localToolsEnabled ? "local_tools_disabled"
+      : !environment ? "trusted_environment_missing"
+      : !retainedLauncherDescriptor ? "launcher_missing"
+      : freshConversationPerTurn ? "fresh_conversation"
+      : !identity.threadId ? "thread_missing"
+      : undefined;
+    if (ineligibleDetail) {
+      emitSemanticLog({ event: "semantic_skip", threadHash, reason: "ineligible", detail: ineligibleDetail });
       return { parsed };
     }
     const threadId = identity.threadId;
@@ -648,6 +657,35 @@ export function createChatGptWebAdapter(
       throw error;
     }
 
+    // Native Responses history may omit item-level turn_id even when Codex's
+    // canonical rollout recorded it. Reconstruct only exact verified user items;
+    // the raw body and all authority-bearing input remain untouched.
+    if (parsed._semanticProvenance?.items.some(item => item.type === "message" && item.role === "user" && !item.turnId)) {
+      try {
+        const lineage = extractChatGptThreadSpawnLineage(parsed) ?? extractChatGptRootThreadMetadata(parsed);
+        if (lineage && identity.turnId) {
+          const users = parsed._semanticProvenance.items
+            .filter(item => item.type === "message" && item.role === "user" && item.itemId && !item.turnId)
+            .map(item => ({ itemId: item.itemId!, canonicalJson: item.canonicalJson }));
+          const currentTurnAlreadyAttributed = parsed._semanticProvenance.items.some(item => item.type === "message"
+            && item.role === "user" && item.turnId === identity.turnId);
+          const owners = verifiedCodexSemanticUserTurns({
+            codexHome: getCodexHome(), lineage, turnId: identity.turnId, items: users, currentTurnAlreadyAttributed,
+          });
+          if (owners) {
+            parsed._semanticProvenance = {
+              ...parsed._semanticProvenance,
+              items: parsed._semanticProvenance.items.map(item => {
+                const owner = item.itemId && item.type === "message" && item.role === "user" ? owners.get(item.itemId) : undefined;
+                return owner && (!item.turnId || item.turnId === owner) ? { ...item, turnId: owner } : item;
+              }),
+            };
+          }
+        }
+      } catch {
+        // Missing or changing native evidence retains the canonical fallback.
+      }
+    }
     const candidateResult = buildSemanticTier0Candidate(parsed, modelFamily, active);
     const candidate = candidateResult.candidate;
     let activeProjected: ReturnType<typeof projectSemanticEpoch> | undefined;
@@ -708,6 +746,8 @@ export function createChatGptWebAdapter(
         event: "semantic_skip",
         threadHash,
         reason: candidateResult.reason === "outstanding_tools" ? "outstanding_tools" : "ineligible",
+        ...(candidateResult.reason !== "outstanding_tools" && candidateResult.reason
+          ? { detail: candidateResult.reason } : {}),
       });
       return { parsed, threadHash };
     }
@@ -869,6 +909,8 @@ export function createChatGptWebAdapter(
       )
       : undefined;
     let selectedSemanticMetrics = semantic.metrics;
+    let freshLeasePrepared = false;
+    let freshLeaseSubmitted = false;
     const onPreparedSelected = semantic.epoch && semanticOccupancy
       ? (reused: boolean): void => {
         if (reused) {
@@ -883,6 +925,7 @@ export function createChatGptWebAdapter(
         // instead of the continuation. Validate and charge the actual payload.
         const full = semanticPreflight(browserInput, turnCapabilities, mode);
         selectedSemanticMetrics = { ...semantic.metrics!, ...full.metrics };
+        freshLeasePrepared = true;
         semanticOccupancy.resetForVerifiedFreshLease();
       }
       : undefined;
@@ -944,7 +987,10 @@ export function createChatGptWebAdapter(
         checkpointTailRequests: 0,
         checkpointTailTokensEst: 0,
         epochRotations: semantic.rotated ? 1 : 0,
-        reseedInputTokensEst: semantic.rotated ? selectedSemanticMetrics!.estimatedInputTokens : 0,
+        // A lost browser tab or process restart can reseed an existing epoch
+        // without a new logical rotation. Count its submitted full projection.
+        reseedInputTokensEst: semantic.rotated || freshLeaseSubmitted
+          ? selectedSemanticMetrics!.estimatedInputTokens : 0,
         webCompactionSubmissions: 0,
         // SEM is deliberately single-message. Canonical Bigger Context
         // multipart fallback does not claim an active semantic epoch.
@@ -1037,6 +1083,7 @@ export function createChatGptWebAdapter(
       } : {}),
       onSubmitted: () => {
         if (!parsed._compactionRequest) submission.phase = "accepted";
+        if (freshLeasePrepared) freshLeaseSubmitted = true;
         if (semanticOccupancy && selectedSemanticMetrics) {
           // Charge the full preflighted semantic submission, including the
           // browser's non-visible reserve, to its physical occupancy ledger.

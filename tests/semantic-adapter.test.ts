@@ -1,4 +1,4 @@
-import { afterAll, expect, test } from "bun:test";
+import { afterAll, expect, spyOn, test } from "bun:test";
 import { mkdirSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -78,6 +78,16 @@ test("hidden semantic mode rotates between completed native turns without an ext
   const keys: string[] = [];
   const hasSizeRejectionHook: boolean[] = [];
   const restartedFullCharges: Array<{ ledger: number | null; actual: number }> = [];
+  const costEvents: Array<{ epochRotations: number; reseedInputTokensEst: number }> = [];
+  const originalInfo = console.info.bind(console);
+  const infoSpy = spyOn(console, "info").mockImplementation((...args) => {
+    const event = args[0];
+    if (typeof event === "string" && event.startsWith('{"event":"semantic_cost"')) {
+      costEvents.push(JSON.parse(event));
+    } else {
+      originalInfo(...args);
+    }
+  });
   let browserSubmissions = 0;
   (worker as unknown as { run: (turn: BrowserTurn) => Promise<string> }).run = async turn => {
     browserSubmissions += 1;
@@ -150,6 +160,7 @@ test("hidden semantic mode rotates between completed native turns without an ext
     expect(restartedFullCharges[1].ledger).toBeLessThan(
       restartedFullCharges[0].ledger! + restartedFullCharges[1].actual,
     );
+    expect(costEvents.some(event => event.epochRotations === 0 && event.reseedInputTokensEst > 0)).toBe(true);
     expect(hasSizeRejectionHook).toEqual([true, true, true, true]);
     expect(prompts[0]).toContain("OLD-SECRET-BODY");
     expect(prompts[1]).toContain("[tool result omitted: tool=exec_command");
@@ -161,6 +172,7 @@ test("hidden semantic mode rotates between completed native turns without an ext
     expect(prompts[2]).not.toContain("OLD-SECRET-BODY");
     expect(prompts[3]).toContain("Continue after the cooldown");
   } finally {
+    infoSpy.mockRestore();
     (worker as unknown as { run: (turn: BrowserTurn) => Promise<string> }).run = originalRun;
     chatGptTurnSessions.clear();
     await TurnBroker.forSocket(socketPath).close();
