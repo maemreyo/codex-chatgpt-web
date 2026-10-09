@@ -13,6 +13,9 @@ const chineseReadme = read("README.zh-CN.md");
 const japaneseReadme = read("README.ja.md");
 const koreanReadme = read("README.ko.md");
 const languages = require("../electron/languages.json");
+// Bun's mixed JS/TS test runner may attach an ESM `default` alias to the shared JSON module.
+// The locale objects, not module interop metadata, define supported languages.
+const supportedLanguages = Object.keys(languages).filter(language => typeof languages[language]?.locale === "string");
 const appSource = read("launcher", "src", "App.tsx");
 
 test("Agents panel uses translated launcher dictionaries for every supported locale", () => {
@@ -25,7 +28,7 @@ test("Agents panel uses translated launcher dictionaries for every supported loc
   assert.ok(keys.includes("agentApply"));
   assert.ok(keys.includes("agentRecover"));
   assert.ok(keys.includes("agentRouteWarning"));
-  for (const language of Object.keys(languages)) {
+  for (const language of supportedLanguages) {
     const copy = copyFor(language);
     for (const key of keys) {
       assert.equal(typeof copy[key], "string", language + ": " + key);
@@ -76,7 +79,7 @@ test("localized READMEs preserve every command block and link target from Englis
 });
 
 
-for (const language of Object.keys(languages).filter(language => language !== "en")) test(`${language} runtime localization preserves literal connector names and endpoints`, () => {
+for (const language of supportedLanguages.filter(language => language !== "en")) test(`${language} runtime localization preserves literal connector names and endpoints`, () => {
   const { copyFor, localizeRuntimeMessage } = loadI18nModule();
   const copy = copyFor(language);
   const connectorNames = [
@@ -161,7 +164,7 @@ test("native dialogs and IPC accept exactly the renderer's supported languages",
   const validation = main.slice(main.indexOf("function validateLanguage("), main.indexOf("function validateBrowserInteractionMode("));
   const { nativeCopyFor, validateLanguage } = Function("languages", `${copySource}\n${validation}\nreturn {nativeCopyFor, validateLanguage};`)(languages);
   const english = nativeCopyFor("en");
-  for (const language of Object.keys(languages)) {
+  for (const language of supportedLanguages) {
     assert.equal(validateLanguage(language), language);
     const copy = nativeCopyFor(language);
     assert.deepEqual(Object.keys(copy).sort(), Object.keys(english).sort());
@@ -191,7 +194,7 @@ test("all locales translate known doctor success checks without changing literal
     ["service", "macOS background service is loaded", "doctorMacServiceLoaded"],
     ["tunnel-service", "macOS tunnel service is installed, loaded, and running", "doctorMacTunnelRunning"],
   ];
-  for (const language of Object.keys(languages)) {
+  for (const language of supportedLanguages) {
     const copy = copyFor(language);
     for (const [id, message, key, placeholder, value] of checks) {
       const expected = placeholder ? copy[key].replace(placeholder, () => value) : copy[key];
@@ -204,7 +207,7 @@ test("all locales translate known doctor success checks without changing literal
       assert.equal(localizeRuntimeMessage(copy, message, "config", language), message);
     }
   }
-  for (const language of Object.keys(languages)) {
+  for (const language of supportedLanguages) {
     const copy = copyFor(language);
     assert.equal(localizeRuntimeMessage(copy, "Tunnel runtime is not ready", "tunnel-runtime", language), "Tunnel runtime is not ready");
     assert.equal(localizeRuntimeMessage(copy, "Unexpected connector diagnostic", "connector", language), "Unexpected connector diagnostic");
@@ -217,7 +220,7 @@ test("all locales translate known doctor success checks without changing literal
 test("plugin setup and Zero Risk instructions show configured names in every language", () => {
   const { copyFor } = loadI18nModule();
   const names = { automatic: "Codex Work", manual: "Codex Manual" };
-  for (const language of Object.keys(languages)) {
+  for (const language of supportedLanguages) {
     const copy = copyFor(language, names);
     for (const key of ["manualMcpStepThreeBody", "manualConnectorNotice", "manualPromptInstruction", "manualPromptWaiting"]) {
       assert.ok(copy[key].includes(names.manual), `${language}: ${key}`);

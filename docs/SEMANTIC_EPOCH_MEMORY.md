@@ -2,6 +2,29 @@
 
 Status: experimental, opt-in, default off.
 
+## Bigger Context compatibility
+
+SEM can run alongside Bigger Context in automatic ChatGPT browser mode. Bigger Context retains
+its configured up-to-3× context behavior where supported, including the actual model/Codex
+context limit for the active account and model. SEM changes the browser-facing representation
+of settled history; it does not increase, replace, or silently shrink that reported logical
+context limit. Canonical token accounting still follows the full history.
+
+The physical browser request and staged-message limits remain separate from the configured
+logical limit. SEM must keep each browser submission within those physical limits even when
+Bigger Context is enabled. SEM's separate logical-window increase remains disabled pending
+in-use diagnostics. Combined SEM + Bigger Context behavior is still experimental and requires
+live-session acceptance; UI compatibility does not establish that acceptance.
+
+Each multipart stage is preflighted under its actual staging effort; the final part is
+checked separately under the requested effort and its learned rejection ceiling. When the
+Launcher loses the retained tab, the full projected prompt is preflighted before sending,
+and the physical occupancy ledger is rebased for the fresh conversation. Reused tabs retain
+their existing occupancy evidence; occupancy that cannot be reconstructed fails closed for
+tool-result delivery. `semantic_cost.extraStageSubmissions` records browser-accepted
+stages after execution, including stages whose assistant acknowledgement never arrived; it is not a
+prediction based on configured multipart part count.
+
 ## Goal
 
 Keep substantially more canonical Codex history than one ChatGPT browser request can physically

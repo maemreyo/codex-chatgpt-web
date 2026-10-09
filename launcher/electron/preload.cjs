@@ -45,6 +45,8 @@ contextBridge.exposeInMainWorld("codexWebLauncher", {
   setAutostart: (enabled) => ipcRenderer.invoke("launcher:autostart", enabled),
   setBiggerContext: (enabled) => ipcRenderer.invoke("launcher:bigger-context", enabled),
   setSemanticMemory: (enabled) => ipcRenderer.invoke("launcher:semantic-memory", enabled),
+  getQuotaSettings: () => ipcRenderer.invoke("launcher:quota-guard-get"),
+  setQuotaSettings: (request) => ipcRenderer.invoke("launcher:quota-guard-save", request),
   setSkillAttachments: (enabled) => ipcRenderer.invoke("launcher:skill-attachments", enabled),
   setFreshConversationPerTurn: (enabled) => ipcRenderer.invoke("launcher:fresh-conversation-per-turn", enabled),
   setUseSavedChats: (enabled) => ipcRenderer.invoke("launcher:use-saved-chats", enabled),
