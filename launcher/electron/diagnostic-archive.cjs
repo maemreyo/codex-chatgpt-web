@@ -29,11 +29,12 @@ const ENUMS = {
     "no_completed_turn", "missing_source_revision",
   ]),
   reason: new Set([
-    "ineligible", "no_fit", "cooldown", "cap_hit", "outstanding_tools", "unknown_occupancy",
+    "ineligible", "no_fit", "cooldown", "cap_hit", "outstanding_tools", "cross_boundary", "unknown_occupancy",
     "low_pressure", "model_family_change", "digest_mismatch", "anchor_missing", "schema", "corrupt_store",
     "web_compaction_cap_hit", "compaction_view_unavailable", "active_epoch_validation_failed",
     "retained_epoch_preflight_failed", "rotation_cap_hit_epoch_no_fit", "rotation_cap_hit",
     "rotation_first_message_no_fit", "rotation_cap_changed_before_commit",
+    "candidate_projection_failed", "committed_epoch_projection_failed",
     "initial", "physical_pressure", "token_savings",
   ]),
   fellBackTo: new Set(["legacy", "recovery_error"]),

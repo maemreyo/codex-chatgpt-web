@@ -162,6 +162,34 @@ test("Tier 0 rotation refuses a covered range with an outstanding tool call", ()
   expect(buildSemanticTier0Candidate(parsed, "5.6", undefined)).toEqual({ reason: "outstanding_tools" });
 });
 
+test("Tier 0 skips a cut dividing a parsed assistant message and later tool call", () => {
+  const body = structuredClone(semanticRequest()._rawBody) as { input: Array<Record<string, unknown>> };
+  const assistantIndex = body.input.findIndex(item => item.type === "message" && item.role === "assistant");
+  body.input.splice(assistantIndex + 1, 0,
+    { type: "function_call", call_id: "late_call", name: "codex_exec", arguments: '{"cmd":"status"}' },
+    { type: "function_call_output", call_id: "late_call", output: "late tool evidence" },
+  );
+  const parsed = parseRequest(body);
+  parsed._chatgptModelFamily = "5.6";
+  const refs = parsed._semanticProvenance!;
+  const assistantMessage = parsed.context.messages.findIndex(message => message.role === "assistant"
+    && JSON.stringify(message.content).includes("Prior final answer"));
+  expect(refs.messageSourceRefs[assistantMessage]!.length).toBe(2);
+  expect(buildSemanticTier0Candidate(parsed, "5.6", undefined)).toEqual({ reason: "cross_boundary" });
+
+  const next = structuredClone(body);
+  const currentIndex = next.input.findIndex(item => item.type === "message"
+    && item.role === "developer" && item.content === "Current developer instruction remains exact.");
+  next.input.splice(currentIndex, 0,
+    { type: "message", role: "assistant", content: "Settled final answer", ...turn("turn_1") },
+  );
+  const aligned = parseRequest(next);
+  aligned._chatgptModelFamily = "5.6";
+  const candidate = buildSemanticTier0Candidate(aligned, "5.6", undefined).candidate!;
+  expect(candidate).toBeDefined();
+  expect(projectSemanticEpoch(aligned, candidate).parsed.context.messages.at(-1)?.role).toBe("toolResult");
+});
+
 test("Tier 0 rejects duplicate, orphan, out-of-order and cross-kind tool results", () => {
   const call = { type: "function_call", call_id: "bound", name: "codex_exec", arguments: "{}" };
   const result = { type: "function_call_output", call_id: "bound", output: "verified" };

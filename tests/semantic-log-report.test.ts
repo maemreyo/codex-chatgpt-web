@@ -25,6 +25,7 @@ test("semantic log report reads raw and launcher-wrapped events without surfacin
       launcher(semantic({ event: "semantic_skip", threadHash: threadB, reason: "ineligible",
         detail: "missing_turn_provenance" })),
       launcher(semantic({ event: "semantic_skip", threadHash: threadA, reason: "no_fit" })),
+      launcher(semantic({ event: "semantic_skip", threadHash: threadA, reason: "cross_boundary" })),
       launcher(semantic({ event: "semantic_validation_failed", threadHash: threadA, reason: "digest_mismatch" })),
       launcher(semantic({ event: "semantic_validation_failed", threadHash: threadB, reason: "SECRET TRANSCRIPT CONTENT" })),
       launcher(semantic({ event: "semantic_reject", threadHash: threadA, class: "D" })),
@@ -51,7 +52,7 @@ test("semantic log report reads raw and launcher-wrapped events without surfacin
     ].join("\n"), "utf8");
 
     const report = semanticLogReport(path);
-    expect(report.events).toBe(18);
+    expect(report.events).toBe(19);
     expect(report.threads).toBe(2);
     expect(report.turns).toBe(3);
     expect(report.rotations).toBe(1);
@@ -62,7 +63,7 @@ test("semantic log report reads raw and launcher-wrapped events without surfacin
       webCompactionSubmissions: 1, extraStageSubmissions: 0, discardedTails: 0,
       additionalSubmissionsPer100Legacy: 200 / 3,
     });
-    expect(report.skipsByReason).toEqual({ ineligible: 2, no_fit: 1, unknown: 1 });
+    expect(report.skipsByReason).toEqual({ ineligible: 2, no_fit: 1, cross_boundary: 1, unknown: 1 });
     expect(report.ineligibleDetails).toEqual({ missing_turn_provenance: 1, unknown: 1 });
     expect(report.validationFailuresByReason).toEqual({ digest_mismatch: 1, unknown: 1 });
     expect(report.rejectionsByClass).toEqual({ D: 2, unknown: 1 });

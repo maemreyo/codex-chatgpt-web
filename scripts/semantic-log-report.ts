@@ -48,7 +48,7 @@ const KNOWN_EVENTS = new Set([
   "semantic_reject", "semantic_fallback", "semantic_cost",
 ]);
 const SKIP_REASONS = new Set([
-  "ineligible", "no_fit", "cooldown", "cap_hit", "outstanding_tools", "unknown_occupancy", "low_pressure",
+  "ineligible", "no_fit", "cooldown", "cap_hit", "outstanding_tools", "cross_boundary", "unknown_occupancy", "low_pressure",
 ]);
 const INELIGIBLE_DETAILS = new Set([
   "manual_interaction", "compaction", "model_mismatch", "model_family_missing",
@@ -56,7 +56,7 @@ const INELIGIBLE_DETAILS = new Set([
   "fresh_conversation", "thread_missing", "missing_turn_provenance",
   "no_completed_turn", "missing_source_revision",
 ]);
-const VALIDATION_REASONS = new Set(["digest_mismatch", "anchor_missing", "schema", "corrupt_store"]);
+const VALIDATION_REASONS = new Set(["digest_mismatch", "anchor_missing", "cross_boundary", "schema", "corrupt_store"]);
 const REJECTION_CLASSES = new Set(["A", "B", "C", "D", "unknown"]);
 const FALLBACK_TARGETS = new Set(["legacy", "compaction_required", "recovery_error"]);
 // Only report reasons produced by this bridge. Never reflect an untrusted log
@@ -66,6 +66,7 @@ const FALLBACK_REASONS = new Set([
   "active_epoch_validation_failed", "retained_epoch_preflight_failed",
   "rotation_cap_hit_epoch_no_fit", "rotation_cap_hit",
   "rotation_first_message_no_fit", "rotation_cap_changed_before_commit",
+  "cross_boundary", "candidate_projection_failed", "committed_epoch_projection_failed",
   "unknown_occupancy", "physical_pressure",
 ]);
 const THREAD_HASH = /^[a-f0-9]{16}$/;

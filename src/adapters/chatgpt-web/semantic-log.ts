@@ -6,6 +6,7 @@ export type SemanticSkipReason =
   | "cooldown"
   | "cap_hit"
   | "outstanding_tools"
+  | "cross_boundary"
   | "unknown_occupancy"
   | "low_pressure";
 
@@ -16,7 +17,7 @@ export type SemanticIneligibleDetail =
   | "fresh_conversation" | "thread_missing" | "missing_turn_provenance"
   | "no_completed_turn" | "missing_source_revision";
 
-export type SemanticValidationReason = "digest_mismatch" | "anchor_missing" | "schema" | "corrupt_store";
+export type SemanticValidationReason = "digest_mismatch" | "anchor_missing" | "cross_boundary" | "schema" | "corrupt_store";
 export type SemanticRotationReason = "initial" | "unknown_occupancy" | "model_family_change"
   | "physical_pressure" | "token_savings";
 
@@ -99,6 +100,7 @@ export function emitSemanticLog(event: SemanticLogEvent): void {
 
 export function semanticValidationReason(error: unknown): SemanticValidationReason {
   const message = error instanceof Error ? error.message : String(error);
+  if (/crosses the covered-history cut/i.test(message)) return "cross_boundary";
   if (/digest mismatch/i.test(message)) return "digest_mismatch";
   if (/anchor is missing/i.test(message)) return "anchor_missing";
   if (/unsupported|invalid format|invalid epoch records|invalid persisted/i.test(message)) return "schema";

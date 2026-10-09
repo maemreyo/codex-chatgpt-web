@@ -760,14 +760,21 @@ export function createChatGptWebAdapter(
       emitSemanticLog({
         event: "semantic_skip",
         threadHash,
-        reason: candidateResult.reason === "outstanding_tools" ? "outstanding_tools" : "ineligible",
-        ...(candidateResult.reason !== "outstanding_tools" && candidateResult.reason
+        reason: candidateResult.reason === "outstanding_tools" ? "outstanding_tools"
+          : candidateResult.reason === "cross_boundary" ? "cross_boundary" : "ineligible",
+        ...(candidateResult.reason !== "outstanding_tools" && candidateResult.reason !== "cross_boundary" && candidateResult.reason
           ? { detail: candidateResult.reason } : {}),
       });
+      if (candidateResult.reason === "cross_boundary") return fallbackToLegacy("cross_boundary");
       return { parsed, threadHash };
     }
 
-    const candidateProjection = projectSemanticEpoch(parsed, candidate);
+    let candidateProjection: ReturnType<typeof projectSemanticEpoch>;
+    try {
+      candidateProjection = projectSemanticEpoch(parsed, candidate);
+    } catch (error) {
+      return fallbackToLegacy("candidate_projection_failed", error);
+    }
     let rotationReason: SemanticRotationReason = !active ? "initial"
       : active.modelFamily !== candidate.modelFamily ? "model_family_change" : "unknown_occupancy";
     if (active && activeProjected && active.modelFamily === candidate.modelFamily) {
@@ -871,9 +878,14 @@ export function createChatGptWebAdapter(
         windowSize: projected.metrics.windowSize,
       });
     }
-    const finalProjection = committed.record.semanticEpoch === candidate.semanticEpoch
-      ? projected
-      : projectSemanticEpoch(parsed, committed.record);
+    let finalProjection: ReturnType<typeof projectSemanticEpoch>;
+    try {
+      finalProjection = committed.record.semanticEpoch === candidate.semanticEpoch
+        ? projected
+        : projectSemanticEpoch(parsed, committed.record);
+    } catch (error) {
+      return fallbackToLegacy("committed_epoch_projection_failed", error);
+    }
     return {
       parsed: finalProjection.parsed,
       epoch: committed.record,
