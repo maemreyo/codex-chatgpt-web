@@ -1327,7 +1327,15 @@ Initial recommended eligibility:
 | Luna | no; keep Luna rolling checkpoint implementation |
 | Manual / Zero Risk | no |
 | Fresh Conversation Per Turn | no initially |
-| Bigger Context | no in V1. 6.1.5 changed staging allocation and added acknowledged-stage reconciliation (section 2.1); occupancy and identity rules for multipart are unresolved |
+| Bigger Context | Tier 0 may use a verified, single-message semantic projection with Bigger Context enabled; otherwise the original canonical request follows the existing bounded multipart path. SEM never attaches its occupancy ledger to multipart stages. Live browser acceptance remains pending. |
+
+The retained semantic conversation key includes a process-local nonce. A bridge
+restart therefore opens a fresh browser conversation from the validated persisted
+projection rather than inheriting an old browser tab with an unverified occupancy
+ledger. The ledger charges the actually prepared full or resume submission once
+accepted; a launcher cache miss may require the larger full projection. If an
+occupancy record is evicted during the same process lifetime, its old key is
+never treated as fresh again: continuation falls back to canonical recovery.
 | Skill Attachments | yes only with exact selected-skill pinning tests |
 | Saved chats vs Temporary Chat | both require retained-key/recovery tests |
 | Managed Chrome | enable only after same lifecycle/reconnect evidence as launcher |
@@ -1789,6 +1797,20 @@ measurement of the currently retained launcher log, not evidence of S8 readiness
 M3 therefore remains **undecided**, and both the experimental 240k logical
 window and S9 stay gated until the owner explicitly decides from representative
 in-use SEM diagnostics.
+
+Local SEM + Bigger Context recovery follow-up (2026-10-09, uncommitted):
+The launcher lease now distinguishes a verified fresh browser tab from a retained
+tab. For a fresh lease, the bridge preflights the full semantic projection and
+resets its physical occupancy ledger, including an evicted or rejected ledger.
+For a retained lease, missing or unknown process-local occupancy fails closed.
+The original canonical history and multipart fallback remain available.
+Focused fake-worker checks after the final change: 14 pass / 0 fail across
+`semantic-occupancy`, `semantic-bigger-context-recovery-regressions`, and
+`semantic-rotation-policy`; TypeScript typecheck and `git diff --check` pass.
+An earlier `semantic-adapter` + `browser-worker-contract` run passed 160 / 160
+before the final occupancy-reset refinement. These tests simulate launcher
+leases and are **not** live browser acceptance, process-restart acceptance, or
+release validation. The 240k logical window remains OFF; S9 is still gated.
 
 Proposed direction remains parent+delta with v1 read compatibility, but add sparse base snapshots or
 ancestor-preserving pruning only after a dedicated storage/replay review. The covered-history digest

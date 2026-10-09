@@ -6,9 +6,12 @@ export type SemanticSkipReason =
   | "cooldown"
   | "cap_hit"
   | "outstanding_tools"
-  | "unknown_occupancy";
+  | "unknown_occupancy"
+  | "low_pressure";
 
 export type SemanticValidationReason = "digest_mismatch" | "anchor_missing" | "schema" | "corrupt_store";
+export type SemanticRotationReason = "initial" | "unknown_occupancy" | "model_family_change"
+  | "physical_pressure" | "token_savings";
 
 export type SemanticLogEvent =
   | {
@@ -27,7 +30,7 @@ export type SemanticLogEvent =
       threadHash: string;
       fromEpoch: number;
       toEpoch: number;
-      reason: "unknown_occupancy" | "model_family_change";
+      reason: SemanticRotationReason;
       firstMessageTokens: number;
       firstMessageChars: number;
       fitsSingleMessage: boolean;

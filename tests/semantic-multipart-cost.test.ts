@@ -10,7 +10,7 @@ import { TurnBroker } from "../src/adapters/chatgpt-web/turn-broker";
 import { parseRequest } from "../src/responses/parser";
 import type { CodexParsedRequest, CodexProviderConfig } from "../src/types";
 
-test("SEM multipart cost logs browser-accepted stages even without acknowledgement", async () => {
+test("SEM single-message epoch does not count multipart stages after an interrupted submission", async () => {
   const dir = mkdtempSync(join(tmpdir(), "sem-multipart-cost-"));
   const brokerSocketPath = join(dir, "broker.sock");
   const provider: CodexProviderConfig = {
@@ -70,11 +70,14 @@ test("SEM multipart cost logs browser-accepted stages even without acknowledgeme
       turn.onTextDelta("First done");
       return "First done";
     }
-    expect(prepared.multipart?.parts.length).toBeGreaterThanOrEqual(2);
+    // An active SEM epoch is preflighted as one physical browser message.
+    // Multipart staging belongs to the canonical Bigger Context fallback.
+    expect(prepared.multipart).toBeUndefined();
+    expect(turn.conversationKey).toBeTruthy();
+    expect(turn.onMultipartStageSubmitted).toBeUndefined();
     prepared.release();
     await turn.onPreparedSelected?.(false);
-    await turn.onMultipartStageSubmitted?.(1);
-    throw new Error("simulated interruption before remaining stages");
+    throw new Error("simulated interruption before browser acknowledgement");
   };
   try {
     const adapter = createChatGptWebAdapter(provider);
@@ -86,7 +89,7 @@ test("SEM multipart cost logs browser-accepted stages even without acknowledgeme
     }
     expect(runs).toBe(2);
     expect(costs).toHaveLength(1);
-    expect(costs[0].extraStageSubmissions).toBe(1);
+    expect(costs[0].extraStageSubmissions).toBe(0);
   } finally {
     info.mockRestore();
     (worker as unknown as { run: (turn: BrowserTurn) => Promise<string> }).run = originalRun;

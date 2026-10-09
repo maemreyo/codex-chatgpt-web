@@ -6,7 +6,7 @@ This feature affects the ChatGPT Plus Work/Codex allowance used by **native
 Codex** requests, not ChatGPT Web model submissions. It protects the native
 Responses, compaction, search and image routes forwarded through this bridge.
 
-Launcher v6.1.8-rc.3 adds **Settings → Native quota protection** for this configuration.
+Launcher v6.1.8-rc.3 and later adds **Settings → Native quota protection** for this configuration.
 Turn on protection, select Strict or Conservative, review the thresholds and
 choose **Apply and restart runtime**. Changes are saved only on Apply and the
 previous configuration is restored if a runtime restart fails. Finish any

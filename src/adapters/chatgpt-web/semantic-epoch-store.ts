@@ -78,6 +78,15 @@ function strings(value: unknown): value is string[] {
   return Array.isArray(value) && value.every(item => typeof item === "string");
 }
 
+function validLedgerOutcome(item: Record<string, unknown>): boolean {
+  // V1 ledgers without `status` remain readable, but a contradictory explicit
+  // status must never turn a recorded failure into a claimed success.
+  return item.status === undefined || (
+    (item.status === "success" || item.status === "failure" || item.status === "unknown")
+    && item.failed === (item.status === "failure")
+  );
+}
+
 function validLedger(value: unknown): value is ChatGptArtifactLedgerV1 {
   const ledger = record(value);
   return Boolean(ledger
@@ -94,6 +103,7 @@ function validLedger(value: unknown): value is ChatGptArtifactLedgerV1 {
       return typeof item?.commandDigest === "string"
         && (item.exit === undefined || typeof item.exit === "number")
         && typeof item.failed === "boolean"
+        && validLedgerOutcome(item)
         && typeof item.ref === "string";
     })
     && Array.isArray(ledger.testOutcomes)
@@ -101,6 +111,7 @@ function validLedger(value: unknown): value is ChatGptArtifactLedgerV1 {
       const item = record(entry);
       return typeof item?.ref === "string"
         && typeof item.failed === "boolean"
+        && validLedgerOutcome(item)
         && (item.excerptRef === undefined || typeof item.excerptRef === "string");
     }));
 }

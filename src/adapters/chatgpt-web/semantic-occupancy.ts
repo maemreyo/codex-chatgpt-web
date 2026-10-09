@@ -40,6 +40,16 @@ export class SemanticEpochOccupancy {
 
   markRejected(): void { this.atLimit = true; }
 
+  /** Only a launcher lease explicitly marked as new proves the previous tab
+   * is gone. The same key may now start a new physical occupancy window. */
+  resetForVerifiedFreshLease(): void {
+    this.seen.clear();
+    this.totalTokens = 0;
+    this.outputChars = 0;
+    this.atLimit = false;
+    this.known = true;
+  }
+
   /** Canonical compaction may cross epoch pressure, but can never deliver an
    * individual result exceeding the model's entire physical working set. */
   canFitAtomicResults(results: readonly { content: unknown }[]): boolean {
@@ -65,11 +75,16 @@ export class SemanticEpochOccupancy {
 /** Process-local only. A restart cannot prove the occupancy of an old retained chat. */
 class SemanticEpochOccupancies {
   private readonly entries = new Map<string, SemanticEpochOccupancy>();
+  // Keep a process-lifetime record even when an inactive ledger is evicted.
+  // An old browser tab may still hold this key; its missing token count must
+  // never be mistaken for a fresh, zero-occupancy conversation.
+  private readonly issuedKeys = new Set<string>();
 
   forConversation(key: string, fresh: boolean, physicalLimit: number, modelId: string): SemanticEpochOccupancy {
     const existing = this.entries.get(key);
     if (existing) return existing;
-    const ledger = new SemanticEpochOccupancy(physicalLimit, fresh, modelId);
+    const ledger = new SemanticEpochOccupancy(physicalLimit, fresh && !this.issuedKeys.has(key), modelId);
+    this.issuedKeys.add(key);
     this.entries.set(key, ledger);
     while (this.entries.size > 512) {
       const oldest = this.entries.keys().next().value;

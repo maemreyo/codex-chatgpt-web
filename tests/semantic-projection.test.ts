@@ -92,6 +92,34 @@ test("Tier 0 projection preserves authority and exact suffix while masking only 
   expect(resumed.context.messages.some(message => message.role === "toolResult" && message.toolCallId === "call_old")).toBeFalse();
 });
 
+test("Tier 0 retains only two recent small exact tool results within a bounded evidence window", () => {
+  const body = structuredClone(semanticRequest()._rawBody) as { input: Array<Record<string, unknown>> };
+  const assistantIndex = body.input.findIndex(item => item.type === "message" && item.role === "assistant");
+  const results: Array<Record<string, unknown>> = [];
+  for (const id of ["older_small", "recent_small", "latest_small"] as const) {
+    results.push(
+      { type: "function_call", call_id: id, name: "codex_exec", arguments: '{"cmd":"git rev-parse HEAD"}' },
+      { type: "function_call_output", call_id: id, output: `VERIFIED-${id}-EXACT` },
+    );
+  }
+  body.input.splice(assistantIndex, 0, ...results);
+  const parsed = parseRequest(body);
+  parsed._chatgptModelFamily = "5.6";
+  const candidate = buildSemanticTier0Candidate(parsed, "5.6", undefined, 1234).candidate!;
+  const first = projectSemanticEpoch(parsed, candidate);
+  const second = projectSemanticEpoch(parsed, candidate);
+  expect(first).toEqual(second);
+  expect(first.metrics.windowSize).toBe(2);
+  expect(first.metrics.maskedResults).toBe(2); // old bulky and oldest small result
+  const result = (id: string) => first.parsed.context.messages.find(message => message.role === "toolResult"
+    && message.toolCallId === id)?.content;
+  expect(result("older_small")).not.toContain("VERIFIED-older_small-EXACT");
+  expect(result("recent_small")).toContain("VERIFIED-recent_small-EXACT");
+  expect(result("latest_small")).toContain("VERIFIED-latest_small-EXACT");
+  expect(result("call_old")).not.toContain("successful bulky body");
+  expect(first.parsed._rawBody).toBe(parsed._rawBody);
+});
+
 test("Tier 0 rotation refuses a covered range with an outstanding tool call", () => {
   const parsed = parseRequest({
     model: CHATGPT_WEB_MODEL_ID,
@@ -106,6 +134,67 @@ test("Tier 0 rotation refuses a covered range with an outstanding tool call", ()
     ],
   });
   expect(buildSemanticTier0Candidate(parsed, "5.6", undefined)).toEqual({ reason: "outstanding_tools" });
+});
+
+test("three offline rotations retain authority, decisions and verified outcomes without inventing success", () => {
+  const historical = [
+    [
+      { type: "message", role: "user", content: "Try approach A", ...turn("turn_1") },
+      { type: "function_call", call_id: "call_failed", name: "codex_exec", arguments: '{"cmd":"bun test a"}' },
+      { type: "function_call_output", call_id: "call_failed", output: `Process exited with code 1: 1 fail ${"failure evidence ".repeat(600)}` },
+      { type: "message", role: "assistant", content: "Approach A failed and is ruled out.", ...turn("turn_1") },
+    ],
+    [
+      { type: "message", role: "user", content: "Use approach B instead", ...turn("turn_2") },
+      { type: "function_call", call_id: "call_success", name: "codex_exec", arguments: '{"cmd":"bun test b"}' },
+      { type: "function_call_output", call_id: "call_success", output: `Process exited with code 0 ${"passing evidence ".repeat(600)}` },
+      { type: "message", role: "assistant", content: "Decision: B supersedes A.", ...turn("turn_2") },
+    ],
+    [
+      { type: "message", role: "user", content: "Inspect an inconclusive diagnostic", ...turn("turn_3") },
+      { type: "function_call", call_id: "call_unknown", name: "codex_exec", arguments: '{"cmd":"inspect diagnostic"}' },
+      { type: "function_call_output", call_id: "call_unknown", output: `Diagnostic pending; no exit status ${"pending evidence ".repeat(600)}` },
+      { type: "message", role: "assistant", content: "Diagnostic result remains unverified.", ...turn("turn_3") },
+    ],
+  ];
+  let active: ReturnType<typeof buildSemanticTier0Candidate>["candidate"];
+  for (let completed = 1; completed <= 3; completed += 1) {
+    const turnId = `turn_${completed + 1}`;
+    const parsed = parseRequest({
+      model: CHATGPT_WEB_MODEL_ID,
+      client_metadata: {
+        "x-codex-turn-metadata": JSON.stringify({ thread_id: "thread_semantic", turn_id: turnId, request_kind: "turn" }),
+      },
+      input: [
+        { type: "message", role: "developer", content: "The trusted policy must survive." },
+        ...historical.slice(0, completed).flat(),
+        { type: "message", role: "user", content: `Continue step ${completed + 1}`, ...turn(turnId) },
+        { type: "function_call", call_id: "current", name: "codex_exec", arguments: '{"cmd":"inspect current"}', ...turn(turnId) },
+        { type: "function_call_output", call_id: "current", output: "CURRENT EXACT RESULT", ...turn(turnId) },
+      ],
+    });
+    parsed._chatgptModelFamily = "5.6";
+    const next = buildSemanticTier0Candidate(parsed, "5.6", active, 1000 + completed).candidate!;
+    expect(next).toBeDefined();
+    expect(next.semanticEpoch).toBe(completed);
+    const projected = projectSemanticEpoch(parsed, next);
+    expect(projected.metrics.maskedResults).toBe(completed);
+    expect(projected.parsed.context.messages.some(message => message.role === "developer"
+      && message.content === "The trusted policy must survive.")).toBeTrue();
+    expect(projected.parsed.context.messages.find(message => message.role === "toolResult"
+      && message.toolCallId === "current")?.content).toBe("CURRENT EXACT RESULT");
+    if (completed === 3) {
+      const bodyOf = (id: string) => projected.parsed.context.messages.find(message => message.role === "toolResult"
+        && message.toolCallId === id)?.content;
+      expect(bodyOf("call_failed")).toContain("outcome=exit 1");
+      expect(bodyOf("call_success")).toContain("outcome=exit 0");
+      expect(bodyOf("call_unknown")).toContain("outcome=unknown");
+      expect(projected.parsed.context.messages.some(message => message.role === "assistant"
+        && JSON.stringify(message.content).includes("Decision: B supersedes A."))).toBeTrue();
+      expect(next.artifactLedger.commands.map(item => item.status)).toEqual(["failure", "success", "unknown"]);
+    }
+    active = next;
+  }
 });
 
 test("semantic first-message preflight uses unchanged physical limits", () => {
