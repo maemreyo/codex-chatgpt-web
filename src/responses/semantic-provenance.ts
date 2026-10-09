@@ -156,14 +156,17 @@ function coveredToolRegistrations(provenance: CodexSemanticProvenanceV1, cut: nu
     }
   }
   const definitions = new Map<string, unknown[]>();
-  function binding(value: unknown, depth = 0): unknown {
+  function binding(value: unknown, depth = 0, parentKey?: string): unknown {
     const obj = record(value);
-    if (!obj) return Array.isArray(value) ? value.map(child => binding(child, depth + 1)) : value;
+    if (!obj) return Array.isArray(value) ? value.map(child => binding(child, depth + 1, parentKey)) : value;
     return Object.fromEntries(Object.entries(obj)
       // `id` is volatile on the declaration itself. Within a parameter schema,
       // `properties.id` is a real argument and must remain digest-bound.
-      .filter(([key]) => key !== "description" && !(depth === 0 && key === "id"))
-      .map(([key, child]) => [key, binding(child, depth + 1)]));
+      // Likewise, `properties.description` is a real argument name. Strip only
+      // string-valued human metadata; preserve the entire property schema.
+      .filter(([key, child]) => !(depth === 0 && key === "id")
+        && !(key === "description" && typeof child === "string" && parentKey !== "properties"))
+      .map(([key, child]) => [key, binding(child, depth + 1, key)]));
   }
   function register(spec: unknown, namespace?: string): void {
     const tool = record(spec);

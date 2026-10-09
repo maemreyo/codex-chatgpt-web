@@ -34,6 +34,7 @@ const ENUMS = {
     "web_compaction_cap_hit", "compaction_view_unavailable", "active_epoch_validation_failed",
     "retained_epoch_preflight_failed", "rotation_cap_hit_epoch_no_fit", "rotation_cap_hit",
     "rotation_first_message_no_fit", "rotation_cap_changed_before_commit",
+    "initial", "physical_pressure", "token_savings",
   ]),
   fellBackTo: new Set(["legacy", "recovery_error"]),
   kind: new Set(["http_413", "sse_input_too_large"]),
@@ -63,7 +64,7 @@ function safeField(field, value) {
   if (field === "traceId") return typeof value === "string" && TRACE_ID.test(value)
     ? /^trace_[a-f0-9]{24}$/.test(value) ? value
       : `trace_${createHash("sha256").update(value).digest("hex").slice(0, 24)}` : undefined;
-  if (field === "fitsSingleMessage") return value === true ? true : undefined;
+  if (field === "fitsSingleMessage") return typeof value === "boolean" ? value : undefined;
   if (ENUMS[field]) return ENUMS[field].has(value) ? value : undefined;
   if (field === "mode" || field === "effort") {
     return typeof value === "string" && /^(?:gpt-6-sol|gpt-6-luna|instant|medium|high|xhigh|extra_high|low|none|unknown)$/.test(value)

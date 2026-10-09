@@ -250,3 +250,37 @@ test("rotation cap falls back to lossless canonical Bigger Context multipart", a
     await f.close();
   }
 }, 20_000);
+
+test("oversized SEM inline projection falls back before epoch commit or rotation charge", async () => {
+  const f = makeHarness();
+  try {
+    const first = f.extend([
+      { type: "message", role: "developer", content: "PREFLIGHT-AUTHORITY-MUST-SURVIVE" },
+    ], "first");
+    expect((await f.run(f.request("first", first))).at(-1))
+      .toMatchObject({ type: "done", stopReason: "stop" });
+    const second = f.extend([
+      ...first,
+      { type: "function_call", name: "exec_command", call_id: "oversize_old", arguments: "{}" },
+      { type: "function_call_output", call_id: "oversize_old", output: OLD_RESULT },
+      { type: "message", role: "assistant", content: [{ type: "output_text", text: "REG answer 1" }] },
+    ], "oversized");
+    (second.at(-1) as { content: string }).content += "X".repeat(510_000);
+
+    expect((await f.run(f.request("oversized", second))).at(-1))
+      .toMatchObject({ type: "done", stopReason: "stop" });
+    const fallback = f.submitted[1]!;
+    expect(fallback.key).toBeUndefined();
+    expect(fallback.parts.length).toBeGreaterThan(1);
+    const completeTransport = fallback.parts.join("\n");
+    expect(completeTransport).toContain("PREFLIGHT-AUTHORITY-MUST-SURVIVE");
+    expect(completeTransport).toContain("REGRESSION-EXACT-OLD-RESULT");
+    expect(completeTransport).toContain("X".repeat(10_000));
+    expect(completeTransport).not.toContain("[tool result omitted:");
+    expect(existsSync(f.statePath)).toBeFalse();
+    const costKey = JSON.stringify([chatGptWebExecutionNamespace(f.provider), f.threadId]);
+    expect(new SemanticCostCaps(Date.now, 4, 4, join(f.dir, "semantic-cost-caps.json")).count(costKey)).toBe(0);
+  } finally {
+    await f.close();
+  }
+}, 20_000);

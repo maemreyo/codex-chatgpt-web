@@ -265,6 +265,26 @@ test("digest v3 retains schema properties named id when ignoring registry IDs", 
     .not.toBe(semanticCoveredHistoryDigest(original._semanticProvenance!, anchor));
 });
 
+test("digest v3 binds an argument named description but ignores descriptive metadata", () => {
+  const request = (property: object, humanDescription: string) => parseRequest(body([
+    { type: "additional_tools", tools: [
+      { type: "function", name: "run", description: humanDescription,
+        parameters: { type: "object", description: humanDescription,
+          properties: { description: property } } },
+    ] },
+    { type: "function_call", call_id: "call_description_field", name: "run", arguments: "{}" },
+    { type: "function_call_output", call_id: "call_description_field", output: "ok" },
+    { type: "message", role: "assistant", content: [{ type: "output_text", text: "done" }] },
+  ]));
+  const original = request({ type: "string", description: "human guidance" }, "first wording");
+  const changedType = request({ type: "integer", description: "different guidance" }, "other wording");
+  const changedWords = request({ type: "string", description: "different guidance" }, "other wording");
+  const anchor = original._semanticProvenance!.items.at(-1)!.ref;
+  const digest = semanticCoveredHistoryDigest(original._semanticProvenance!, anchor);
+  expect(semanticCoveredHistoryDigest(changedType._semanticProvenance!, anchor)).not.toBe(digest);
+  expect(semanticCoveredHistoryDigest(changedWords._semanticProvenance!, anchor)).toBe(digest);
+});
+
 test("Tier 0 masking is deterministic and retains only bounded failure evidence", () => {
   const success: CodexToolResultMessage = {
     role: "toolResult", toolCallId: "ok", toolName: "codex_exec",

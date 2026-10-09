@@ -22,17 +22,12 @@ import {
   estimateCompiledChatGptWebInputTokens,
   estimateCompiledChatGptWebMessageTokens,
   compiledChatGptWebMaxMessageChars,
-  compiledChatGptWebMessages,
-  estimateChatGptWebImageTokens,
 } from "./input-tokens";
-import { skillFileTokens } from "./skill-attachments";
 import { CHATGPT_WEB_MODEL_ID, type ChatGptWebCapabilities, type ChatGptWebModelMode } from "./model";
 import {
-  compileChatGptWebPrompt, formatChatGptWebMultipartCommit,
+  compileChatGptWebPrompt,
   type CompiledChatGptWebPrompt,
 } from "./prompt";
-import { estimateTokens } from "../../lib/token-estimate";
-import { resolveBiggerContextMultipartParts } from "./usage";
 import {
   SEMANTIC_PROJECTION_POLICY_VERSION,
   validateSemanticEpochRecord,
@@ -40,8 +35,6 @@ import {
 } from "./semantic-epoch-store";
 import {
   assertChatGptWebInputWithinLimits,
-  assertChatGptWebMultipartInputWithinLimits,
-  resolveChatGptWebMultipartStagingMode,
 } from "./browser-worker";
 
 const SEMANTIC_ESTIMATE_TURN_TOKEN = "turn_00000000000000000000000000000000";
@@ -377,16 +370,14 @@ export function preflightSemanticProjection(
   if (projected.modelId !== CHATGPT_WEB_MODEL_ID) {
     throw new Error("Semantic epoch preflight supports Sol only");
   }
-  // SEM projects the browser-facing clone first. Bigger Context then stages that
-  // projection using exactly the same part selection as normal Web submissions.
-  const parts = experimentalBiggerContext
-    ? resolveBiggerContextMultipartParts(projected, capabilities, experimentalSkillAttachments)
-    : undefined;
+  // The actual SEM browser transport is inline, even with Bigger Context.
+  // Multipart acknowledgements are not represented in epoch occupancy and
+  // cannot be preflighted as though they were sent by the SEM runtime.
   const compiled = compileChatGptWebPrompt(
     projected,
     capabilities,
     mode.localTools ? SEMANTIC_ESTIMATE_TURN_TOKEN : undefined,
-    { experimentalSkillAttachments, experimentalMultipartParts: parts },
+    { experimentalSkillAttachments },
   );
   if (projected._compactionRequest && compiled.trimmedCompactionMessages) {
     // A missing or unverified checkpoint cannot turn an oversized canonical
@@ -397,43 +388,10 @@ export function preflightSemanticProjection(
   const estimatedInputTokens = estimateCompiledChatGptWebInputTokens(compiled, projected.modelId);
   const firstMessageTokens = estimateCompiledChatGptWebMessageTokens(compiled, projected.modelId);
   const firstMessageChars = compiledChatGptWebMaxMessageChars(compiled);
-  let multipartMessageMetrics: Pick<SemanticProjectionMetrics, "stagingEffort" | "maxStageMessageTokens" | "finalMessageTokens"> = {};
-  if (compiled.multipart) {
-    const messages = compiledChatGptWebMessages(compiled);
-    const stages = messages.slice(0, -1);
-    const maxStageTokens = Math.max(...stages.map(text => estimateTokens(text, projected.modelId)));
-    const maxStageChars = Math.max(...stages.map(text => text.length));
-    const stagingMode = resolveChatGptWebMultipartStagingMode(
-      projected.modelId, capabilities, maxStageTokens, maxStageChars,
-    );
-    const final = formatChatGptWebMultipartCommit(compiled.multipart, `ctx_${"0".repeat(32)}`);
-    const finalMessageTokens = estimateTokens(final, projected.modelId)
-      + skillFileTokens(compiled.skillFiles, projected.modelId);
-    multipartMessageMetrics = {
-      stagingEffort: stagingMode.effort,
-      maxStageMessageTokens: maxStageTokens,
-      finalMessageTokens,
-    };
-    assertChatGptWebMultipartInputWithinLimits(
-      estimatedInputTokens, firstMessageTokens, projected.modelId, mode.effort,
-      capabilities, firstMessageChars, compiled.multipart.parts.length,
-      {
-        stagingEffort: stagingMode.effort,
-        maxStageMessageTokens: maxStageTokens,
-        maxStageChars,
-        finalMessageTokens,
-        finalMessageChars: final.length,
-        finalImageTokens: estimateChatGptWebImageTokens(compiled),
-      },
-      projected._chatgptModelFamily,
-    );
-  } else {
-    // An inline submission must still fit the unchanged one-message boundary.
-    assertChatGptWebInputWithinLimits(
-      estimatedInputTokens, firstMessageTokens, projected.modelId, mode.effort,
-      capabilities, firstMessageChars,
-    );
-  }
+  assertChatGptWebInputWithinLimits(
+    estimatedInputTokens, firstMessageTokens, projected.modelId, mode.effort,
+    capabilities, firstMessageChars,
+  );
   const { contextWindow } = resolveChatGptWebPhysicalContextLimits(
     projected.modelId,
     mode.effort,
@@ -447,8 +405,6 @@ export function preflightSemanticProjection(
       firstMessageChars,
       estimatedInputTokens,
       physicalLimit: contextWindow,
-      ...multipartMessageMetrics,
-      ...(compiled.multipart ? { multipartParts: compiled.multipart.parts.length as 2 | 6 } : {}),
     },
   };
 }

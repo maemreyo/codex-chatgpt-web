@@ -287,9 +287,13 @@ test("semantic first-message preflight uses unchanged physical limits", () => {
   const mode = resolveChatGptWebModelMode(parsed.modelId, parsed.options.reasoning, capabilities);
   expect(() => preflightSemanticProjection(projected.parsed, capabilities, mode, false))
     .toThrow("composer boundary");
+  // Even with Bigger Context, SEM sends this epoch inline. A multipart-only
+  // preflight must never reserve a rotation for a payload the worker rejects.
+  expect(() => preflightSemanticProjection(projected.parsed, capabilities, mode, false, true))
+    .toThrow("composer boundary");
 });
 
-test("SEM and Bigger Context stage a large exact current turn inside measured transport limits", () => {
+test("SEM rejects an oversized inline turn even when canonical Bigger Context could stage it", () => {
   const chunks = Array.from({ length: 260 }, (_, index) => ({
     type: "message", role: "user", id: `current_${index}`,
     content: `EXACT-CURRENT-${index} ${"alpha beta gamma delta ".repeat(90)}`,
@@ -308,18 +312,8 @@ test("SEM and Bigger Context stage a large exact current turn inside measured tr
 
   expect(() => preflightSemanticProjection(parsed, plus, mode, false))
     .toThrow();
-  const combined = preflightSemanticProjection(parsed, plus, mode, false, true);
-  expect(combined.compiled.multipart?.parts.length).toBeGreaterThanOrEqual(2);
-  expect(combined.metrics.physicalLimit).toBe(240_000);
-  expect(combined.metrics.estimatedInputTokens).toBeGreaterThan(combined.metrics.firstMessageTokens);
-  expect(combined.metrics.stagingEffort).toBe("low");
-  expect(combined.metrics.maxStageMessageTokens).toBeGreaterThan(0);
-  expect(combined.metrics.finalMessageTokens).toBeGreaterThan(0);
-  expect(combined.metrics.firstMessageTokens).toBe(Math.max(
-    combined.metrics.maxStageMessageTokens!, combined.metrics.finalMessageTokens!,
-  ));
-  expect(JSON.stringify(combined.compiled.multipart?.parts)).toContain("EXACT-CURRENT-259");
-  expect(JSON.stringify(combined.compiled.multipart?.parts)).toContain("Authority must remain exact.");
+  expect(() => preflightSemanticProjection(parsed, plus, mode, false, true))
+    .toThrow("composer boundary");
 });
 
 test("retained conversation identity changes only when semantic epoch changes", () => {

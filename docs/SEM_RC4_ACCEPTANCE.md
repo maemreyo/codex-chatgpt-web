@@ -402,10 +402,49 @@ synthetic difference of about 360 estimated tokens per turn is workload-
 specific and excludes reseed/billing uncertainty. Keep
 `experimentalSemanticLogicalWindow=false`.
 
-Draft PR **#11** exists on `maemreyo/codex-chatgpt-web`, head
-`codex/sem-rc4-integration`, base `main`, with GitHub reporting `MERGEABLE`
-at inspection time. Its remote head still points to the prior committed
-candidate; **none of these dirty source changes are on the PR yet**.
-Source review is ready for a scoped commit/PR update, but authenticated
-native-tool reliability remains **WAIVED / NOT_RUN** and production acceptance
-is not claimed.
+At this pre-integration inspection, draft PR **#11** on
+`maemreyo/codex-chatgpt-web` had not yet received the dirty source changes.
+They were subsequently pushed in `280f2e1`; the review follow-up below
+records the next patch. Authenticated native-tool reliability remains
+**WAIVED / NOT_RUN**, and production acceptance is not claimed.
+
+## PR #11 source-review corrections (2026-10-09)
+
+PR **#11** (`codex/sem-rc4-integration` against `main`) was subsequently
+marked Ready for Review. Source review of `280f2e1` identified one P1 and
+two P2 regressions, reproduced before the corrections:
+
+1. **P1 — SEM inline preflight:** the preflight could accept a Bigger Context
+   multipart projection although the active SEM epoch is sent inline. The
+   corrected preflight validates the exact inline submission boundary. A
+   510,000-character synthetic continuation now falls back to lossless
+   canonical Bigger Context multipart before persisting a new epoch or
+   charging its rotation budget. This does not enable SEM multipart transport.
+2. **P2 — digest v3 tool parameter:** declaration-level descriptive text is
+   still excluded from the digest, but a tool argument actually named
+   `description` remains part of the schema fingerprint. Changing its type
+   changes the digest, while changing human-only descriptive text does not.
+3. **P2 — diagnostic archive metadata:** the sanitizer now preserves rotation
+   reasons `initial`, `physical_pressure` and `token_savings`, plus both
+   boolean values of `fitsSingleMessage`. Regression coverage verifies
+   bounded sanitization as well as preservation through archive read/export.
+
+Scoped verification after these corrections:
+
+- `bun test tests/semantic-projection.test.ts tests/semantic-provenance.test.ts
+  tests/semantic-bigger-context-recovery-regressions.test.ts
+  launcher/tests/diagnostic-archive.test.cjs`: **33 PASS / 0 FAIL** before
+  the extra archive read/export assertions (238 expectations, Bun 1.4.2).
+- `bun test launcher/tests/diagnostic-archive.test.cjs` after the additional
+  archive read/export assertions: **4 PASS / 0 FAIL**.
+- `bun run typecheck`: **PASS** (root runtime TypeScript).
+- `bun run launcher:typecheck`: **PASS** (launcher TypeScript).
+- `git diff --check`: **PASS**.
+
+These checks exercise source-level regression paths and isolated fake workers;
+they do not validate an installed patched build or production usage.
+Authenticated native-tool E2E remains **WAIVED / NOT_RUN** by owner decision.
+Real browser context pressure, model quality and billed-token savings remain
+outside this patch's acceptance. Keep `experimentalSemanticLogicalWindow=false`.
+No merge, deployment, release or production restart is authorized by this
+source-review correction.

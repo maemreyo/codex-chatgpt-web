@@ -48,6 +48,18 @@ test("archive accepts only a bounded allowlist of content-free semantic and tool
     const preserved = safeObservation(wrapped(semantic("semantic_skip", { reason })));
     assert.equal(JSON.parse(preserved.detail.line).reason, reason);
   }
+  for (const reason of ["initial", "physical_pressure", "token_savings"]) {
+    for (const fitsSingleMessage of [true, false]) {
+      const rotation = safeObservation(wrapped(semantic("semantic_rotation", {
+        fromEpoch: 1, toEpoch: 2, reason, fitsSingleMessage,
+        prompt: secret, command: secret,
+      })));
+      assert.deepEqual(JSON.parse(rotation.detail.line), {
+        event: "semantic_rotation", threadHash, fromEpoch: 1, toEpoch: 2,
+        reason, fitsSingleMessage,
+      });
+    }
+  }
   const fallback = safeObservation(wrapped(semantic("semantic_fallback", {
     to: "legacy", reason: "active_epoch_validation_failed",
   })));
@@ -83,7 +95,10 @@ test("archive accepts only a bounded allowlist of content-free semantic and tool
 
 test("launcher automatically archives diagnostics through raw-log rotations and exports each only once", () => scratch(filePath => {
   const logger = createLogger({ filePath });
-  const rotation = semantic("semantic_rotation", { fromEpoch: 1, toEpoch: 2, maskedTokensEst: 300 });
+  const rotation = semantic("semantic_rotation", {
+    fromEpoch: 1, toEpoch: 2, reason: "physical_pressure",
+    fitsSingleMessage: false, maskedTokensEst: 300,
+  });
   const reject = semantic("semantic_reject", { class: "D", kind: "http_413" });
   const tool = JSON.stringify({
     event: "native_tool_diagnostic", stage: "mcp_ingress", diagnosticId: "diag_0123456789abcdef",
@@ -94,13 +109,18 @@ test("launcher automatically archives diagnostics through raw-log rotations and 
   logger.info("runtime.daemon_stderr", { line: tool });
   const archiveDir = archiveDirectory(filePath);
   assert.equal(fs.readdirSync(archiveDir).length, 1);
-  assert.equal(readObservations(filePath).length, 3);
+  const archived = readObservations(filePath);
+  assert.equal(archived.length, 3);
+  assert.equal(JSON.parse(archived[0].detail.line).reason, "physical_pressure");
+  assert.equal(JSON.parse(archived[0].detail.line).fitsSingleMessage, false);
   const destination = path.join(path.dirname(filePath), "export.jsonl");
   assert.equal(exportSanitizedLogs({ filePath, destinationPath: destination }), 3);
   let rows = fs.readFileSync(destination, "utf8").trim().split("\n").map(JSON.parse);
   assert.deepEqual(rows.map(row => JSON.parse(row.detail.line).event), [
     "semantic_rotation", "semantic_reject", "native_tool_diagnostic",
   ]);
+  assert.equal(JSON.parse(rows[0].detail.line).reason, "physical_pressure");
+  assert.equal(JSON.parse(rows[0].detail.line).fitsSingleMessage, false);
   assert.doesNotMatch(JSON.stringify(rows), /SECRET_PRIVATE_PROMPT/);
   // Raw activity is short-lived, but the archive retains metadata after it rolls away.
   fs.writeFileSync(`${filePath}.1`, `${JSON.stringify({ at, level: "info", event: "other", detail: {} })}\n`);
