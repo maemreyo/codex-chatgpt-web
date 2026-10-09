@@ -448,3 +448,20 @@ Real browser context pressure, model quality and billed-token savings remain
 outside this patch's acceptance. Keep `experimentalSemanticLogicalWindow=false`.
 No merge, deployment, release or production restart is authorized by this
 source-review correction.
+
+## PR #11 follow-up: inline transport regression fixture alignment
+
+Post-push review of `7f1e5b7` confirmed the three source fixes and exposed
+two older test expectations that conflicted with the now enforced inline-only
+SEM epoch transport. The interrupted SEM cost test now uses a physically
+fitting current suffix, so it still asserts that an active epoch has no
+multipart stages. The unmaskable user-history test now requires canonical
+Bigger Context multipart fallback without a retained SEM conversation key;
+its exact user and developer evidence must remain present. The nine-turn
+S8 persisted-epoch test passed alone but exceeded Bun's default five-second
+timeout under concurrent tests, so it uses a bounded 20-second timeout.
+
+These are test-only adjustments; no runtime transport or SEM policy changed.
+The focused original review regressions remain **33 PASS / 0 FAIL**; the
+authenticated native-tool E2E waiver remains **WAIVED / NOT_RUN**. No live
+browser, installed app or billed-token measurements are claimed by this review.

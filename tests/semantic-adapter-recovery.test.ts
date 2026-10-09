@@ -239,7 +239,7 @@ test("S8: ninth turn reuses a verified persisted epoch after restart at 220-240k
   } finally {
     await fixture.close();
   }
-});
+}, 20_000);
 
 for (const state of ["missing", "corrupt"] as const) {
   test(`S8: ${state} epoch permits only exact same-process source; restart fails closed`, async () => {

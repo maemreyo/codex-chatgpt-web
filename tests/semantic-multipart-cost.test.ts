@@ -43,7 +43,9 @@ test("SEM single-message epoch does not count multipart stages after an interrup
   const secondInput = [
     ...firstInput,
     { type: "message", role: "assistant", content: [{ type: "output_text", text: "First done" }] },
-    ...Array.from({ length: 260 }, (_, index) => ({
+    // Keep the active suffix within one physical message so the cost test
+    // exercises a committed SEM epoch, not canonical multipart fallback.
+    ...Array.from({ length: 80 }, (_, index) => ({
       type: "message", role: "user", id: `cost_user_2_${index}`,
       content: `EXACT-${index} ${"alpha beta gamma delta ".repeat(90)}`,
       ...meta("cost_2"),

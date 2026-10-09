@@ -261,7 +261,7 @@ test("Bigger Context stages canonical history and SEM reseeds its next completed
   }
 });
 
-test("combined mode preserves unmaskable canonical user history through Bigger Context", async () => {
+test("combined mode preserves oversized unmaskable user history through canonical Bigger Context fallback", async () => {
   const socketPath = brokerEndpoint(`semantic-bigger-fallback-${process.pid}-${Date.now()}`);
   const provider: CodexProviderConfig = {
     adapter: "chatgpt-web",
@@ -319,11 +319,11 @@ test("combined mode preserves unmaskable canonical user history through Bigger C
     }
     expect(parts).toHaveLength(2);
     expect(parts[0]).toBeGreaterThan(1);
-    expect(parts[1]).toBeGreaterThanOrEqual(1);
+    expect(parts[1]).toBeGreaterThan(1); // SEM's inline preflight rejects this large immutable suffix.
     expect(submittedText[1]).toContain("Critical detail 0");
     expect(submittedText[1]).toContain("Critical detail 11");
     expect(submittedText[1]).toContain("Immutable policy.");
-    expect(keys[1]).toBeDefined(); // the selected conversation still includes every canonical detail
+    expect(keys[1]).toBeUndefined(); // Canonical multipart fallback must not claim a retained SEM epoch.
   } finally {
     (worker as unknown as { run: (turn: BrowserTurn) => Promise<string> }).run = originalRun;
     chatGptTurnSessions.clear();
