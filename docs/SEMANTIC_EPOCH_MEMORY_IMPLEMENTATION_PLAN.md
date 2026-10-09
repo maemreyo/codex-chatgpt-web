@@ -1188,7 +1188,7 @@ checkpointTailTokensEst       estimated extra generated tokens for those tails
 epochRotations                committed rotations
 reseedInputTokensEst          tokens in the first message of each new epoch (checkpoint + pins + suffix)
 webCompactionSubmissions      browser submissions made on behalf of canonical compaction
-extraStageSubmissions         multipart stage messages (stays 0 while Bigger Context is ineligible)
+extraStageSubmissions         always 0 for inline-only SEM epochs; canonical Bigger Context multipart fallback emits no semantic_cost event
 physicalRejections            413 / SSE input_too_large observations
 maskedResults / maskedTokensEst  Tier 0 placeholders emitted and tokens they replaced
 stepsToCompletion / extraCalls   native steps and browser submissions needed vs the legacy replay,

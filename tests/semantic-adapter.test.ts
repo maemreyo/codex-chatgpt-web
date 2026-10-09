@@ -259,7 +259,7 @@ test("Bigger Context stages canonical history and SEM reseeds its next completed
     chatGptTurnSessions.clear();
     await TurnBroker.forSocket(socketPath).close();
   }
-});
+}, 20_000);
 
 test("combined mode preserves oversized unmaskable user history through canonical Bigger Context fallback", async () => {
   const socketPath = brokerEndpoint(`semantic-bigger-fallback-${process.pid}-${Date.now()}`);
@@ -329,7 +329,7 @@ test("combined mode preserves oversized unmaskable user history through canonica
     chatGptTurnSessions.clear();
     await TurnBroker.forSocket(socketPath).close();
   }
-});
+}, 20_000);
 
 test("an existing native-turn session bypasses semantic reseed preflight on an exact replay", async () => {
   const socketPath = brokerEndpoint(`semantic-replay-${process.pid}-${Date.now()}`);

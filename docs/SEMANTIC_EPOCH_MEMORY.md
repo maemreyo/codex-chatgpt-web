@@ -16,14 +16,18 @@ Bigger Context is enabled. SEM's separate logical-window increase remains disabl
 in-use diagnostics. Combined SEM + Bigger Context behavior is still experimental and requires
 live-session acceptance; UI compatibility does not establish that acceptance.
 
-Each multipart stage is preflighted under its actual staging effort; the final part is
-checked separately under the requested effort and its learned rejection ceiling. When the
-Launcher loses the retained tab, the full projected prompt is preflighted before sending,
-and the physical occupancy ledger is rebased for the fresh conversation. Reused tabs retain
+On the canonical Bigger Context fallback path, each multipart stage is preflighted under
+its actual staging effort; the final part is checked separately under the requested
+effort and its learned rejection ceiling. Active SEM epochs use one inline browser
+submission, never multipart. When the Launcher loses the retained tab, the full
+projected prompt is preflighted before sending, and the physical occupancy ledger
+is rebased for the fresh conversation. Reused tabs retain
 their existing occupancy evidence; occupancy that cannot be reconstructed fails closed for
-tool-result delivery. `semantic_cost.extraStageSubmissions` records browser-accepted
-stages after execution, including stages whose assistant acknowledgement never arrived; it is not a
-prediction based on configured multipart part count.
+tool-result delivery. `semantic_cost` is emitted only for active SEM epochs;
+`extraStageSubmissions` is currently always `0` because those epochs use inline
+transport. Canonical Bigger Context multipart fallback does not emit a
+`semantic_cost` event, so this field does not measure fallback stage submissions.
+Do not interpret `0` as evidence that canonical fallback used no stages.
 
 ## Goal
 

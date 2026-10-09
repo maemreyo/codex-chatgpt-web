@@ -465,3 +465,30 @@ These are test-only adjustments; no runtime transport or SEM policy changed.
 The focused original review regressions remain **33 PASS / 0 FAIL**; the
 authenticated native-tool E2E waiver remains **WAIVED / NOT_RUN**. No live
 browser, installed app or billed-token measurements are claimed by this review.
+
+## PR #11 follow-up: review P2 test timeout and cost telemetry wording
+
+Two Bigger Context integration regressions in `tests/semantic-adapter.test.ts`
+were susceptible to Bun's default five-second per-test timeout when other SEM
+tests ran concurrently. Both now have a bounded 20-second timeout, matching
+the related large-history/recovery tests. In one combined run of five relevant
+test files, these two cases completed in approximately 3.3 and 2.9 seconds,
+respectively; the existing ninth-turn restart test completed in approximately
+3.6 seconds. One passing run does not prove that CI will never be overloaded.
+
+The SEM overview and implementation plan now describe the actual telemetry
+boundary: active SEM epochs use inline submissions only, so their
+`semantic_cost.extraStageSubmissions` is always zero. Canonical Bigger Context
+multipart fallback can submit stages, but it does not emit a `semantic_cost`
+event. Zero in this counter must not be used to conclude that no canonical
+multipart stages were submitted, or to estimate fallback staging cost.
+Production behavior was not changed by this documentation correction.
+
+- `bun test tests/semantic-adapter.test.ts tests/semantic-adapter-recovery.test.ts
+  tests/semantic-bigger-context-recovery-regressions.test.ts
+  tests/semantic-multipart-cost.test.ts tests/semantic-log-report.test.ts`:
+  **19 PASS / 0 FAIL**, 250 assertions, Bun 1.4.2.
+- Root and launcher TypeScript typechecks: **PASS** (source unchanged by this
+  follow-up; both were run before these documentation/test changes).
+- Authenticated native-tool E2E: **WAIVED / NOT_RUN**. No new installed-app,
+  production, or actual billed-token acceptance is claimed.
