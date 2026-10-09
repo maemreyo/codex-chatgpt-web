@@ -3,8 +3,9 @@
 Date: 2026-10-09. Integration worktree: `codex/sem-rc4-integration`, based on
 `61dbe9d` (RC3 agent cards, quota controls and SEM settings). The existing
 dirty SEM worktree at `codex/live-subagent-smoke-gpt6` was preserved.
-This record describes the local integration candidate. Commit, push, installation,
-and publication status must be verified from the repository and installed runtime.
+This record describes the local integration candidate and the subsequent
+read-only/live checks. Commit, push, installation, and publication status are
+reported separately; a successful Codex continuation does not prove SEM reuse.
 
 ## Verified candidate
 
@@ -30,10 +31,10 @@ Tests use local fake workers and isolated runtime state. They do not establish
 authenticated browser acceptance, accurate billed-token savings, or readiness
 for an experimental logical window.
 
-## Installed RC3 — read-only live observations
+## Prior installed RC3 — read-only live observations
 
-The installed app remained **6.1.8-rc.3**. A read-only diagnostic inspection
-of its current launcher log observed:
+Before the RC4 upgrade, the installed app was **6.1.8-rc.3**. A read-only
+diagnostic inspection of its launcher log observed:
 
 | Metric | Observation |
 | --- | ---: |
@@ -53,23 +54,50 @@ validation would risk losing canonical history or developer authority.
 The diagnostic script emits only bounded categories and counts, without
 echoing prompts, tool output or credentials.
 
-## Pending acceptance gates
+## Installed RC4 — partial authenticated acceptance (2026-10-09)
 
-1. Wait for installed RC3's in-flight HTTP/browser turns to complete. The
-   2026-10-09 read-only check observed **1 HTTP and 2 browser turns**; this
-   snapshot is not a claim about subsequent runtime state.
-2. Preserve the existing app and profile for rollback. Verify an idle drain
-   before attempting an RC4 app upgrade; do not run two versions against the
-   same `~/.codex-chatgpt-web` state.
-3. Start a **new Codex session** with the installed RC4 bundle and check
-   version, launcher capacity, UI/Settings, SEM/Bigger Context config and
-   agent behavior.
-4. Execute authenticated SEM rotation, retained reuse, launcher cache-miss,
-   restart, model-family switch, rotation-cap canonical multipart fallback,
-   and authority/occupancy safeguards; record safe logs for each.
-5. Compare real-use SEM cost and quality with canonical Bigger Context.
-   Keep `experimentalSemanticLogicalWindow=false` and S9 gated until
-   those measurements and the owner decision are available.
+- macOS application and `/healthz` both report **6.1.8-rc.4**. The user
+  installed RC4 manually; the RC3 application rollback ZIP was preserved at
+  `launcher/artifacts/Codex-Web-GPT-6.1.8-rc.3-rollback.zip`.
+- Configured maximum browser sessions: **8**; SEM and Bigger Context enabled;
+  `experimentalSemanticLogicalWindow=false`. Launcher UI showed **effective 5,
+  pending 8 (restart required)**. A configured value of 8 is **not** proof that
+  the running launcher has applied the new limit. Do not restart it with active
+  HTTP/browser turns.
+- Authenticated Codex root + V1 child model chain smoke: **PASS**, both
+  `chatgpt-web/gpt-6-sol`, version `6.1.8-rc.4`.
+- Authenticated, read-only, **three-turn native Codex session**: **PASS** for
+  initial shell read of a synthetic marker and two `codex exec resume`
+  continuations that recalled the marker without tools. All three turns exited
+  0 with expected marker/anchor and no reported turn failure. The first
+  isolated-`CODEX_HOME` attempt failed on turn 2 with `missing cwd in trusted
+  Codex environment context`. Repeating with the same Codex Home as the
+  launcher and per-process provider overrides succeeded. **No bridge source
+  change was needed or made**; the earlier test setup was not representative
+  of the launcher-owned native rollout lookup.
+- Additional targeted environment, outer-native harness and SEM recovery
+  regressions: **172 pass, 1 platform-specific skip, 0 fail**, three files.
+- Post-install safe-log snapshot: 44 SEM events across 14 thread hashes, **0
+  `semantic_turn`, 0 rotation and 0 cost samples**. The snapshot included 16
+  `anchor_missing` validations and 13 active-epoch legacy fallbacks. These are
+  aggregate events in the launcher log, not a per-test causal diagnosis.
+  The successful three-turn continuation establishes the native resume path,
+  **not** SEM rotation/reuse/reseed, canonical fallback cost, or SEM savings.
+- Commit `7555b9a` was pushed and draft PR #11 created. Original dirty
+  worktree and active unrelated Codex sessions were left untouched.
 
-No tag, GitHub Release, production acceptance, or updated-app live
-acceptance is claimed.
+## Remaining acceptance gates
+
+1. When **both** HTTP and browser turns are idle, restart the launcher and
+   verify that effective browser capacity equals the configured 8. The
+   capacity change is pending until restart.
+2. Exercise authenticated **eligible** SEM rotation, retained reuse,
+   cache-miss/restart reseed, model-family switching, cap-limited canonical
+   multipart fallback, and authority/occupancy safeguards. Capture bounded
+   event counts and confirm end-to-end correctness for each.
+3. Compare actual real-use SEM cost and answer quality with canonical Bigger
+   Context. Keep `experimentalSemanticLogicalWindow=false` and S9 gated until
+   measurement and explicit owner acceptance.
+
+No release tag, GitHub Release, production SEM acceptance or token-savings
+claim is made. macOS ARM64 artifact is ad-hoc signed, not notarized.
