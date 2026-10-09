@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { basename, join } from "node:path";
 import { ChatGptBrowserWorker, type BrowserTurn } from "../src/adapters/chatgpt-web/browser-worker";
 import { SemanticCostCaps } from "../src/adapters/chatgpt-web/semantic-cost-caps";
+import { SemanticMessageCeilings } from "../src/adapters/chatgpt-web/semantic-message-ceiling";
 import { semanticEpochOccupancies } from "../src/adapters/chatgpt-web/semantic-occupancy";
 import { chatGptWebExecutionNamespace, createChatGptWebAdapter } from "../src/adapters/chatgpt-web/index";
 import { CHATGPT_WEB_MODEL_ID } from "../src/adapters/chatgpt-web/model";
@@ -14,6 +15,14 @@ import { estimateTokens } from "../src/lib/token-estimate";
 import type { AdapterEvent, CodexParsedRequest, CodexProviderConfig } from "../src/types";
 
 const OLD_RESULT = `REGRESSION-EXACT-OLD-RESULT ${"alpha beta gamma delta ".repeat(36_000)}`;
+
+function stageableCanonicalResults() {
+  return Array.from({ length: 5 }, (_, index) => [
+    { type: "function_call", name: "exec_command", call_id: `reg_fallback_${index}`, arguments: "{}" },
+    { type: "function_call_output", call_id: `reg_fallback_${index}`,
+      output: `REGRESSION-EXACT-OLD-RESULT-${index} ${"alpha beta gamma delta ".repeat(6_000)}` },
+  ]).flat();
+}
 
 function makeHarness() {
   const dir = mkdtempSync(join(tmpdir(), "sem-bigger-recovery-"));
@@ -228,8 +237,9 @@ test("rotation cap falls back to lossless canonical Bigger Context multipart", a
     expect(caps.count(costKey)).toBe(4);
     const second = f.extend([
       ...first,
-      { type: "function_call", name: "exec_command", call_id: "reg_fallback_call", arguments: "{}" },
-      { type: "function_call_output", call_id: "reg_fallback_call", output: OLD_RESULT },
+      // Each canonical record fits a physical stage; the combined history
+      // needs multipart. One monolithic 829k-character result cannot be staged.
+      ...stageableCanonicalResults(),
       { type: "message", role: "assistant", content: [{ type: "output_text", text: "REG answer 1" }] },
     ], "second");
     expect((await f.run(f.request("second", second))).at(-1))
@@ -251,7 +261,80 @@ test("rotation cap falls back to lossless canonical Bigger Context multipart", a
   }
 }, 20_000);
 
-test("oversized SEM inline projection falls back before epoch commit or rotation charge", async () => {
+test("canonical multipart fallback respects learned stage rejection ceilings before submission", async () => {
+  const f = makeHarness();
+  try {
+    const first = f.extend([{ type: "message", role: "developer", content: "RETAIN-EXACT-AUTHORITY" }], "first");
+    expect((await f.run(f.request("first", first))).at(-1)).toMatchObject({ type: "done" });
+    const costKey = JSON.stringify([chatGptWebExecutionNamespace(f.provider), f.threadId]);
+    const caps = new SemanticCostCaps(Date.now, 4, 4, join(f.dir, "semantic-cost-caps.json"));
+    for (let i = 0; i < 4; i++) caps.recordRotation(costKey, `prior_${i}`);
+    // Reject an otherwise stageable canonical fallback under the persisted
+    // per-account message ceilings. Both available Plus stage modes are bound.
+    const ceilings = new SemanticMessageCeilings(
+      join(f.dir, "semantic-message-ceilings.json"), chatGptWebExecutionNamespace(f.provider),
+    );
+    ceilings.observeRejection("sol", "low", "plus", 1);
+    ceilings.observeRejection("sol", "medium", "plus", 1);
+    const second = f.extend([
+      ...first, ...stageableCanonicalResults(),
+      { type: "message", role: "assistant", content: [{ type: "output_text", text: "REG answer 1" }] },
+    ], "second");
+    expect((await f.run(f.request("second", second))).at(-1))
+      .toMatchObject({ type: "error", code: "semantic_epoch_recovery_required" });
+    expect(f.submitted).toHaveLength(1);
+    expect(existsSync(f.statePath)).toBeFalse();
+    expect(caps.count(costKey)).toBe(4);
+  } finally {
+    await f.close();
+  }
+}, 20_000);
+
+test("retained resume selects canonical fallback when a fresh lease cannot fit the full projection", async () => {
+  const f = makeHarness();
+  try {
+    const first = f.extend([{ type: "message", role: "developer", content: "FRESH-LEASE-AUTHORITY" }], "first");
+    expect((await f.run(f.request("first", first))).at(-1)).toMatchObject({ type: "done" });
+    const second = f.extend([
+      ...first, ...stageableCanonicalResults(),
+      { type: "message", role: "assistant", content: [{ type: "output_text", text: "REG answer 1" }] },
+    ], "second");
+    expect((await f.run(f.request("second", second))).at(-1)).toMatchObject({ type: "done" });
+    expect(f.epoch().semanticEpoch).toBe(1);
+    const costKey = JSON.stringify([chatGptWebExecutionNamespace(f.provider), f.threadId]);
+    const caps = new SemanticCostCaps(Date.now, 4, 4, join(f.dir, "semantic-cost-caps.json"));
+    for (let i = 0; i < 4; i++) caps.recordRotation(costKey, `prior_${i}`);
+    const laterHistory = Array.from({ length: 19 }, (_, index) => ({
+      type: "message", role: "user", id: `between_${index}`,
+      content: `CANONICAL-UNMASKABLE-${index} ${"abc def ghi jkl ".repeat(1200)}`,
+      internal_chat_message_metadata_passthrough: { turn_id: "between" },
+    }));
+    const third = f.extend([
+      ...second,
+      { type: "message", role: "assistant", content: [{ type: "output_text", text: "REG answer 2" }] },
+      ...laterHistory,
+      { type: "message", role: "assistant", content: [{ type: "output_text", text: "REG intermediate" }] },
+    ], "third");
+    // The last assistant makes the retained resume small, but a launcher
+    // cache miss would need the whole oversized projection. Choose canonical
+    // multipart before claiming a semantic epoch-backed browser lease.
+    expect((await f.run(f.request("third", third))).at(-1))
+      .toMatchObject({ type: "done", stopReason: "stop" });
+    const fallback = f.submitted[2]!;
+    expect(fallback.key).toBeUndefined();
+    expect(fallback.parts.length).toBeGreaterThan(1);
+    const transport = fallback.parts.join("\n");
+    expect(transport).toContain("FRESH-LEASE-AUTHORITY");
+    expect(transport).toContain("CANONICAL-UNMASKABLE-0");
+    expect(transport).toContain("CANONICAL-UNMASKABLE-18");
+    expect(f.epoch().semanticEpoch).toBe(1);
+    expect(caps.count(costKey)).toBe(4);
+  } finally {
+    await f.close();
+  }
+}, 40_000);
+
+test("untransportable canonical record fails closed before epoch commit or rotation charge", async () => {
   const f = makeHarness();
   try {
     const first = f.extend([
@@ -268,19 +351,14 @@ test("oversized SEM inline projection falls back before epoch commit or rotation
     (second.at(-1) as { content: string }).content += "X".repeat(510_000);
 
     expect((await f.run(f.request("oversized", second))).at(-1))
-      .toMatchObject({ type: "done", stopReason: "stop" });
-    const fallback = f.submitted[1]!;
-    expect(fallback.key).toBeUndefined();
-    expect(fallback.parts.length).toBeGreaterThan(1);
-    const completeTransport = fallback.parts.join("\n");
-    expect(completeTransport).toContain("PREFLIGHT-AUTHORITY-MUST-SURVIVE");
-    expect(completeTransport).toContain("REGRESSION-EXACT-OLD-RESULT");
-    expect(completeTransport).toContain("X".repeat(10_000));
-    expect(completeTransport).not.toContain("[tool result omitted:");
+      .toMatchObject({ type: "error", code: "semantic_epoch_recovery_required" });
+    // A single oversized canonical record cannot fit any stage, so no
+    // browser submission is permitted even with Bigger Context enabled.
+    expect(f.submitted).toHaveLength(1);
     expect(existsSync(f.statePath)).toBeFalse();
     const costKey = JSON.stringify([chatGptWebExecutionNamespace(f.provider), f.threadId]);
     expect(new SemanticCostCaps(Date.now, 4, 4, join(f.dir, "semantic-cost-caps.json")).count(costKey)).toBe(0);
   } finally {
     await f.close();
   }
-}, 20_000);
+}, 40_000);

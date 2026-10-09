@@ -492,3 +492,39 @@ Production behavior was not changed by this documentation correction.
   follow-up; both were run before these documentation/test changes).
 - Authenticated native-tool E2E: **WAIVED / NOT_RUN**. No new installed-app,
   production, or actual billed-token acceptance is claimed.
+
+## PR #11 independent-review follow-up: budgets, lease recovery and cost
+
+Independent review at `95c4619` found one P1 and three P2 issues. This patch:
+
+1. Enforces the ordinary physical context budget for each inline SEM message,
+   including when Bigger Context is enabled. A 400,000-character synthetic
+   prompt below the composer character limit but above the ordinary Plus High
+   token window now fails preflight.
+2. Preflights both the short retained resume and its full fresh-tab projection
+   before choosing a SEM epoch. A cap-exhausted recovery fixture verifies
+   canonical multipart fallback when a fresh-tab projection does not fit.
+3. Emits `semantic_cost` only after a completed browser response or an accepted
+   submission. A pre-submission interruption no longer appears as an accepted
+   browser submission in the estimated cost record.
+4. Applies learned stage/final-message rejection ceilings to canonical Bigger
+   Context multipart fallback before browser submission. Regression coverage
+   includes an observed ceiling that blocks an otherwise stageable payload.
+
+The earlier fake-worker fixture had accepted a single 829,000-character tool
+result that could not fit a real browser stage. Tests now distinguish a lossless
+canonical fallback made of stageable records from an untransportable record,
+which fails closed without committing an epoch or spending rotation budget.
+That heavier failure-case test has a 40-second CI timeout.
+
+Focused final verification on Bun 1.4.2: **231 PASS / 0 FAIL** across 13 SEM,
+browser-worker, provenance, recovery, telemetry, and message-ceiling test
+files, with 1,565 assertions. Both runtime and launcher TypeScript typechecks
+**PASS**, and `git diff --check` **PASS**. All tests ran against source and
+local fake workers; there was no authenticated browser run for this patch.
+
+The
+authenticated native-tool E2E remains **WAIVED / NOT_RUN**. Actual browser
+size boundaries, model quality, billed-token savings, production operation and
+release acceptance are **NOT VERIFIED**. Keep
+`experimentalSemanticLogicalWindow=false`.

@@ -22,11 +22,13 @@ import { namespacedToolName, type AdapterEvent, type CodexContentPart, type Code
 import type { ProviderAdapter } from "../base";
 import { parseDataUrl } from "../image";
 import { ChatGptWebAdapterError, chatGptToolTimeoutError } from "./adapter-error";
-import { ChatGptBrowserWorker, type ChatGptSubmissionRejectionObservation } from "./browser-worker";
+import { ChatGptBrowserWorker, resolveChatGptWebMultipartStagingMode, type ChatGptSubmissionRejectionObservation } from "./browser-worker";
 import { chatGptTurnUserRevisionHistory, extractChatGptTurnEnvironment, extractChatGptTurnIdentity, extractChatGptRootThreadMetadata, extractChatGptThreadSpawnLineage, priorChatGptAbortedTurnIds } from "./environment";
 import { verifiedCodexSemanticUserTurns } from "./codex-rollout-environment";
 import { CHATGPT_WEB_LUNA_MODEL_ID, CHATGPT_WEB_MODEL_ID, resolveChatGptWebModelMode, type ChatGptWebCapabilities, type ChatGptWebModelMode } from "./model";
 import { chatGptReadOnlyContextWarning, compileChatGptWebPrompt } from "./prompt";
+import { compiledChatGptWebMessages } from "./input-tokens";
+import { skillFileTokens } from "./skill-attachments";
 import { createChatGptStructuredOutputValidator } from "./output-validation";
 import { chatGptWebTurnRetryPolicy } from "./retry-policy";
 import { TurnBroker, type BrokerToolRequest, type BrokerToolResult, type TurnBrokerOwner } from "./turn-broker";
@@ -517,6 +519,16 @@ export function createChatGptWebAdapter(
     if (!compiled.multipart || (value._compactionRequest && compiled.trimmedCompactionMessages)) {
       throw new Error("Canonical Bigger Context fallback cannot discard compaction evidence");
     }
+    // The canonical multipart path has no SEM epoch, but a measured rejection
+    // ceiling still applies to each physical stage and the final commit.
+    const messages = compiledChatGptWebMessages(compiled);
+    const stages = messages.slice(0, -1);
+    const stageTokens = Math.max(...stages.map(message => estimateTokens(message, value.modelId)));
+    const stageChars = Math.max(...stages.map(message => message.length));
+    const stageMode = resolveChatGptWebMultipartStagingMode(value.modelId, capabilities, stageTokens, stageChars);
+    semanticCeilings?.assertWithin("sol", stageMode.effort, accountTier, stageTokens);
+    semanticCeilings?.assertWithin("sol", mode.effort, accountTier,
+      estimateTokens(messages.at(-1)!, value.modelId) + skillFileTokens(compiled.skillFiles, value.modelId));
   };
   const currentUsageInput = (parsed: CodexParsedRequest): CodexParsedRequest => (
     parsed.modelId === CHATGPT_WEB_LUNA_MODEL_ID && !parsed._compactionRequest
@@ -716,6 +728,9 @@ export function createChatGptWebAdapter(
       let failedReason: string | undefined;
       try {
         preflight = semanticPreflight(continuation, turnCapabilities, mode);
+        // The launcher may replace a retained lease with a fresh tab. Validate
+        // the full projection before choosing an epoch-backed runtime.
+        semanticPreflight(activeProjected.parsed, turnCapabilities, mode);
         const key = chatGptConversationKey(parsed, executionNamespace, semanticConversationOptions(active));
         const occupancy = key && semanticEpochOccupancies.forConversation(
           key, true, preflight.metrics.physicalLimit, parsed.modelId,
@@ -762,6 +777,7 @@ export function createChatGptWebAdapter(
       try {
         const continuation = retainedConversationResumeRequest(activeProjected.parsed) ?? activeProjected.parsed;
         const preflight = semanticPreflight(continuation, turnCapabilities, mode);
+        semanticPreflight(activeProjected.parsed, turnCapabilities, mode);
         const key = chatGptConversationKey(parsed, executionNamespace, {
           ...semanticConversationOptions(active),
         });
@@ -797,6 +813,7 @@ export function createChatGptWebAdapter(
         try {
           const continuation = retainedConversationResumeRequest(activeProjected.parsed) ?? activeProjected.parsed;
           const preflight = semanticPreflight(continuation, turnCapabilities, mode);
+          semanticPreflight(activeProjected.parsed, turnCapabilities, mode);
           const conversationKey = chatGptConversationKey(parsed, executionNamespace, {
             ...semanticConversationOptions(active),
           });
@@ -1369,7 +1386,15 @@ export function createChatGptWebAdapter(
         captureLunaCheckpoint: true,
         onLunaCheckpoint: captureCheckpoint,
       } : {}),
-    })).finally(emitSemanticCost)), browserAbort);
+    })).then(answer => {
+      // A completed browser response proves a submission even in local harnesses.
+      emitSemanticCost();
+      return answer;
+    }, error => {
+      // Preflight/lease failure never reached a confirmed browser submission.
+      if (submission.phase === "accepted") emitSemanticCost();
+      throw error;
+    })), browserAbort);
     void browserTurn.browser.catch(error => {
       if (!tokenSettled) {
         tokenSettled = true;

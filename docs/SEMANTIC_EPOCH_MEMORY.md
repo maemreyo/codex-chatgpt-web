@@ -23,11 +23,17 @@ submission, never multipart. When the Launcher loses the retained tab, the full
 projected prompt is preflighted before sending, and the physical occupancy ledger
 is rebased for the fresh conversation. Reused tabs retain
 their existing occupancy evidence; occupancy that cannot be reconstructed fails closed for
-tool-result delivery. `semantic_cost` is emitted only for active SEM epochs;
+tool-result delivery. `semantic_cost` is emitted only for active SEM epochs after
+a successful browser response or an acknowledged submission; failed attempts
+before submission are excluded.
 `extraStageSubmissions` is currently always `0` because those epochs use inline
 transport. Canonical Bigger Context multipart fallback does not emit a
 `semantic_cost` event, so this field does not measure fallback stage submissions.
 Do not interpret `0` as evidence that canonical fallback used no stages.
+The SEM inline preflight uses the ordinary single-message context window even
+with Bigger Context enabled. Learned rejection ceilings also apply before
+canonical multipart fallback. Retained-epoch reuse checks both incremental
+resume and full fresh-tab reseed before selecting the browser lease.
 
 ## Goal
 

@@ -388,14 +388,16 @@ export function preflightSemanticProjection(
   const estimatedInputTokens = estimateCompiledChatGptWebInputTokens(compiled, projected.modelId);
   const firstMessageTokens = estimateCompiledChatGptWebMessageTokens(compiled, projected.modelId);
   const firstMessageChars = compiledChatGptWebMaxMessageChars(compiled);
+  const ordinaryCapabilities = { ...capabilities, experimentalBiggerContext: false };
   assertChatGptWebInputWithinLimits(
     estimatedInputTokens, firstMessageTokens, projected.modelId, mode.effort,
-    capabilities, firstMessageChars,
+    ordinaryCapabilities, firstMessageChars,
   );
   const { contextWindow } = resolveChatGptWebPhysicalContextLimits(
     projected.modelId,
     mode.effort,
-    { ...capabilities, experimentalBiggerContext },
+    // Bigger Context expands a multipart transaction, never one SEM message.
+    ordinaryCapabilities,
     projected._chatgptModelFamily,
   );
   return {

@@ -90,8 +90,9 @@ test("SEM single-message epoch does not count multipart stages after an interrup
       expect(String(error)).toContain("simulated interruption");
     }
     expect(runs).toBe(2);
-    expect(costs).toHaveLength(1);
-    expect(costs[0].extraStageSubmissions).toBe(0);
+    // No onSubmitted callback or completed browser response: the interrupted
+    // full projection must not be counted as an accepted submission.
+    expect(costs).toHaveLength(0);
   } finally {
     info.mockRestore();
     (worker as unknown as { run: (turn: BrowserTurn) => Promise<string> }).run = originalRun;

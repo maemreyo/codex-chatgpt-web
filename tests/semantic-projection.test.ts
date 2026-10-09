@@ -316,6 +316,19 @@ test("SEM rejects an oversized inline turn even when canonical Bigger Context co
     .toThrow("composer boundary");
 });
 
+test("SEM Bigger Context cannot spend multipart context on one 400k-character inline message", () => {
+  const parsed = semanticRequest("abc def ghi jkl ".repeat(25_000));
+  parsed._chatgptModelFamily = "6";
+  const plus = { ...capabilities, proAvailable: false, experimentalBiggerContext: true };
+  const mode = resolveChatGptWebModelMode(parsed.modelId, parsed.options.reasoning, plus);
+  const candidate = buildSemanticTier0Candidate(parsed, "6", undefined).candidate!;
+  const projected = projectSemanticEpoch(parsed, candidate);
+  // Below the composer character ceiling, but above the ordinary single
+  // message context budget. Bigger Context only expands multipart transport.
+  expect(() => preflightSemanticProjection(projected.parsed, plus, mode, false, true))
+    .toThrow("context window");
+});
+
 test("retained conversation identity changes only when semantic epoch changes", () => {
   const parsed = semanticRequest();
   const namespace = "semantic-test-namespace";
