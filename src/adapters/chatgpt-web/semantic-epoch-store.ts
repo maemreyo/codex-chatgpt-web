@@ -6,6 +6,7 @@ import {
   SEMANTIC_DIGEST_POLICY_VERSION,
   SEMANTIC_MASKING_POLICY_VERSION,
   semanticCoveredHistoryDigest,
+  semanticCoveredToolCallsExist,
   semanticHash,
   type ChatGptArtifactLedgerV1,
 } from "../../responses/semantic-provenance";
@@ -30,7 +31,7 @@ export interface ChatGptSemanticCheckpointPayloadV1 {
 export interface StoredChatGptSemanticEpochV1 {
   version: 1;
   projectionPolicyVersion: 1;
-  digestPolicyVersion: 1;
+  digestPolicyVersion: 1 | 2 | 3;
   threadId: string;
   semanticEpoch: number;
   sourceTurnId: string;
@@ -78,6 +79,15 @@ function strings(value: unknown): value is string[] {
   return Array.isArray(value) && value.every(item => typeof item === "string");
 }
 
+function validLedgerOutcome(item: Record<string, unknown>): boolean {
+  // V1 ledgers without `status` remain readable, but a contradictory explicit
+  // status must never turn a recorded failure into a claimed success.
+  return item.status === undefined || (
+    (item.status === "success" || item.status === "failure" || item.status === "unknown")
+    && item.failed === (item.status === "failure")
+  );
+}
+
 function validLedger(value: unknown): value is ChatGptArtifactLedgerV1 {
   const ledger = record(value);
   return Boolean(ledger
@@ -94,6 +104,7 @@ function validLedger(value: unknown): value is ChatGptArtifactLedgerV1 {
       return typeof item?.commandDigest === "string"
         && (item.exit === undefined || typeof item.exit === "number")
         && typeof item.failed === "boolean"
+        && validLedgerOutcome(item)
         && typeof item.ref === "string";
     })
     && Array.isArray(ledger.testOutcomes)
@@ -101,6 +112,7 @@ function validLedger(value: unknown): value is ChatGptArtifactLedgerV1 {
       const item = record(entry);
       return typeof item?.ref === "string"
         && typeof item.failed === "boolean"
+        && validLedgerOutcome(item)
         && (item.excerptRef === undefined || typeof item.excerptRef === "string");
     }));
 }
@@ -127,7 +139,7 @@ function validateStoredEpoch(value: unknown): StoredChatGptSemanticEpochV1 {
   if (!epoch
     || epoch.version !== 1
     || epoch.projectionPolicyVersion !== SEMANTIC_PROJECTION_POLICY_VERSION
-    || epoch.digestPolicyVersion !== SEMANTIC_DIGEST_POLICY_VERSION
+    || ![1, 2, SEMANTIC_DIGEST_POLICY_VERSION].includes(Number(epoch.digestPolicyVersion))
     || epoch.maskingPolicyVersion !== SEMANTIC_MASKING_POLICY_VERSION
     || typeof epoch.threadId !== "string" || !epoch.threadId
     || typeof epoch.semanticEpoch !== "number" || !Number.isInteger(epoch.semanticEpoch) || epoch.semanticEpoch < 1
@@ -180,7 +192,12 @@ export function validateSemanticEpochRecord(
   if (!provenance) throw new Error("Semantic provenance is unavailable");
   const anchor = provenance.items.find(item => item.ref === epoch.coveredThroughRef);
   if (!anchor) throw new Error("Semantic epoch anchor is missing");
-  if (semanticCoveredHistoryDigest(provenance, epoch.coveredThroughRef) !== epoch.coveredHistoryDigest) {
+  // V2 ignored the entire live tool registry. An older tool-using epoch
+  // cannot retroactively prove that its executed tool schema was stable.
+  if (epoch.digestPolicyVersion === 2 && semanticCoveredToolCallsExist(provenance, epoch.coveredThroughRef)) {
+    throw new Error("Semantic epoch v2 tool registry is not bound; canonical fallback required");
+  }
+  if (semanticCoveredHistoryDigest(provenance, epoch.coveredThroughRef, epoch.digestPolicyVersion) !== epoch.coveredHistoryDigest) {
     throw new Error("Semantic epoch covered-history digest mismatch");
   }
   if (options.sourceAnswerHash !== undefined && options.sourceAnswerHash !== epoch.sourceAnswerHash) {

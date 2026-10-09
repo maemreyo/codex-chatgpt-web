@@ -1,4 +1,4 @@
-import { afterAll, expect, test } from "bun:test";
+import { afterAll, expect, spyOn, test } from "bun:test";
 import { mkdirSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -78,6 +78,16 @@ test("hidden semantic mode rotates between completed native turns without an ext
   const keys: string[] = [];
   const hasSizeRejectionHook: boolean[] = [];
   const restartedFullCharges: Array<{ ledger: number | null; actual: number }> = [];
+  const costEvents: Array<{ epochRotations: number; reseedInputTokensEst: number }> = [];
+  const originalInfo = console.info.bind(console);
+  const infoSpy = spyOn(console, "info").mockImplementation((...args) => {
+    const event = args[0];
+    if (typeof event === "string" && event.startsWith('{"event":"semantic_cost"')) {
+      costEvents.push(JSON.parse(event));
+    } else {
+      originalInfo(...args);
+    }
+  });
   let browserSubmissions = 0;
   (worker as unknown as { run: (turn: BrowserTurn) => Promise<string> }).run = async turn => {
     browserSubmissions += 1;
@@ -143,13 +153,14 @@ test("hidden semantic mode rotates between completed native turns without an ext
     expect(keys[1]).not.toBe("missing");
     expect(keys[1]).not.toBe(keys[0]);
     expect(keys[2]).toBe(keys[1]);
-    expect(keys[3]).not.toBe(keys[2]);
+    expect(keys[3]).toBe(keys[2]); // safe low-pressure reuse avoids another rotation
     expect(restartedFullCharges).toHaveLength(2);
     expect(restartedFullCharges[0].ledger).toBeGreaterThanOrEqual(restartedFullCharges[0].actual - 100);
     expect(restartedFullCharges[1].ledger).toBeGreaterThanOrEqual(restartedFullCharges[1].actual - 100);
     expect(restartedFullCharges[1].ledger).toBeLessThan(
       restartedFullCharges[0].ledger! + restartedFullCharges[1].actual,
     );
+    expect(costEvents.some(event => event.epochRotations === 0 && event.reseedInputTokensEst > 0)).toBe(true);
     expect(hasSizeRejectionHook).toEqual([true, true, true, true]);
     expect(prompts[0]).toContain("OLD-SECRET-BODY");
     expect(prompts[1]).toContain("[tool result omitted: tool=exec_command");
@@ -161,11 +172,164 @@ test("hidden semantic mode rotates between completed native turns without an ext
     expect(prompts[2]).not.toContain("OLD-SECRET-BODY");
     expect(prompts[3]).toContain("Continue after the cooldown");
   } finally {
+    infoSpy.mockRestore();
     (worker as unknown as { run: (turn: BrowserTurn) => Promise<string> }).run = originalRun;
     chatGptTurnSessions.clear();
     await TurnBroker.forSocket(socketPath).close();
   }
 });
+
+test("Bigger Context stages canonical history and SEM reseeds its next completed turn inline", async () => {
+  const socketPath = brokerEndpoint(`semantic-bigger-${process.pid}-${Date.now()}`);
+  const provider: CodexProviderConfig = {
+    adapter: "chatgpt-web",
+    baseUrl: `browser://semantic-bigger-${Date.now()}`,
+    chatgptWeb: {
+      browserHost: "launcher",
+      browserHostDescriptorPath: join(root, "launcher.json"),
+      brokerSocketPath: socketPath,
+      localToolsEnabled: true,
+      solAvailable: true,
+      extraHighAvailable: true,
+      proAvailable: false,
+      experimentalSemanticMemory: true,
+      experimentalBiggerContext: true,
+      semanticCheckpointStatePath: join(root, `semantic-bigger-${Date.now()}.json`),
+    },
+  };
+  const worker = ChatGptBrowserWorker.forProvider(provider);
+  const originalRun = worker.run.bind(worker);
+  const submissions: Array<{ parts: number; text: string; resumedParts?: number; key?: string }> = [];
+  (worker as unknown as { run: (turn: BrowserTurn) => Promise<string> }).run = async turn => {
+    const prepared = await turn.prepare();
+    const resumed = submissions.length === 2 ? await turn.prepareResume?.() : undefined;
+    submissions.push({
+      parts: prepared.multipart?.parts.length ?? 1,
+      text: prepared.text,
+      ...(resumed ? { resumedParts: resumed.multipart?.parts.length ?? 1 } : {}),
+      ...(turn.conversationKey ? { key: turn.conversationKey } : {}),
+    });
+    prepared.release();
+    resumed?.release();
+    const answer = `Combined mode answer ${submissions.length}`;
+    turn.onTextDelta(answer);
+    return answer;
+  };
+  const settledTools = Array.from({ length: 16 }, (_, index) => [
+    { type: "function_call", call_id: `big_${index}`, name: "exec_command", arguments: '{"cmd":"inspect"}' },
+    { type: "function_call_output", call_id: `big_${index}`, output: `OLD-EVIDENCE-${index} ${"alpha beta gamma delta ".repeat(2_200)}` },
+  ]).flat();
+  const firstInput = [
+    { type: "message", role: "developer", content: "Keep the original authority exact." },
+    { type: "message", role: "user", content: [{ type: "input_text", text: environmentXml }], ...turn("bigger_1") },
+    { type: "message", role: "user", id: "user_bigger_1", content: "Inspect the large history", ...turn("bigger_1") },
+    ...settledTools,
+  ];
+  try {
+    const adapter = createChatGptWebAdapter(provider);
+    for (let n = 1; n <= 3; n++) {
+      const input = n === 1 ? firstInput : [
+        ...firstInput,
+        { type: "message", role: "assistant", content: [{ type: "output_text", text: "Combined mode answer 1" }] },
+        { type: "message", role: "user", content: [{ type: "input_text", text: environmentXml }], ...turn("bigger_2") },
+        { type: "message", role: "user", id: "user_bigger_2", content: "Continue using SEM", ...turn("bigger_2") },
+        ...(n === 3 ? [
+          { type: "message", role: "assistant", content: [{ type: "output_text", text: "Combined mode answer 2" }] },
+          { type: "message", role: "user", content: [{ type: "input_text", text: environmentXml }], ...turn("bigger_3") },
+          { type: "message", role: "user", id: "user_bigger_3", content: "Reuse the semantic epoch", ...turn("bigger_3") },
+        ] : []),
+      ];
+      const events: Array<{ type: string; stopReason?: string }> = [];
+      const parsed = request(`bigger_${n}`, input);
+      parsed._chatgptModelFamily = "6"; // Plus GPT-6 Sol Bigger Context
+      await adapter.runTurn!(parsed, { headers: new Headers() }, event => events.push(event));
+      expect(events.at(-1)).toMatchObject({ type: "done", stopReason: "stop" });
+    }
+    expect(submissions).toHaveLength(3);
+    expect(submissions[0]!.parts).toBeGreaterThan(1);
+    expect(submissions[1]!.parts).toBe(1);
+    expect(submissions[1]!.text).toContain("[tool result omitted:");
+    expect(submissions[1]!.text).not.toContain("OLD-EVIDENCE-0");
+    expect(submissions[1]!.text).toContain("Keep the original authority exact.");
+    expect(submissions[2]!.parts).toBe(1);
+    expect(submissions[2]!.resumedParts).toBe(1);
+    expect(submissions[2]!.key).toBe(submissions[1]!.key);
+  } finally {
+    (worker as unknown as { run: (turn: BrowserTurn) => Promise<string> }).run = originalRun;
+    chatGptTurnSessions.clear();
+    await TurnBroker.forSocket(socketPath).close();
+  }
+}, 20_000);
+
+test("combined mode preserves oversized unmaskable user history through canonical Bigger Context fallback", async () => {
+  const socketPath = brokerEndpoint(`semantic-bigger-fallback-${process.pid}-${Date.now()}`);
+  const provider: CodexProviderConfig = {
+    adapter: "chatgpt-web",
+    baseUrl: `browser://semantic-bigger-fallback-${Date.now()}`,
+    chatgptWeb: {
+      browserHost: "launcher",
+      browserHostDescriptorPath: join(root, "launcher.json"),
+      brokerSocketPath: socketPath,
+      localToolsEnabled: true,
+      solAvailable: true,
+      extraHighAvailable: true,
+      proAvailable: false,
+      experimentalSemanticMemory: true,
+      experimentalBiggerContext: true,
+      semanticCheckpointStatePath: join(root, `semantic-bigger-fallback-${Date.now()}.json`),
+    },
+  };
+  const worker = ChatGptBrowserWorker.forProvider(provider);
+  const originalRun = worker.run.bind(worker);
+  const parts: number[] = [];
+  const keys: Array<string | undefined> = [];
+  const submittedText: string[] = [];
+  (worker as unknown as { run: (turn: BrowserTurn) => Promise<string> }).run = async turn => {
+    const prepared = await turn.prepare();
+    parts.push(prepared.multipart?.parts.length ?? 1);
+    keys.push(turn.conversationKey);
+    submittedText.push(prepared.multipart?.parts.join("\n") ?? prepared.text);
+    prepared.release();
+    const answer = `Full history answer ${parts.length}`;
+    turn.onTextDelta(answer);
+    return answer;
+  };
+  // User-authored text is canonical task evidence; Tier 0 cannot mask it.
+  const firstInput = [
+    { type: "message", role: "developer", content: "Immutable policy." },
+    ...Array.from({ length: 12 }, (_, index) => ({
+      type: "message", role: "user", id: `huge_user_${index}`,
+      content: `Critical detail ${index} ${"alpha beta gamma delta ".repeat(2_200)}`, ...turn("fallback_1"),
+    })),
+    { type: "message", role: "user", content: [{ type: "input_text", text: environmentXml }], ...turn("fallback_1") },
+    { type: "message", role: "user", id: "fallback_user_1", content: "Remember every critical detail", ...turn("fallback_1") },
+  ];
+  try {
+    const adapter = createChatGptWebAdapter(provider);
+    const nextInput = [
+      ...firstInput,
+      { type: "message", role: "assistant", content: [{ type: "output_text", text: "Full history answer 1" }] },
+      { type: "message", role: "user", content: [{ type: "input_text", text: environmentXml }], ...turn("fallback_2") },
+      { type: "message", role: "user", content: "Continue with the exact earlier details", ...turn("fallback_2") },
+    ];
+    for (const [n, input] of [firstInput, nextInput].entries()) {
+      const events: Array<{ type: string; stopReason?: string }> = [];
+      await adapter.runTurn!(request(`fallback_${n + 1}`, input), { headers: new Headers() }, event => events.push(event));
+      expect(events.at(-1)).toMatchObject({ type: "done", stopReason: "stop" });
+    }
+    expect(parts).toHaveLength(2);
+    expect(parts[0]).toBeGreaterThan(1);
+    expect(parts[1]).toBeGreaterThan(1); // SEM's inline preflight rejects this large immutable suffix.
+    expect(submittedText[1]).toContain("Critical detail 0");
+    expect(submittedText[1]).toContain("Critical detail 11");
+    expect(submittedText[1]).toContain("Immutable policy.");
+    expect(keys[1]).toBeUndefined(); // Canonical multipart fallback must not claim a retained SEM epoch.
+  } finally {
+    (worker as unknown as { run: (turn: BrowserTurn) => Promise<string> }).run = originalRun;
+    chatGptTurnSessions.clear();
+    await TurnBroker.forSocket(socketPath).close();
+  }
+}, 20_000);
 
 test("an existing native-turn session bypasses semantic reseed preflight on an exact replay", async () => {
   const socketPath = brokerEndpoint(`semantic-replay-${process.pid}-${Date.now()}`);

@@ -443,3 +443,35 @@ test("turn broker names the finished turn that owns a replayed handle", async ()
     rmSync(root, { recursive: true, force: true });
   }
 });
+
+test("a native turn token belongs to the registering broker socket only", async () => {
+  const root = mkdtempSync(join(tmpdir(), "cb-"));
+  const isolated = TurnBroker.forSocket(join(root, "a.sock"));
+  const launcher = TurnBroker.forSocket(join(root, "b.sock"));
+  try {
+    const environment = {
+      cwd: root,
+      roots: [root],
+      writableRoots: [root],
+      sandboxPolicy: { type: "dangerFullAccess" as const },
+      tools: [],
+    };
+    const token = await isolated.register(environment, 60_000, "isolated-turn");
+    await launcher.listen();
+    const activityId = `activity_${"a".repeat(24)}`;
+    await expect(callTurnBroker(launcher.socketPath, {
+      method: "claim", token, activityId,
+    })).rejects.toThrow("turn token is invalid, expired, or revoked");
+    const claimed = await callTurnBroker<{ bindingId: string }>(isolated.socketPath, {
+      method: "claim", token, activityId,
+    });
+    expect(claimed.bindingId).toStartWith("binding_");
+    await callTurnBroker(isolated.socketPath, {
+      method: "activity_complete", token, activityId,
+    });
+  } finally {
+    await isolated.close();
+    await launcher.close();
+    rmSync(root, { recursive: true, force: true });
+  }
+});

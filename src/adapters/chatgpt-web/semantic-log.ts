@@ -6,9 +6,19 @@ export type SemanticSkipReason =
   | "cooldown"
   | "cap_hit"
   | "outstanding_tools"
-  | "unknown_occupancy";
+  | "unknown_occupancy"
+  | "low_pressure";
+
+/** Bounded diagnostics; no user text, environment data, or tool payloads. */
+export type SemanticIneligibleDetail =
+  | "manual_interaction" | "compaction" | "model_mismatch" | "model_family_missing"
+  | "local_tools_disabled" | "trusted_environment_missing" | "launcher_missing"
+  | "fresh_conversation" | "thread_missing" | "missing_turn_provenance"
+  | "no_completed_turn" | "missing_source_revision";
 
 export type SemanticValidationReason = "digest_mismatch" | "anchor_missing" | "schema" | "corrupt_store";
+export type SemanticRotationReason = "initial" | "unknown_occupancy" | "model_family_change"
+  | "physical_pressure" | "token_savings";
 
 export type SemanticLogEvent =
   | {
@@ -27,7 +37,7 @@ export type SemanticLogEvent =
       threadHash: string;
       fromEpoch: number;
       toEpoch: number;
-      reason: "unknown_occupancy" | "model_family_change";
+      reason: SemanticRotationReason;
       firstMessageTokens: number;
       firstMessageChars: number;
       fitsSingleMessage: boolean;
@@ -37,7 +47,8 @@ export type SemanticLogEvent =
       ledgerCommands: number;
       windowSize: number;
     }
-  | { event: "semantic_skip"; threadHash: string; reason: SemanticSkipReason }
+  | { event: "semantic_skip"; threadHash: string; reason: SemanticSkipReason;
+      detail?: SemanticIneligibleDetail }
   | {
       event: "semantic_validation_failed";
       threadHash: string;

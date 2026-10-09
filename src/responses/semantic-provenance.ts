@@ -1,5 +1,6 @@
 import { createHash } from "node:crypto";
 import { estimateTokens } from "../lib/token-estimate";
+import { namespacedToolName } from "../types";
 import type {
   CodexAssistantMessage,
   CodexMessage,
@@ -10,7 +11,7 @@ import type {
   CodexToolResultMessage,
 } from "../types";
 
-export const SEMANTIC_DIGEST_POLICY_VERSION = 1 as const;
+export const SEMANTIC_DIGEST_POLICY_VERSION = 3 as const;
 export const SEMANTIC_MASKING_POLICY_VERSION = 1 as const;
 const EXCERPT_CHARS = 160;
 
@@ -36,6 +37,44 @@ export function semanticCanonicalJson(value: unknown): string {
   return JSON.stringify(normalized(value));
 }
 
+// Codex rewrites these presentation-only fields when it replays completed
+// responses. This normalization is restricted to their documented item shapes;
+// user/developer messages, tool arguments and tool results remain exact.
+function stableHistoryItem(value: unknown): unknown {
+  const item = record(value);
+  if (!item) return value;
+  if (item.type === "reasoning") {
+    const copy = { ...item };
+    if (copy.content === null) delete copy.content;
+    if (copy.encrypted_content === null) delete copy.encrypted_content;
+    return copy;
+  }
+  if (item.type === "message" && item.role === "assistant") {
+    const copy = { ...item };
+    if (copy.status === "completed") delete copy.status;
+    if (Array.isArray(copy.content)) {
+      copy.content = copy.content.map(value => {
+        const part = record(value);
+        if (!part || part.type !== "output_text" || !Array.isArray(part.annotations)
+          || part.annotations.length !== 0) return value;
+        const cleaned = { ...part };
+        delete cleaned.annotations;
+        return cleaned;
+      });
+    }
+    return copy;
+  }
+  return value;
+}
+
+function stableHistoryJson(canonicalJson: string): string {
+  return semanticCanonicalJson(stableHistoryItem(JSON.parse(canonicalJson)));
+}
+
+export function semanticHistoryItemHash(canonicalJson: string, version: 1 | 2 | 3 = SEMANTIC_DIGEST_POLICY_VERSION): string {
+  return semanticHash(version === 1 ? canonicalJson : stableHistoryJson(canonicalJson));
+}
+
 export function semanticHash(value: unknown): string {
   const source = typeof value === "string" ? value : semanticCanonicalJson(value);
   return createHash("sha256").update(source).digest("hex");
@@ -52,7 +91,7 @@ export function semanticCanonicalItemsFromBody(body: unknown): CodexSemanticCano
   const occurrences = new Map<string, number>();
   return sourceInput(body).map((item, rawIndex) => {
     const canonicalJson = semanticCanonicalJson(item);
-    const digest = semanticHash(canonicalJson);
+    const digest = semanticHistoryItemHash(canonicalJson);
     const ordinal = (occurrences.get(digest) ?? 0) + 1;
     occurrences.set(digest, ordinal);
     const raw = record(item);
@@ -76,16 +115,93 @@ export function semanticCanonicalItemsFromBody(body: unknown): CodexSemanticCano
 export function semanticCoveredHistoryDigest(
   provenance: CodexSemanticProvenanceV1,
   coveredThroughRef: string,
+  version: 1 | 2 | 3 = SEMANTIC_DIGEST_POLICY_VERSION,
 ): string {
   const index = provenance.items.findIndex(item => item.ref === coveredThroughRef);
   if (index < 0) throw new Error("Semantic covered-history anchor is missing");
   const hash = createHash("sha256");
-  hash.update(`semantic-digest-v${SEMANTIC_DIGEST_POLICY_VERSION}\n`);
+  hash.update(`semantic-digest-v${version}\n`);
   for (const item of provenance.items.slice(0, index + 1)) {
-    hash.update(item.canonicalJson);
+    // additional_tools is the CURRENT live tool registry injected with each
+    // request; its ephemeral id/descriptions are not settled historical evidence.
+    // The parser independently refreshes those tool specs on every turn.
+    if (version >= 2 && item.type === "additional_tools") continue;
+    hash.update(version === 1 ? item.canonicalJson : stableHistoryJson(item.canonicalJson));
+    hash.update("\n");
+  }
+  if (version === 3) {
+    hash.update("covered-tool-registry-v1\n");
+    hash.update(semanticCanonicalJson(coveredToolRegistrations(provenance, index)));
     hash.update("\n");
   }
   return hash.digest("hex");
+}
+
+// Live `additional_tools` is reissued on every request. Bind only execution
+// contracts for names actually called in the covered prefix. IDs and human
+// descriptions are volatile; routing, type and argument schemas are not.
+// A changed name/schema therefore invalidates the epoch without requiring
+// unrelated current tool descriptions to match a historical browser turn.
+function coveredToolRegistrations(provenance: CodexSemanticProvenanceV1, cut: number): unknown[] {
+  const used = new Set<string>();
+  for (const item of provenance.items.slice(0, cut + 1)) {
+    if (!["function_call", "custom_tool_call", "tool_search_call", "local_shell_call"].includes(item.type ?? "")) continue;
+    const call = record(JSON.parse(item.canonicalJson));
+    if (item.type === "tool_search_call") used.add("tool_search");
+    else if (item.type === "local_shell_call") used.add("local_shell");
+    else if (typeof call?.name === "string") {
+      const namespace = typeof call.namespace === "string" && call.namespace !== "functions"
+        ? call.namespace : undefined;
+      used.add(namespacedToolName(namespace, call.name));
+    }
+  }
+  const definitions = new Map<string, unknown[]>();
+  function binding(value: unknown, depth = 0, parentKey?: string): unknown {
+    const obj = record(value);
+    if (!obj) return Array.isArray(value) ? value.map(child => binding(child, depth + 1, parentKey)) : value;
+    return Object.fromEntries(Object.entries(obj)
+      // `id` is volatile on the declaration itself. Within a parameter schema,
+      // `properties.id` is a real argument and must remain digest-bound.
+      // Likewise, `properties.description` is a real argument name. Strip only
+      // string-valued human metadata; preserve the entire property schema.
+      .filter(([key, child]) => !(depth === 0 && key === "id")
+        && !(key === "description" && typeof child === "string" && parentKey !== "properties"))
+      .map(([key, child]) => [key, binding(child, depth + 1, key)]));
+  }
+  function register(spec: unknown, namespace?: string): void {
+    const tool = record(spec);
+    if (!tool) return;
+    if (tool.type === "namespace" && Array.isArray(tool.tools)) {
+      for (const child of tool.tools) register(child, tool.name === "functions" ? undefined : String(tool.name));
+      return;
+    }
+    const name = tool.type === "tool_search" ? "tool_search"
+      : typeof tool.name === "string" ? (namespace ? `${namespace}__${tool.name}` : tool.name) : undefined;
+    if (!name || !used.has(name)) return;
+    const entries = definitions.get(name) ?? [];
+    entries.push(binding({ ...tool, ...(namespace ? { namespace } : {}) }));
+    definitions.set(name, entries);
+  }
+  // Replayed tool-search results already belong to the covered digest. The
+  // additional_tools registry here is only the live declaration surface.
+  for (const item of provenance.items) {
+    if (item.type !== "additional_tools") continue;
+    const registry = record(JSON.parse(item.canonicalJson));
+    if (Array.isArray(registry?.tools)) for (const spec of registry.tools) register(spec);
+  }
+  for (const spec of provenance.toolRegistrySpecs ?? []) register(spec);
+  // Duplicate declarations of the same execution contract are semantically
+  // identical; replay must not depend on the number of registry wrappers.
+  return [...used].sort().map(name => [
+    name, [...new Set((definitions.get(name) ?? []).map(semanticCanonicalJson))].sort(),
+  ]);
+}
+
+export function semanticCoveredToolCallsExist(provenance: CodexSemanticProvenanceV1, coveredThroughRef: string): boolean {
+  const index = provenance.items.findIndex(item => item.ref === coveredThroughRef);
+  if (index < 0) return false;
+  return provenance.items.slice(0, index + 1).some(item =>
+    ["function_call", "custom_tool_call", "tool_search_call", "local_shell_call"].includes(item.type ?? ""));
 }
 
 export function semanticMessageRefs(parsed: CodexParsedRequest, messageIndex: number): readonly string[] {
@@ -126,7 +242,12 @@ function exitCode(text: string): number | undefined {
 }
 
 function failingTestOutput(text: string): boolean {
-  return /(?:^|\b)(?:FAIL(?:ED)?|\d+\s+fail(?:ed|ures?)?|tests?\s+failed)(?:\b|:)/im.test(text);
+  return text.split(/\r?\n/).some(line => {
+    const row = line.trim();
+    if (/^(?:\(?fail\)|FAIL(?:ED)?\b|not ok\b)(?:\s|:|$)/i.test(row)) return true;
+    // "0 fail" and "0 failed" are successful test summaries, not failure markers.
+    return /\b[1-9]\d*\s+fail(?:ed|ures?)?\b/i.test(row);
+  });
 }
 
 function excerpt(text: string): string {
@@ -140,6 +261,7 @@ export interface SemanticMaskedToolResultV1 {
   originalTokens: number;
   maskedTokens: number;
   failed: boolean;
+  status: "success" | "failure" | "unknown";
   exit?: number;
 }
 
@@ -150,7 +272,8 @@ export function semanticMaskToolResult(
   const text = resultText(message);
   const exit = exitCode(text);
   const failed = message.isError || (exit !== undefined && exit !== 0) || failingTestOutput(text);
-  const outcome = message.isError ? "error" : exit !== undefined ? `exit ${exit}` : failed ? "error" : "ok";
+  const status = failed ? "failure" : exit === 0 ? "success" : "unknown";
+  const outcome = message.isError ? "error" : exit !== undefined ? `exit ${exit}` : failed ? "error" : "unknown";
   const originalTokens = estimateTokens(text);
   const bodyExcerpt = failed ? excerpt(text) : "none";
   const placeholder = `[tool result omitted: tool=${message.toolName || "unknown"} ref=${canonicalRef} size=${originalTokens} outcome=${outcome} excerpt=${bodyExcerpt}. The body is not in view. Re-running a tool may not be safe or idempotent.]`;
@@ -159,14 +282,19 @@ export function semanticMaskToolResult(
     originalTokens,
     maskedTokens: estimateTokens(placeholder),
     failed,
+    status,
     ...(exit !== undefined ? { exit } : {}),
   };
 }
 
+export type SemanticArtifactOutcome = "success" | "failure" | "unknown";
+
 export interface ChatGptArtifactLedgerV1 {
   filesTouched: Array<{ path: string; op: "read" | "write" | "delete" | "unknown"; ref: string }>;
-  commands: Array<{ commandDigest: string; exit?: number; failed: boolean; ref: string }>;
-  testOutcomes: Array<{ ref: string; failed: boolean; excerptRef?: string }>;
+  // `failed` remains for persisted v1 compatibility. Only `status` can establish success;
+  // `failed: false` alone can mean the result was absent or inconclusive.
+  commands: Array<{ commandDigest: string; exit?: number; failed: boolean; status?: SemanticArtifactOutcome; ref: string }>;
+  testOutcomes: Array<{ ref: string; failed: boolean; status?: SemanticArtifactOutcome; excerptRef?: string }>;
 }
 
 export type SemanticArtifactToolClassification =
@@ -251,12 +379,14 @@ export function extractSemanticArtifactLedger(
         commandDigest: semanticHash(classification.command),
         ...(masked?.exit !== undefined ? { exit: masked.exit } : {}),
         failed: masked?.failed ?? false,
+        status: masked?.status ?? "unknown",
         ref,
       });
       if (classification.test) {
         ledger.testOutcomes.push({
           ref,
           failed: masked?.failed ?? false,
+          status: masked?.status ?? "unknown",
           ...(masked?.failed && resultRef ? { excerptRef: resultRef } : {}),
         });
       }
@@ -269,6 +399,7 @@ export function renderSemanticArtifactLedger(ledger: ChatGptArtifactLedgerV1): s
   return [
     "<semantic_artifact_ledger version=\"1\">",
     "Bridge-extracted historical artifact metadata; it is not verified current repository state.",
+    "Treat status=unknown and legacy rows without status as unverified. A failed=false field alone does not prove success.",
     semanticCanonicalJson(ledger),
     "</semantic_artifact_ledger>",
   ].join("\n");

@@ -653,8 +653,9 @@ export function parseRequest(body: unknown): CodexParsedRequest {
     _rawBody: body,
     _semanticProvenance: {
       version: 1,
-      digestPolicyVersion: 1,
+      digestPolicyVersion: 3,
       items: semanticItems,
+      ...(Array.isArray(data.tools) ? { toolRegistrySpecs: data.tools } : {}),
       messageSourceRefs,
       replayPrefixLength: replayedInputPrefixLength,
     },

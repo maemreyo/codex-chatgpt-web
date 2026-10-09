@@ -8,6 +8,8 @@ import {
   renderSemanticArtifactLedger,
   semanticCoveredHistoryDigest,
   semanticHash,
+  semanticHistoryItemHash,
+  SEMANTIC_DIGEST_POLICY_VERSION,
   semanticMaskToolResult,
   semanticMessageRefs,
   semanticPinnedMessageRefs,
@@ -20,17 +22,12 @@ import {
   estimateCompiledChatGptWebInputTokens,
   estimateCompiledChatGptWebMessageTokens,
   compiledChatGptWebMaxMessageChars,
-  compiledChatGptWebMessages,
-  estimateChatGptWebImageTokens,
 } from "./input-tokens";
-import { skillFileTokens } from "./skill-attachments";
 import { CHATGPT_WEB_MODEL_ID, type ChatGptWebCapabilities, type ChatGptWebModelMode } from "./model";
 import {
-  compileChatGptWebPrompt, formatChatGptWebMultipartCommit,
+  compileChatGptWebPrompt,
   type CompiledChatGptWebPrompt,
 } from "./prompt";
-import { estimateTokens } from "../../lib/token-estimate";
-import { resolveBiggerContextMultipartParts } from "./usage";
 import {
   SEMANTIC_PROJECTION_POLICY_VERSION,
   validateSemanticEpochRecord,
@@ -38,11 +35,14 @@ import {
 } from "./semantic-epoch-store";
 import {
   assertChatGptWebInputWithinLimits,
-  assertChatGptWebMultipartInputWithinLimits,
-  resolveChatGptWebMultipartStagingMode,
 } from "./browser-worker";
 
 const SEMANTIC_ESTIMATE_TURN_TOKEN = "turn_00000000000000000000000000000000";
+// Preserve a bounded exact window of recent, small, settled tool results.
+// Tool evidence remains lower-trust than developer/skill instructions.
+const MAX_EXACT_EVIDENCE_RESULTS = 2;
+const MAX_EXACT_EVIDENCE_RESULT_TOKENS = 384;
+const MAX_EXACT_EVIDENCE_TOTAL_TOKENS = 640;
 
 type RotationSkipReason =
   | "no_completed_turn"
@@ -60,7 +60,7 @@ export interface SemanticProjectionMetrics {
   maskedTokensEst: number;
   ledgerFiles: number;
   ledgerCommands: number;
-  windowSize: 0;
+  windowSize: number;
   firstMessageTokens: number;
   firstMessageChars: number;
   estimatedInputTokens: number;
@@ -96,8 +96,11 @@ function canonicalItemValue(canonicalJson: string): Record<string, unknown> | un
 }
 
 function sourceRevisionHash(parsed: CodexParsedRequest, sourceTurnId: string): string | undefined {
+  const verified = new Map(parsed._semanticProvenance?.items
+    .filter(item => item.type === "message" && item.role === "user" && item.itemId && item.turnId)
+    .map(item => [item.itemId!, item.turnId!] as const) ?? []);
   const revisions = chatGptTurnUserRevisionHistory(parsed)
-    .filter(revision => revision.turnId === sourceTurnId)
+    .filter(revision => (revision.turnId ?? (revision.itemId ? verified.get(revision.itemId) : undefined)) === sourceTurnId)
     .map(revision => revision.content);
   return revisions.length > 0 ? semanticHash(revisions) : undefined;
 }
@@ -111,31 +114,46 @@ function callIdentity(item: Record<string, unknown>): string | undefined {
 function coveredCallsAreSettled(parsed: CodexParsedRequest, cut: number): boolean {
   const items = parsed._semanticProvenance?.items;
   if (!items) return false;
-  const calls = new Set<string>();
-  const results = new Set<string>();
+  // A set-membership check can accept duplicate, orphaned, reordered or
+  // cross-kind tool results. Retained epochs must bind exactly one result to
+  // each covered call before considering that history settled.
+  const pending = new Map<string, string>();
+  const seen = new Set<string>();
+  const resultsByCall: Record<string, string> = {
+    function_call: "function_call_output",
+    custom_tool_call: "custom_tool_call_output",
+    local_shell_call: "function_call_output",
+    tool_search_call: "tool_search_output",
+  };
+  const outputKinds = new Set(Object.values(resultsByCall));
   for (const item of items.slice(0, cut + 1)) {
     const raw = canonicalItemValue(item.canonicalJson);
     if (!raw) return false;
+    const kind = String(raw.type);
+    if (!Object.hasOwn(resultsByCall, kind) && !outputKinds.has(kind)) continue;
     const identity = callIdentity(raw);
-    if (!identity) continue;
-    if (["function_call", "custom_tool_call", "local_shell_call", "tool_search_call"].includes(String(raw.type))) {
-      calls.add(identity);
-    } else if (["function_call_output", "custom_tool_call_output", "tool_search_output"].includes(String(raw.type))) {
-      results.add(identity);
+    if (!identity) return false;
+    if (Object.hasOwn(resultsByCall, kind)) {
+      if (seen.has(identity)) return false;
+      seen.add(identity);
+      pending.set(identity, resultsByCall[kind]!);
+    } else {
+      if (pending.get(identity) !== kind) return false;
+      pending.delete(identity);
     }
   }
-  for (const callId of calls) {
-    if (!results.has(callId)) return false;
-  }
-  return true;
+  return pending.size === 0;
 }
 
 function priorSourceTurnId(parsed: CodexParsedRequest, cut: number, currentTurnId: string): string | undefined {
   const provenance = parsed._semanticProvenance;
   if (!provenance) return undefined;
+  const verified = new Map(provenance.items
+    .filter(item => item.type === "message" && item.role === "user" && item.itemId && item.turnId)
+    .map(item => [item.itemId!, item.turnId!] as const));
   const revisionTurnIds = new Set(
     chatGptTurnUserRevisionHistory(parsed)
-      .map(revision => revision.turnId)
+      .map(revision => revision.turnId ?? (revision.itemId ? verified.get(revision.itemId) : undefined))
       .filter((turnId): turnId is string => typeof turnId === "string" && turnId !== currentTurnId),
   );
   for (let index = cut; index >= 0; index -= 1) {
@@ -178,11 +196,11 @@ export function buildSemanticTier0Candidate(
     candidate: {
       version: 1,
       projectionPolicyVersion: SEMANTIC_PROJECTION_POLICY_VERSION,
-      digestPolicyVersion: 1,
+      digestPolicyVersion: SEMANTIC_DIGEST_POLICY_VERSION,
       threadId: identity.threadId,
       semanticEpoch: (active?.semanticEpoch ?? 0) + 1,
       sourceTurnId,
-      sourceAnswerHash: semanticHash(anchor.canonicalJson),
+      sourceAnswerHash: semanticHistoryItemHash(anchor.canonicalJson),
       sourceUserRevisionHash,
       coveredThroughRef: anchor.ref,
       coveredHistoryDigest: semanticCoveredHistoryDigest(provenance, anchor.ref),
@@ -206,7 +224,7 @@ function semanticEpochSourceHashes(
   const revisionHash = sourceRevisionHash(parsed, epoch.sourceTurnId);
   if (!revisionHash) throw new Error("Semantic epoch source user revision is missing");
   return {
-    sourceAnswerHash: semanticHash(anchor.canonicalJson),
+    sourceAnswerHash: semanticHistoryItemHash(anchor.canonicalJson, epoch.digestPolicyVersion),
     sourceUserRevisionHash: revisionHash,
   };
 }
@@ -247,8 +265,32 @@ export function projectSemanticEpoch(
   });
   const cut = provenance.items.findIndex(item => item.ref === epoch.coveredThroughRef);
   if (cut < 0) throw new Error("Semantic epoch anchor is missing");
+  // A persisted v1/v2 epoch may have been written by an older rotation policy
+  // which only checked that every call ID appeared somewhere in the results.
+  // Verify settled pairing again before masking any historical tool evidence.
+  if (!coveredCallsAreSettled(parsed, cut)) {
+    throw new Error("Semantic epoch covered tool calls are not safely paired");
+  }
 
   const pinRefs = new Set(semanticPinnedMessageRefs(parsed));
+  // Re-derive from the verified canonical prefix so that existing persisted
+  // epochs and restart/replay use the same exact evidence window.
+  const exactEvidenceIndices = new Set<number>();
+  let evidenceTokens = 0;
+  for (let index = parsed.context.messages.length - 1; index >= 0; index -= 1) {
+    if (exactEvidenceIndices.size >= MAX_EXACT_EVIDENCE_RESULTS) break;
+    const message = parsed.context.messages[index]!;
+    if (message.role !== "toolResult") continue;
+    const refs = semanticMessageRefs(parsed, index);
+    if (refs.length !== 1) continue;
+    const resultRef = isMaskableCoveredResult(parsed, index, cut);
+    if (!resultRef) continue;
+    const tokens = semanticMaskToolResult(message, resultRef).originalTokens;
+    if (tokens > MAX_EXACT_EVIDENCE_RESULT_TOKENS
+      || evidenceTokens + tokens > MAX_EXACT_EVIDENCE_TOTAL_TOKENS) continue;
+    exactEvidenceIndices.add(index);
+    evidenceTokens += tokens;
+  }
   const seenPinnedRefs = new Set<string>();
   const coveredMessages: CodexMessage[] = [];
   const suffixMessages: CodexMessage[] = [];
@@ -278,7 +320,7 @@ export function projectSemanticEpoch(
     }
     if (message.role === "toolResult") {
       const resultRef = isMaskableCoveredResult(parsed, messageIndex, cut);
-      if (resultRef) {
+      if (resultRef && !exactEvidenceIndices.has(messageIndex)) {
         const masked = semanticMaskToolResult(message as CodexToolResultMessage, resultRef);
         coveredMessages.push(masked.message);
         maskedResults += 1;
@@ -313,7 +355,7 @@ export function projectSemanticEpoch(
       maskedTokensEst,
       ledgerFiles: epoch.artifactLedger.filesTouched.length,
       ledgerCommands: epoch.artifactLedger.commands.length,
-      windowSize: 0,
+      windowSize: exactEvidenceIndices.size,
     },
   };
 }
@@ -328,16 +370,14 @@ export function preflightSemanticProjection(
   if (projected.modelId !== CHATGPT_WEB_MODEL_ID) {
     throw new Error("Semantic epoch preflight supports Sol only");
   }
-  // SEM projects the browser-facing clone first. Bigger Context then stages that
-  // projection using exactly the same part selection as normal Web submissions.
-  const parts = experimentalBiggerContext
-    ? resolveBiggerContextMultipartParts(projected, capabilities, experimentalSkillAttachments)
-    : undefined;
+  // The actual SEM browser transport is inline, even with Bigger Context.
+  // Multipart acknowledgements are not represented in epoch occupancy and
+  // cannot be preflighted as though they were sent by the SEM runtime.
   const compiled = compileChatGptWebPrompt(
     projected,
     capabilities,
     mode.localTools ? SEMANTIC_ESTIMATE_TURN_TOKEN : undefined,
-    { experimentalSkillAttachments, experimentalMultipartParts: parts },
+    { experimentalSkillAttachments },
   );
   if (projected._compactionRequest && compiled.trimmedCompactionMessages) {
     // A missing or unverified checkpoint cannot turn an oversized canonical
@@ -348,47 +388,16 @@ export function preflightSemanticProjection(
   const estimatedInputTokens = estimateCompiledChatGptWebInputTokens(compiled, projected.modelId);
   const firstMessageTokens = estimateCompiledChatGptWebMessageTokens(compiled, projected.modelId);
   const firstMessageChars = compiledChatGptWebMaxMessageChars(compiled);
-  let multipartMessageMetrics: Pick<SemanticProjectionMetrics, "stagingEffort" | "maxStageMessageTokens" | "finalMessageTokens"> = {};
-  if (compiled.multipart) {
-    const messages = compiledChatGptWebMessages(compiled);
-    const stages = messages.slice(0, -1);
-    const maxStageTokens = Math.max(...stages.map(text => estimateTokens(text, projected.modelId)));
-    const maxStageChars = Math.max(...stages.map(text => text.length));
-    const stagingMode = resolveChatGptWebMultipartStagingMode(
-      projected.modelId, capabilities, maxStageTokens, maxStageChars,
-    );
-    const final = formatChatGptWebMultipartCommit(compiled.multipart, `ctx_${"0".repeat(32)}`);
-    const finalMessageTokens = estimateTokens(final, projected.modelId)
-      + skillFileTokens(compiled.skillFiles, projected.modelId);
-    multipartMessageMetrics = {
-      stagingEffort: stagingMode.effort,
-      maxStageMessageTokens: maxStageTokens,
-      finalMessageTokens,
-    };
-    assertChatGptWebMultipartInputWithinLimits(
-      estimatedInputTokens, firstMessageTokens, projected.modelId, mode.effort,
-      capabilities, firstMessageChars, compiled.multipart.parts.length,
-      {
-        stagingEffort: stagingMode.effort,
-        maxStageMessageTokens: maxStageTokens,
-        maxStageChars,
-        finalMessageTokens,
-        finalMessageChars: final.length,
-        finalImageTokens: estimateChatGptWebImageTokens(compiled),
-      },
-      projected._chatgptModelFamily,
-    );
-  } else {
-    // An inline submission must still fit the unchanged one-message boundary.
-    assertChatGptWebInputWithinLimits(
-      estimatedInputTokens, firstMessageTokens, projected.modelId, mode.effort,
-      capabilities, firstMessageChars,
-    );
-  }
+  const ordinaryCapabilities = { ...capabilities, experimentalBiggerContext: false };
+  assertChatGptWebInputWithinLimits(
+    estimatedInputTokens, firstMessageTokens, projected.modelId, mode.effort,
+    ordinaryCapabilities, firstMessageChars,
+  );
   const { contextWindow } = resolveChatGptWebPhysicalContextLimits(
     projected.modelId,
     mode.effort,
-    { ...capabilities, experimentalBiggerContext },
+    // Bigger Context expands a multipart transaction, never one SEM message.
+    ordinaryCapabilities,
     projected._chatgptModelFamily,
   );
   return {
@@ -398,8 +407,6 @@ export function preflightSemanticProjection(
       firstMessageChars,
       estimatedInputTokens,
       physicalLimit: contextWindow,
-      ...multipartMessageMetrics,
-      ...(compiled.multipart ? { multipartParts: compiled.multipart.parts.length as 2 | 6 } : {}),
     },
   };
 }

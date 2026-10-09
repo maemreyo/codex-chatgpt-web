@@ -15,16 +15,26 @@ const TRACE_ID = /^[a-zA-Z0-9_-]{6,128}$/;
 const SEMANTIC = {
   semantic_turn: "threadHash epoch tier canonicalTokens nextWireTokens estimatedEpochOccupancy occupancyConfidence physicalLimit",
   semantic_rotation: "threadHash fromEpoch toEpoch reason firstMessageTokens firstMessageChars fitsSingleMessage maskedResults maskedTokensEst ledgerFiles ledgerCommands windowSize",
-  semantic_skip: "threadHash reason",
+  semantic_skip: "threadHash reason detail",
   semantic_validation_failed: "threadHash reason fellBackTo",
   semantic_reject: "threadHash kind mode effort estimatedMessageTokens messageChars ledgerValue class",
   semantic_fallback: "threadHash to reason",
   semantic_cost: "threadHash epoch checkpointTailRequests checkpointTailTokensEst epochRotations reseedInputTokensEst webCompactionSubmissions extraStageSubmissions maskedResults maskedTokensEst discardedTails legacyEquivalentSubmissions",
 };
 const ENUMS = {
+  detail: new Set([
+    "manual_interaction", "compaction", "model_mismatch", "model_family_missing",
+    "local_tools_disabled", "trusted_environment_missing", "launcher_missing",
+    "fresh_conversation", "thread_missing", "missing_turn_provenance",
+    "no_completed_turn", "missing_source_revision",
+  ]),
   reason: new Set([
     "ineligible", "no_fit", "cooldown", "cap_hit", "outstanding_tools", "unknown_occupancy",
-    "model_family_change", "digest_mismatch", "anchor_missing", "schema", "corrupt_store",
+    "low_pressure", "model_family_change", "digest_mismatch", "anchor_missing", "schema", "corrupt_store",
+    "web_compaction_cap_hit", "compaction_view_unavailable", "active_epoch_validation_failed",
+    "retained_epoch_preflight_failed", "rotation_cap_hit_epoch_no_fit", "rotation_cap_hit",
+    "rotation_first_message_no_fit", "rotation_cap_changed_before_commit",
+    "initial", "physical_pressure", "token_savings",
   ]),
   fellBackTo: new Set(["legacy", "recovery_error"]),
   kind: new Set(["http_413", "sse_input_too_large"]),
@@ -54,7 +64,7 @@ function safeField(field, value) {
   if (field === "traceId") return typeof value === "string" && TRACE_ID.test(value)
     ? /^trace_[a-f0-9]{24}$/.test(value) ? value
       : `trace_${createHash("sha256").update(value).digest("hex").slice(0, 24)}` : undefined;
-  if (field === "fitsSingleMessage") return value === true ? true : undefined;
+  if (field === "fitsSingleMessage") return typeof value === "boolean" ? value : undefined;
   if (ENUMS[field]) return ENUMS[field].has(value) ? value : undefined;
   if (field === "mode" || field === "effort") {
     return typeof value === "string" && /^(?:gpt-6-sol|gpt-6-luna|instant|medium|high|xhigh|extra_high|low|none|unknown)$/.test(value)

@@ -28,7 +28,7 @@ Use the ChatGPT Web models available on your account, including Pro, from Codex�
 
 Full harness mode connects ChatGPT to the current task’s files, terminal, tools, and approvals through MCP. Conversations stay tied to your Codex task, so you can keep working as the context grows.
 
-**6.1.8-rc.3 feature preview:** Cleaner agent cards, native quota protection controls in Settings, and experimental SEM alongside Bigger Context (live acceptance still pending). [Agents & Runtime settings guide](docs/AGENT_RUNTIME_USER_GUIDE.md) · [verification and live acceptance gates](docs/AGENT_RUNTIME_ACCEPTANCE.md). The installer links above still point to the published stable version while RC validation is ongoing.
+**6.1.8-rc.4 feature preview:** Cleaner agent cards, native quota protection controls in Settings, and experimental SEM alongside Bigger Context (live acceptance still pending). [Agents & Runtime settings guide](docs/AGENT_RUNTIME_USER_GUIDE.md) · [verification and live acceptance gates](docs/AGENT_RUNTIME_ACCEPTANCE.md). The installer links above still point to the published stable version while RC validation is ongoing.
 
 <div id="get-started"><a id="quick-start"></a></div>
 

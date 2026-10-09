@@ -14,6 +14,7 @@ import { basename, isAbsolute, join, relative, resolve, toNamespacedPath } from 
 import { isDeepStrictEqual } from "node:util";
 import { expandUserPath } from "../../config";
 import { findTopLevelAssignment } from "../../codex-integration-document";
+import { semanticCanonicalJson } from "../../responses/semantic-provenance";
 import type { CodexTool } from "../../types";
 import type {
   ChatGptRootThreadMetadata,
@@ -29,6 +30,7 @@ const CODEX_ID = new RegExp(`^${CODEX_ID_SOURCE}$`, "i");
 const ROLLOUT_READ_CHUNK_BYTES = 64 * 1024;
 const MAX_ROLLOUT_JSON_LINE_BYTES = 16 * 1024 * 1024;
 const MAX_ROLLOUT_DIRECTORY_ENTRIES = 100_000;
+const MAX_SEMANTIC_ROLLOUT_BYTES = 64 * 1024 * 1024;
 
 type IndexedRollout =
   | { kind: "unavailable" }
@@ -662,4 +664,85 @@ export function resolveCurrentCodexRolloutEnvironment(options: {
     throw new Error("Codex has multiple canonical rollouts for the requested current turn");
   }
   return matching[0]!;
+}
+
+/**
+ * Attribute only exact, server-recorded user items to native turns. The caller
+ * must already have accepted the current request's trusted environment. No
+ * inferred ownership is returned for unmatched, reordered or ambiguous items.
+ */
+export function verifiedCodexSemanticUserTurns(options: {
+  codexHome: string;
+  lineage: RolloutIdentity;
+  turnId: string;
+  items: readonly { itemId: string; canonicalJson: string }[];
+  currentTurnAlreadyAttributed?: boolean;
+}): Map<string, string> | undefined {
+  const { codexHome, lineage, turnId, items } = options;
+  if (!CODEX_ID.test(lineage.threadId) || !CODEX_ID.test(turnId) || items.length === 0
+    || ("parentThreadId" in lineage && !CODEX_ID.test(lineage.parentThreadId))) return undefined;
+  if (new Set(items.map(item => item.itemId)).size !== items.length) return undefined;
+
+  const indexed = indexedRollout(configuredSqliteHome(codexHome), lineage);
+  const candidates = indexed.kind === "found" ? [indexed.path] : scanCanonicalRollouts(codexHome, lineage.threadId);
+  const matches: Map<string, string>[] = [];
+  for (const candidate of candidates) {
+    const path = validateRolloutPath(codexHome, candidate, lineage.threadId);
+    const fd = openSync(path, "r");
+    try {
+      const size = fstatSync(fd).size;
+      if (!Number.isSafeInteger(size) || size <= 0 || size > MAX_SEMANTIC_ROLLOUT_BYTES) continue;
+      validateSessionMeta(firstRolloutRecord(fd, size), lineage);
+      const latest = latestTurnContext(fd, size);
+      if (latest?.turn_id !== turnId) continue;
+      validateMetadataConsistency(lineage, environmentFromTurnContext(latest, turnId, undefined));
+
+      const wanted = new Map(items.map(item => [item.itemId, item.canonicalJson]));
+      const requestedOrder = [...wanted.keys()];
+      const verified = new Map<string, string>();
+      let currentTask: string | undefined;
+      let position = 0;
+      let pending = Buffer.alloc(0);
+      let malformed = false;
+      while (position < size && !malformed) {
+        const length = Math.min(ROLLOUT_READ_CHUNK_BYTES, size - position);
+        const chunk = Buffer.alloc(length);
+        if (readSync(fd, chunk, 0, length, position) !== length) throw new Error("Codex rollout changed during semantic provenance verification");
+        position += length;
+        const data = Buffer.concat([pending, chunk]);
+        let start = 0;
+        for (let end = data.indexOf(0x0a); end >= 0; end = data.indexOf(0x0a, start)) {
+          const line = data.subarray(start, end);
+          start = end + 1;
+          if (!line.length) continue;
+          if (line.length > MAX_ROLLOUT_JSON_LINE_BYTES) { malformed = true; break; }
+          const event = parseJsonLine(line);
+          const payload = record(event.payload);
+          if (event.type === "event_msg" && payload?.type === "task_started") {
+            currentTask = typeof payload.turn_id === "string" ? payload.turn_id : undefined;
+          }
+          if (event.type !== "response_item" || payload?.type !== "message" || payload.role !== "user"
+            || typeof payload.id !== "string" || !wanted.has(payload.id)) continue;
+          const metadata = record(payload.internal_chat_message_metadata_passthrough);
+          const owner = metadata?.turn_id;
+          if (!currentTask || owner !== currentTask || verified.has(payload.id)
+            || payload.id !== requestedOrder[verified.size]) { malformed = true; break; }
+          const exact = { ...payload };
+          delete exact.internal_chat_message_metadata_passthrough;
+          if (semanticCanonicalJson(exact) !== wanted.get(payload.id)) { malformed = true; break; }
+          verified.set(payload.id, currentTask);
+        }
+        pending = Buffer.from(data.subarray(start));
+        if (pending.length > MAX_ROLLOUT_JSON_LINE_BYTES) malformed = true;
+      }
+      if (malformed || pending.length !== 0) continue;
+      // Every requested user item must be proven by the same canonical rollout.
+      if (verified.size !== wanted.size
+        || (!options.currentTurnAlreadyAttributed && ![...verified.values()].includes(turnId))) continue;
+      matches.push(verified);
+    } finally {
+      closeSync(fd);
+    }
+  }
+  return matches.length === 1 ? matches[0] : undefined;
 }

@@ -39,8 +39,10 @@ export interface CodexSemanticCanonicalItemV1 {
 
 export interface CodexSemanticProvenanceV1 {
   version: 1;
-  digestPolicyVersion: 1;
+  digestPolicyVersion: 1 | 2 | 3;
   items: CodexSemanticCanonicalItemV1[];
+  /** Ephemeral top-level tool declarations, alongside inline additional_tools. */
+  toolRegistrySpecs?: unknown[];
   /** Canonical raw source refs contributing to each parsed context.messages entry. */
   messageSourceRefs: string[][];
   replayPrefixLength: number;
