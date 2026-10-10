@@ -2,6 +2,20 @@
 
 Status: experimental, opt-in, default off.
 
+## Active tool-result pressure policy (2026-10-10)
+
+At the user's explicit request, accumulated occupancy and unknown occupancy are
+advisory. They emit a content-free pressure warning and deliver the complete,
+unchanged pending tool-result batch normally. They do not require canonical
+compaction and do not emit `chatgpt_active_turn_compaction_required`. This policy
+supersedes the earlier strict S6 pressure-boundary requirements below.
+
+An individual result exceeding the entire physical working set still fails before
+delivery. No results are truncated, no tools are re-executed, and reconnect replay
+remains idempotent. Explicit canonical compaction and real browser rejection
+handling remain available. A physical browser rejection is still possible; an
+occupancy estimate alone no longer stops work.
+
 ## Bigger Context compatibility
 
 SEM can run alongside Bigger Context in automatic ChatGPT browser mode. Bigger Context retains
@@ -22,13 +36,13 @@ effort and its learned rejection ceiling. Active SEM epochs use one inline brows
 submission, never multipart. When the Launcher loses the retained tab, the full
 projected prompt is preflighted before sending, and the physical occupancy ledger
 is rebased for the fresh conversation. Reused tabs retain
-their existing occupancy evidence; occupancy that cannot be reconstructed fails closed for
+their existing occupancy evidence; occupancy that cannot be reconstructed is advisory for
 tool-result delivery. `semantic_cost` is emitted only for active SEM epochs after
 a successful browser response or an acknowledged submission; failed attempts
 before submission are excluded.
 The physical tool-result guard also applies to the first canonical turn and
 epochless fallbacks when SEM is enabled. A retained tab without a verified
-process-local occupancy ledger cannot accept another tool-result batch. For
+process-local occupancy ledger emits an advisory warning while delivering the batch. For
 canonical Bigger Context, accepted multipart stages and the final submission
 are charged to that physical ledger; individual oversized tool results return
 the terminal `semantic_atomic_result_too_large` error because Web compaction

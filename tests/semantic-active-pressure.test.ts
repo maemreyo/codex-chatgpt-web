@@ -128,7 +128,7 @@ function fixture(toolsOnFirst = false) {
   };
 }
 
-test("SEM guards the first canonical tool-result batch before any epoch can exist", async () => {
+test.each(["accumulated_occupancy", "unknown_occupancy"])("SEM continues the complete batch under advisory pressure: %s", async reason => {
   const f = fixture(true);
   try {
     const environment = `<environment_context><cwd>${f.dir}</cwd><filesystem><workspace_roots><root>${f.dir}</root></workspace_roots><permission_profile type="disabled"><file_system type="unrestricted" /></permission_profile></filesystem></environment_context>`;
@@ -154,14 +154,20 @@ test("SEM guards the first canonical tool-result batch before any epoch can exis
     if (!ledger) throw new Error("Missing first-turn canonical occupancy guard");
     expect(ledger.confidence).toBe("known");
     ledger.record("retained-pressure", ledger.physicalLimit - 12_000);
+    if (reason === "unknown_occupancy") ledger.known = false;
     const complete = ids.flatMap((id, index) => [
       { type: "function_call", call_id: id, name: "exec_command", arguments: JSON.stringify({ cmd: `fake-tool-${index + 1}` }) },
       { type: "function_call_output", call_id: id, output: `EXACT-FIRST-TURN-RESULT-${index}` },
     ]);
     const events: AdapterEvent[] = [];
-    // Production HTTP path must reject before SSE starts, leaving this exact
-    // batch available to the existing explicit canonical-compaction path.
     const config = defaultConfig("full");
+    const oversized = complete.map(item => item.type === "function_call_output"
+      ? { ...item, output: "word ".repeat(120_000) } : item);
+    const atomic = adapter.preflightTurn!(sourceRequest([...canonical, ...oversized]));
+    expect(atomic).toMatchObject({ code: "semantic_atomic_result_too_large", retryable: false });
+    expect(f.delivered).toHaveLength(0);
+    expect(source?.outstanding()).toHaveLength(2);
+    expect(adapter.preflightTurn!(sourceRequest([...canonical, ...complete]))).toBeUndefined();
     for (const stream of [true, false]) {
       const response = await responseRequest(new Request("http://127.0.0.1/v1/responses", {
         method: "POST", body: JSON.stringify({
@@ -169,25 +175,23 @@ test("SEM guards the first canonical tool-result batch before any epoch can exis
           model: "chatgpt-web/high", stream,
         }),
       }), config, () => adapter, { rememberState: false });
-      expect(response.status).toBe(400);
-      expect(response.headers.get("content-type")).toContain("application/json");
-      expect(await response.json()).toMatchObject({ error: {
-        code: "chatgpt_active_turn_compaction_required", retryable: false,
-      } });
-      expect(f.delivered).toHaveLength(0);
-      expect(source?.outstanding()).toHaveLength(2);
+      expect(response.status).toBe(200);
+      const wire = await response.text();
+      expect(wire).toContain('"completed"');
+      expect(wire).not.toContain("chatgpt_active_turn_compaction_required");
+      expect(f.delivered.map(entry => entry.callId)).toEqual(ids);
+      expect(source?.outstanding()).toHaveLength(0);
       expect(f.toolSubmissions).toBe(1);
     }
     await adapter.runTurn!(sourceRequest([...canonical, ...complete]), { headers: new Headers() }, event => events.push(event));
-    expect(events.at(-1)).toMatchObject({ type: "error", code: "chatgpt_active_turn_compaction_required", status: 409 });
-    expect(f.delivered).toHaveLength(0);
-    expect(source?.outstanding()).toHaveLength(2);
+    expect(events.at(-1)).toMatchObject({ type: "done", stopReason: "stop" });
+    expect(f.delivered.map(entry => entry.callId)).toEqual(ids);
   } finally {
     await f.close();
   }
 });
 
-test("S8: atomic multi-tool pressure -> canonical Web compaction -> delta-only native continuation", async () => {
+test("S8: advisory pressure delivers once -> explicit Web compaction -> delta-only native continuation", async () => {
   const f = fixture();
   try {
     const environment = `<environment_context><cwd>${f.dir}</cwd><filesystem><workspace_roots><root>${f.dir}</root></workspace_roots><permission_profile type="disabled"><file_system type="unrestricted" /></permission_profile></filesystem></environment_context>`;
@@ -244,17 +248,15 @@ test("S8: atomic multi-tool pressure -> canonical Web compaction -> delta-only n
       .map((item, i) => ({ callId: ids[i]!, content: (item as { output: string }).output })))).toBeFalse();
     const failed: AdapterEvent[] = [];
     await adapter.runTurn!(active, { headers: new Headers() }, event => failed.push(event));
-    expect(failed.at(-1)).toMatchObject({ type: "error", status: 409,
-      code: "chatgpt_active_turn_compaction_required", retryable: false });
-    expect(f.delivered).toHaveLength(0);
-    expect(source?.outstanding().map(request => request.callId)).toEqual(ids);
-    expect((await f.broker.nextToolBatch(f.token)).map(request => request.callId)).toEqual(ids);
+    expect(failed.at(-1)).toMatchObject({ type: "done", stopReason: "stop" });
+    expect(f.delivered.map(entry => entry.callId)).toEqual(ids);
+    expect(source?.outstanding()).toHaveLength(0);
 
     const replay: AdapterEvent[] = [];
     await adapter.runTurn!(sourceRequest(fullCanonical), { headers: new Headers() }, event => replay.push(event));
     expect(replay).toEqual(failed);
     expect(f.toolSubmissions).toBe(2);
-    expect(f.delivered).toHaveLength(0);
+    expect(f.delivered.map(entry => entry.callId)).toEqual(ids);
 
     const config = defaultConfig("full");
     config.experimentalWebCompactor = true;
@@ -264,12 +266,10 @@ test("S8: atomic multi-tool pressure -> canonical Web compaction -> delta-only n
         ...active._rawBody as object, model: "chatgpt-web/high", stream: true,
       }),
     }), config, () => adapter, { rememberState: false });
-    expect(pressureResponse.status).toBe(400);
-    expect(await pressureResponse.json()).toMatchObject({ error: {
-      code: "chatgpt_active_turn_compaction_required", retryable: false,
-    } });
-    expect(f.delivered).toHaveLength(0);
-    expect(source?.outstanding().map(request => request.callId)).toEqual(ids);
+    expect(pressureResponse.status).toBe(200);
+    expect(await pressureResponse.text()).not.toContain("chatgpt_active_turn_compaction_required");
+    expect(f.delivered.map(entry => entry.callId)).toEqual(ids);
+    expect(source?.outstanding()).toHaveLength(0);
     const compactBody = {
       model: nativeModel, stream: false, reasoning: { effort: "high" },
       client_metadata: turnMetadata("s8_active_canonical_compact", true),
