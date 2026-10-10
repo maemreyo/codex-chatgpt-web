@@ -82,6 +82,9 @@ interface SafeTurnControl {
 
 interface TurnChannel {
   traceId: string;
+  oversizedResults: Map<string, { callId: string; canonical: string; digest: string }>;
+  /** Digest-only receipts survive lost completion acknowledgments. */
+  completedResults: Map<string, string>;
   externalOwner: boolean;
   environment: PendingTurn;
   bindingId?: string;
@@ -127,6 +130,10 @@ interface BrokerRequest {
     | "owner_safe_wait_completion"
     | "owner_request_compaction"
     | "owner_compaction_delivery_count"
+    | "owner_store_oversized_result"
+    | "owner_reserve_oversized_results"
+    | "read_oversized_result"
+    | "read_compaction_evidence"
     | "safe_start"
     | "safe_complete"
     | "activity_complete"
@@ -148,6 +155,11 @@ interface BrokerRequest {
   observation?: NativeToolDiagnosticFields;
   revision?: number;
   toolResult?: BrokerToolResult;
+  canonical?: string;
+  entries?: Array<{ callId: string; canonical: string }>;
+  reference?: string;
+  offset?: number;
+  length?: number;
   handoffId?: string;
   summary?: string;
   surfaceNonce?: string;
@@ -164,6 +176,9 @@ interface BrokerResponse {
 
 const brokers = new Map<string, TurnBroker>();
 const MAX_BROKER_LINE_CHARS = 67_108_864;
+export const MAX_OVERSIZED_RESULT_CHARS = 8_000_000;
+export const MAX_OVERSIZED_TURN_CHARS = MAX_OVERSIZED_RESULT_CHARS * 3;
+export const MAX_OVERSIZED_RESULT_CHUNK_CHARS = 8_192;
 const MAX_RETIRED_TURN_HANDLES = 64;
 const RELAY_DIAGNOSTIC_STAGES = new Set([
   "mcp_ingress", "mcp_reply_sent", "mcp_reply_send_failed",
@@ -250,6 +265,8 @@ export interface TurnBrokerOwner {
   ): { confirmed: true; duplicate: boolean } | Promise<{ confirmed: true; duplicate: boolean }>;
   nextToolBatch(token: string, signal?: AbortSignal): Promise<BrokerToolRequest[]>;
   completeTool(token: string, callId: string, result: BrokerToolResult): void | Promise<void>;
+  storeOversizedResult(token: string, callId: string, canonical: string): string | Promise<string>;
+  reserveOversizedResults(token: string, entries: Array<{ callId: string; canonical: string }>): void | Promise<void>;
   waitForSafeStart(token: string, signal?: AbortSignal): Promise<void>;
   waitForSafeCompletion(token: string, signal?: AbortSignal): Promise<string>;
   requestCompaction(token: string, queuedResult: BrokerToolResult): number | Promise<number>;
@@ -290,6 +307,8 @@ export class TurnBroker implements TurnBrokerOwner {
   private server?: Server;
   private startPromise?: Promise<void>;
   private socketIdentity?: { dev: number; ino: number };
+  private readonly sockets = new Set<Socket>();
+  private closing = false;
 
   private constructor(readonly socketPath: string) {}
 
@@ -311,6 +330,7 @@ export class TurnBroker implements TurnBrokerOwner {
     handlePrefix = "turn",
   ): Promise<string> {
     await this.start();
+    if (this.closing) throw new Error("turn broker is shutting down");
     this.prune();
     if (externalOwner && !this.acceptingExternalOwners) {
       throw new Error("turn broker is draining and does not accept new external owners");
@@ -321,6 +341,8 @@ export class TurnBroker implements TurnBrokerOwner {
     const token = opaqueId(handlePrefix);
     const channel: TurnChannel = {
       traceId,
+      oversizedResults: new Map(),
+      completedResults: new Map(),
       externalOwner,
       environment: {
         ...environment,
@@ -372,7 +394,21 @@ export class TurnBroker implements TurnBrokerOwner {
     ttlMs = 120_000,
   ): Promise<CompactionTransactionHandle> {
     await this.start();
+    if (this.closing) throw new Error("turn broker is shutting down");
     return this.compactionTransactions.begin(traceId, ttlMs);
+  }
+
+  attachCompactionEvidence(
+    token: string, handoffId: string, entries: readonly { callId: string; canonical: string }[],
+  ): void {
+    this.compactionTransactions.attachEvidence(token, handoffId, entries);
+  }
+
+  /** Snapshot only already-accepted canonical results; never re-execute pending native calls. */
+  snapshotOversizedResults(token: string): Array<{ callId: string; canonical: string }> {
+    const channel = this.channels.get(token);
+    if (!channel) throw new Error("compaction source token is invalid or expired");
+    return [...channel.oversizedResults.values()].map(({ callId, canonical }) => ({ callId, canonical }));
   }
 
   waitForCompactionHandoff(token: string, signal?: AbortSignal): Promise<string> {
@@ -458,13 +494,20 @@ export class TurnBroker implements TurnBrokerOwner {
     this.prune();
     const channel = this.channels.get(token);
     if (!channel) throw new Error("turn token is invalid or expired");
-    this.assertSafeHarnessRunning(channel, true);
     const invocation = channel.invocations.get(callId);
-    if (!invocation) throw new Error(`tool call is not pending: ${callId}`);
+    const digest = createHash("sha256").update(JSON.stringify(result)).digest("hex");
+    if (!invocation) {
+      // A lost ACK can arrive after Zero Risk already reached its terminal
+      // state. An identical receipt is safe to acknowledge without reopening it.
+      if (channel.completedResults.get(callId) === digest) return;
+      throw new Error(`tool call is not pending or completed result differs: ${callId}`);
+    }
+    this.assertSafeHarnessRunning(channel, true);
     if (!channel.deliveredCallIds.delete(callId)) {
       throw new Error(`tool call was completed before it was delivered: ${callId}`);
     }
     channel.invocations.delete(callId);
+    channel.completedResults.set(callId, digest);
     const failureKind = nativeToolSafetyFailure(result);
     if (invocation.diagnosticId) emitNativeToolDiagnostic({
       stage: "codex_result_received", diagnosticId: invocation.diagnosticId,
@@ -475,6 +518,44 @@ export class TurnBroker implements TurnBrokerOwner {
     });
     console.info(`[chatgpt-web] broker trace=${channel.traceId} completed call=${callId.slice(0, 17)} pending=${channel.invocations.size}`);
     invocation.resolve(result);
+  }
+
+  /** Keep exact canonical data behind the active turn's broker binding, with no disk or log copy. */
+  storeOversizedResult(token: string, callId: string, canonical: string): string {
+    this.reserveOversizedResults(token, [{ callId, canonical }]);
+    return callId;
+  }
+
+  /** All-or-nothing reservation across existing references and the new batch. */
+  reserveOversizedResults(token: string, entries: Array<{ callId: string; canonical: string }>): void {
+    const channel = this.channels.get(token);
+    if (!channel || channel.completionCommitted || !Array.isArray(entries)) {
+      throw new Error("oversized result reservation requires an active turn");
+    }
+    const staged = new Map<string, { callId: string; canonical: string; digest: string }>();
+    let total = [...channel.oversizedResults.values()].reduce((sum, value) => sum + value.canonical.length, 0);
+    for (const entry of entries) {
+      if (typeof entry?.callId !== "string" || typeof entry.canonical !== "string") {
+        throw new Error("oversized result reservation entry is invalid");
+      }
+      const { callId, canonical } = entry;
+      if (canonical.length > MAX_OVERSIZED_RESULT_CHARS) throw new Error("oversized result exceeds in-memory reference cap");
+      const digest = createHash("sha256").update(canonical).digest("hex");
+      const current = channel.oversizedResults.get(callId) ?? staged.get(callId);
+      if (current) {
+        if (current.digest !== digest || current.canonical !== canonical) {
+          throw new Error("canonical tool result changed during reconnect");
+        }
+        continue;
+      }
+      if (!channel.invocations.has(callId) || !channel.deliveredCallIds.has(callId)) {
+        throw new Error("oversized result has no pending tool call");
+      }
+      total += canonical.length;
+      if (total > MAX_OVERSIZED_TURN_CHARS) throw new Error("oversized result turn storage cap exceeded");
+      staged.set(callId, { callId, canonical, digest });
+    }
+    for (const [callId, entry] of staged) channel.oversizedResults.set(callId, entry);
   }
 
   beginCompletionFence(token: string): number | undefined {
@@ -773,12 +854,19 @@ export class TurnBroker implements TurnBrokerOwner {
   }
 
   async close(): Promise<void> {
+    this.closing = true;
+    // An already-started probe can create the listener after close() starts.
+    // Wait for that transition, then destroy the actual listener and clients.
+    try { await this.startPromise; } catch { /* A failed probe owns no listener. */ }
     this.compactionTransactions.close();
     for (const token of [...this.channels.keys()]) this.revoke(token);
     const server = this.server;
     this.server = undefined;
     this.startPromise = undefined;
     if (brokers.get(this.socketPath) === this) brokers.delete(this.socketPath);
+    // A client may have sent only a partial frame. Such sockets have no pending
+    // broker operation to revoke and would otherwise keep server.close() open.
+    for (const socket of this.sockets) socket.destroy();
     if (server?.listening) {
       await new Promise<void>((resolveClose, rejectClose) => server.close(error => {
         if (!error || (error as NodeJS.ErrnoException).code === "ERR_SERVER_NOT_RUNNING") resolveClose();
@@ -796,8 +884,9 @@ export class TurnBroker implements TurnBrokerOwner {
   }
 
   private start(): Promise<void> {
+    if (this.closing) return Promise.reject(new Error("turn broker is shutting down"));
     if (this.startPromise) return this.startPromise;
-    this.startPromise = new Promise<void>((resolveStart, rejectStart) => {
+    const startup = new Promise<void>((resolveStart, rejectStart) => {
       const windowsPipe = isWindowsPipeEndpoint(this.socketPath);
       if (!windowsPipe) {
         // sun_path is a fixed-size field in the kernel, so an over-long path fails inside listen()
@@ -889,16 +978,33 @@ export class TurnBroker implements TurnBrokerOwner {
         });
       });
     });
-    return this.startPromise;
+    this.startPromise = startup;
+    // A failed listen can be retried after the socket obstruction is removed.
+    // Do not cache the rejected promise or a non-listening server instance.
+    void startup.catch(() => {
+      if (this.startPromise === startup) {
+        this.startPromise = undefined;
+        this.server = undefined;
+      }
+    });
+    return startup;
   }
 
   private handleSocket(socket: Socket): void {
+    if (this.closing) {
+      socket.destroy();
+      return;
+    }
+    this.sockets.add(socket);
     let buffered = "";
     let handled = false;
     const disconnected = new AbortController();
     socket.setEncoding("utf8");
     socket.on("error", () => {});
-    socket.once("close", () => disconnected.abort());
+    socket.once("close", () => {
+      this.sockets.delete(socket);
+      disconnected.abort();
+    });
     socket.on("data", chunk => {
       if (handled) return;
       buffered += chunk;
@@ -940,20 +1046,28 @@ export class TurnBroker implements TurnBrokerOwner {
     if (!request || typeof request !== "object" || typeof request.id !== "string" || request.id.length === 0 || request.id.length > 256) {
       throw new Error("turn broker request id is invalid");
     }
-    if (!["claim", "resolve", "release", "invoke", "owner_status", "owner_register", "owner_register_safe", "owner_update", "owner_safe_sent", "owner_next", "owner_complete", "owner_completion_fence_begin", "owner_completion_fence_commit", "owner_wait_retirement", "owner_revoke", "owner_safe_wait_start", "owner_safe_wait_completion", "owner_request_compaction", "owner_compaction_delivery_count", "safe_start", "safe_complete", "activity_complete", "submit_compaction_handoff", "diagnostic_observe"].includes(request.method)) {
+    if (!["claim", "resolve", "release", "invoke", "owner_status", "owner_register", "owner_register_safe", "owner_update", "owner_safe_sent", "owner_next", "owner_complete", "owner_store_oversized_result", "owner_reserve_oversized_results", "read_oversized_result", "read_compaction_evidence", "owner_completion_fence_begin", "owner_completion_fence_commit", "owner_wait_retirement", "owner_revoke", "owner_safe_wait_start", "owner_safe_wait_completion", "owner_request_compaction", "owner_compaction_delivery_count", "safe_start", "safe_complete", "activity_complete", "submit_compaction_handoff", "diagnostic_observe"].includes(request.method)) {
       throw new Error("turn broker method is invalid");
     }
   }
 
   private async dispatch(request: BrokerRequest, socketSignal?: AbortSignal): Promise<unknown> {
     this.prune();
+    if (request.method === "read_compaction_evidence") {
+      if (!request.token || !request.handoffId || !request.reference) {
+        throw new Error("compaction read requires its one-shot control binding and reference");
+      }
+      return this.compactionTransactions.readEvidence(
+        request.token, request.handoffId, request.reference, request.offset!, request.length!,
+      );
+    }
     if (request.method === "diagnostic_observe") {
       const item = request.observation;
       // This local transport is a diagnostic sink only. Drop malformed data
       // without logging user-supplied payloads or conferring any authority.
       if (!item || !RELAY_DIAGNOSTIC_STAGES.has(item.stage)
         || typeof item.diagnosticId !== "string" || !/^diag_[a-f0-9]{16}$/.test(item.diagnosticId)
-        || (item.tool !== undefined && !/^codex_(?:turn_start|turn_complete|exec|write_stdin|apply_patch|view_image|tool_inventory|tool_call)$|^unknown$/.test(item.tool))
+        || (item.tool !== undefined && !/^codex_(?:turn_start|turn_complete|exec|write_stdin|result_chunk|apply_patch|view_image|tool_inventory|tool_call)$|^unknown$/.test(item.tool))
         || (item.outcome !== undefined && !["ok", "is_error", "timeout", "aborted", "unclassified_error"].includes(item.outcome))
         || (item.elapsedMs !== undefined && (!Number.isSafeInteger(item.elapsedMs) || item.elapsedMs < 0 || item.elapsedMs > 10_000_000))) {
         return { observed: false };
@@ -1007,7 +1121,7 @@ export class TurnBroker implements TurnBrokerOwner {
       return { submitted: true };
     }
     if (request.method === "owner_status") {
-      return { protocolVersion: 5, acceptingExternalOwners: this.acceptingExternalOwners };
+      return { protocolVersion: 7, acceptingExternalOwners: this.acceptingExternalOwners };
     }
     if (request.method === "owner_register") {
       const environment = ownerEnvironment(request.environment);
@@ -1052,6 +1166,19 @@ export class TurnBroker implements TurnBrokerOwner {
       }
       this.completeTool(request.token, request.callId, request.toolResult);
       return { completed: true };
+    }
+    if (request.method === "owner_store_oversized_result") {
+      if (!request.token || !request.callId || typeof request.canonical !== "string") {
+        throw new Error("oversized result registration requires a turn, call and content");
+      }
+      return { reference: this.storeOversizedResult(request.token, request.callId, request.canonical) };
+    }
+    if (request.method === "owner_reserve_oversized_results") {
+      if (!request.token || !Array.isArray(request.entries)) {
+        throw new Error("oversized result reservation requires a turn and entries");
+      }
+      this.reserveOversizedResults(request.token, request.entries);
+      return { reserved: true };
     }
     if (request.method === "owner_completion_fence_begin") {
       if (!request.token) throw new Error("turn owner token is required");
@@ -1208,7 +1335,24 @@ export class TurnBroker implements TurnBrokerOwner {
       return { released: true };
     }
     if (request.method === "resolve") return { environment: binding.channel.environment };
-    this.assertSafeHarnessRunning(binding.channel);
+    // Reading previously accepted evidence is allowed while compaction is in
+    // progress; new tool invocations still obey the compaction fence.
+    this.assertSafeHarnessRunning(binding.channel, request.method === "read_oversized_result");
+    if (request.method === "read_oversized_result") {
+      const entry = [...binding.channel.oversizedResults.values()]
+        .find(item => item.callId === request.reference);
+      if (!entry) throw new Error("oversized result reference is unavailable for this turn");
+      const offset = request.offset;
+      const length = request.length;
+      if (!Number.isSafeInteger(offset) || offset! < 0 || offset! > entry.canonical.length
+        || !Number.isSafeInteger(length) || length! < 1 || length! > MAX_OVERSIZED_RESULT_CHUNK_CHARS) {
+        throw new Error("oversized result read range is invalid");
+      }
+      const text = entry.canonical.slice(offset, offset! + length!);
+      return { reference: entry.callId, offset, text, totalChars: entry.canonical.length,
+        nextOffset: offset! + text.length, done: offset! + text.length === entry.canonical.length,
+        sha256: entry.digest };
+    }
     if (binding.channel.compactionRequested) {
       const result = binding.channel.compactionResult;
       if (!result) throw new Error("Codex context compaction control result is unavailable");
@@ -1431,6 +1575,31 @@ export async function callTurnBroker<T>(
  * working-tree DEV driver exercise the production adapter and MCP connector without binding a
  * Responses port or replacing the active Codex route.
  */
+function ambiguousOwnerAcknowledgement(error: unknown): boolean {
+  return error instanceof TurnBrokerTimeoutError
+    || (error instanceof Error && (
+      error.message.startsWith("ChatGPT web turn broker unavailable:")
+      || error.message === "ChatGPT web turn broker closed the connection"
+    ));
+}
+
+/** Retransmit only receipt-idempotent owner operations, never a native tool invocation. */
+async function acknowledgedOwnerOperation<T>(
+  socketPath: string,
+  request: Omit<BrokerRequest, "id">,
+): Promise<T> {
+  // These operations only acknowledge an already-known result or reserve its
+  // immutable content. A stalled socket must not hold up Codex indefinitely;
+  // broker receipt/digest fencing makes an ambiguous ACK safe to retransmit.
+  const acknowledgementTimeoutMs = 30_000;
+  try {
+    return await callTurnBroker<T>(socketPath, request, acknowledgementTimeoutMs);
+  } catch (error) {
+    if (!ambiguousOwnerAcknowledgement(error)) throw error;
+    return callTurnBroker<T>(socketPath, request, acknowledgementTimeoutMs);
+  }
+}
+
 export class RemoteTurnBroker implements TurnBrokerOwner {
   constructor(readonly socketPath: string) {}
 
@@ -1444,7 +1613,7 @@ export class RemoteTurnBroker implements TurnBrokerOwner {
         + ` (${error instanceof Error ? error.message : String(error)})`,
       );
     }
-    if (status.protocolVersion !== 5) {
+    if (status.protocolVersion !== 7) {
       throw new Error(`Unsupported DEV turn-owner protocol version: ${String(status.protocolVersion)}`);
     }
     if (status.acceptingExternalOwners !== true) {
@@ -1524,12 +1693,29 @@ export class RemoteTurnBroker implements TurnBrokerOwner {
   }
 
   async completeTool(token: string, callId: string, result: BrokerToolResult): Promise<void> {
-    await callTurnBroker(this.socketPath, {
+    await acknowledgedOwnerOperation(this.socketPath, {
       method: "owner_complete",
       token,
       callId,
       toolResult: result,
-    }, null);
+    });
+  }
+
+  async storeOversizedResult(token: string, callId: string, canonical: string): Promise<string> {
+    const response = await acknowledgedOwnerOperation<{ reference?: unknown }>(this.socketPath, {
+      method: "owner_store_oversized_result", token, callId, canonical,
+    });
+    if (typeof response.reference !== "string" || response.reference !== callId) {
+      throw new Error("DEV turn owner received an invalid oversized result reference");
+    }
+    return response.reference;
+  }
+
+  async reserveOversizedResults(token: string, entries: Array<{ callId: string; canonical: string }>): Promise<void> {
+    const response = await acknowledgedOwnerOperation<{ reserved?: unknown }>(this.socketPath, {
+      method: "owner_reserve_oversized_results", token, entries,
+    });
+    if (response.reserved !== true) throw new Error("DEV turn owner did not acknowledge oversized result reservation");
   }
 
   async waitForSafeStart(token: string, signal?: AbortSignal): Promise<void> {
