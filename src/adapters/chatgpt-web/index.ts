@@ -1558,14 +1558,11 @@ export function createChatGptWebAdapter(
       const pressure = source.runtime.semanticOccupancy?.batchPressureReason(results.map(result => ({
         callId: result.toolCallId, content: result.content,
       })));
-      if (!pressure) return;
+      if (pressure !== "atomic_result_oversize") return;
       return {
         type: "error", status: 400, errorType: "invalid_request_error", retryable: false,
-        code: pressure === "atomic_result_oversize"
-          ? "semantic_atomic_result_too_large" : "chatgpt_active_turn_compaction_required",
-        message: pressure === "atomic_result_oversize"
-          ? "A complete canonical tool result exceeds the browser's physical capacity. Use an independently available native recovery route."
-          : "The retained ChatGPT browser epoch cannot safely accept the complete tool-result batch. Request canonical Codex compaction with the unchanged batch before continuing this turn.",
+        code: "semantic_atomic_result_too_large",
+        message: "A complete canonical tool result exceeds the browser's physical capacity. Use an independently available native recovery route.",
       };
     },
     async runTurn(parsed, incoming, emit) {
@@ -2114,24 +2111,22 @@ export function createChatGptWebAdapter(
                 const batchPressure = occupancy?.batchPressureReason(results.map(message => ({
                   callId: message.toolCallId, content: message.content,
                 })));
-                if (occupancy && batchPressure) {
+                if (occupancy && batchPressure === "atomic_result_oversize") {
                   if (session.runtime.semanticThreadHash) emitSemanticLog({
                     event: "semantic_fallback",
                     threadHash: session.runtime.semanticThreadHash,
-                    to: batchPressure === "atomic_result_oversize" ? "recovery_error" : "compaction_required",
+                    to: "recovery_error",
                     reason: batchPressure,
                   });
-                  if (batchPressure === "atomic_result_oversize") {
-                    throw new ChatGptWebAdapterError(
-                      "A complete canonical tool result exceeds the browser's physical capacity, including during Web compaction. Use an independently available native recovery route.",
-                      { status: 409, errorType: "invalid_request_error", code: "semantic_atomic_result_too_large", retryable: false },
-                    );
-                  }
                   throw new ChatGptWebAdapterError(
-                    "The retained ChatGPT browser epoch cannot safely accept the complete tool-result batch. "
-                    + "Request canonical Codex compaction with the unchanged batch before continuing this turn.",
-                    { status: 409, errorType: "invalid_request_error", code: "chatgpt_active_turn_compaction_required", retryable: false },
+                    "A complete canonical tool result exceeds the browser's physical capacity, including during Web compaction. Use an independently available native recovery route.",
+                    { status: 409, errorType: "invalid_request_error", code: "semantic_atomic_result_too_large", retryable: false },
                   );
+                }
+                if (batchPressure && batchPressure !== "atomic_result_oversize") {
+                  // Estimated accumulated pressure and uncertain occupancy are advisory.
+                  // Deliver the unchanged batch once; the actual browser outcome owns failure.
+                  console.warn(`[chatgpt-web] semantic_pressure_advisory ${JSON.stringify({ reason: batchPressure })}`);
                 }
                 for (const message of results) {
                   await broker.completeTool(turnToken, message.toolCallId, brokerResult(message));

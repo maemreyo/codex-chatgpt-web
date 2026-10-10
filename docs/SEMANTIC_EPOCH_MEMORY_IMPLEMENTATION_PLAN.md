@@ -9,6 +9,20 @@ Upstream baseline: `92a356f` (`v6.1.5`); design originally reviewed against `b6c
 Current fork candidate: `fdb15ff` (`feat: scaffold semantic epoch memory safely`), not yet merged with `v6.1.5`
 Visibility: local opt-in experiment in launcher Settings (section 5.8). Not a quota or rate-limit feature.
 
+## Active tool-result pressure policy (2026-10-10)
+
+At the user's explicit request, accumulated occupancy and unknown occupancy are
+advisory. They emit a content-free pressure warning and deliver the complete,
+unchanged pending tool-result batch normally. They do not require canonical
+compaction and do not emit `chatgpt_active_turn_compaction_required`. This policy
+supersedes the earlier strict S6 pressure-boundary requirements below.
+
+An individual result exceeding the entire physical working set still fails before
+delivery. No results are truncated, no tools are re-executed, and reconnect replay
+remains idempotent. Explicit canonical compaction and real browser rejection
+handling remain available. A physical browser rejection is still possible; an
+occupancy estimate alone no longer stops work.
+
 ## 1. Review purpose
 
 This document proposes the next implementation slices for keeping a substantially larger native
