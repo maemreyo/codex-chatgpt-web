@@ -368,6 +368,10 @@ export interface ResponseRequestOptions {
   /** Controlled upstream stub for provider-routing tests; production uses the normal native transport. */
   fetchUpstream?: NativeFetch;
   nativeQuotaGuard?: NativeQuotaGuard;
+  /** Internal route marker. Caller JSON metadata cannot request compaction semantics. */
+  trustedCompactionRequest?: boolean;
+  /** Internal canonical compaction protocol marker. Never sourced from parsed caller fields. */
+  canonicalCompactionProtocol?: "v1" | "v2" | "memento";
 }
 
 const WEB_COMPACTOR_MODEL = "chatgpt-web/gpt-5.6-sol";
@@ -542,8 +546,7 @@ export async function responseRequest(
   }
   let compactionProtocol: ReturnType<typeof classifyCanonicalCompaction>;
   try {
-    compactionProtocol = config.experimentalWebCompactor === true
-      ? classifyCanonicalCompaction(canonicalBody, "responses") : undefined;
+    compactionProtocol = classifyCanonicalCompaction(canonicalBody, "responses");
   } catch (error) {
     return formatErrorResponse(400, "invalid_request_error", error instanceof Error ? error.message : String(error));
   }
@@ -578,6 +581,16 @@ export async function responseRequest(
   let route: ChatGptWebModelRoute;
   try {
     parsed = parseRequest(expanded);
+    if (options.canonicalCompactionProtocol) {
+      parsed._canonicalCompactionProtocol = options.canonicalCompactionProtocol;
+      parsed._compactionRequest = true;
+    } else if (compactionProtocol) {
+      parsed._canonicalCompactionProtocol = compactionProtocol;
+      parsed._compactionRequest = true;
+    } else if (options.trustedCompactionRequest === true) {
+      parsed._canonicalCompactionProtocol = "v1";
+      parsed._compactionRequest = true;
+    }
     route = routeChatGptWebRequest(parsed, config);
     if (config.experimentalBiggerContext && route.backendModel === CHATGPT_WEB_LUNA_BACKEND_MODEL) {
       throw new Error(CHATGPT_WEB_LUNA_BIGGER_CONTEXT_ERROR);
@@ -697,6 +710,19 @@ export async function responseRequest(
     });
   }
   const adapter = adapterFactory(provider);
+  // Native Codex retries unknown SSE failures and HTTP 409 even with retryable:false.
+  // Reject known physical pressure before committing SSE headers. This read-only
+  // check preserves the exact active source for a separate canonical compact request.
+  const preflightFailure = adapter.preflightTurn?.(parsed);
+  if (preflightFailure) {
+    options.onAdapterEvent?.(preflightFailure);
+    return Response.json({ error: {
+      type: preflightFailure.errorType ?? "invalid_request_error",
+      code: preflightFailure.code,
+      message: preflightFailure.message,
+      retryable: false,
+    } }, { status: preflightFailure.status ?? 400 });
+  }
   const queue = new AsyncEventQueue<AdapterEvent>();
   const abort = new AbortController();
   if (req.signal.aborted) abort.abort();
@@ -708,7 +734,10 @@ export async function responseRequest(
         queue.push(event);
       });
     } catch (error) {
-      const event: AdapterEvent = { type: "error", message: error instanceof Error ? error.message : String(error) };
+      const event: AdapterEvent = error instanceof ChatGptWebAdapterError
+        ? { type: "error", message: error.message, status: error.status,
+          errorType: error.errorType, code: error.code, retryable: error.retryable }
+        : { type: "error", message: error instanceof Error ? error.message : String(error) };
       options.onAdapterEvent?.(event);
       queue.push(event);
     } finally {
@@ -756,12 +785,17 @@ export async function responseRequest(
     toolSearchToolNames: maps.toolSearchToolNames,
     ...(compactionItem ? { compaction: true } : {}),
   });
-  // JSON compaction callers need a real 409 at an exhausted SEM budget.
-  // The streaming form has already sent its HTTP headers and carries the
-  // same typed error through response.failed instead.
+  // JSON callers need a real 409 for a terminal SEM recovery boundary. In particular,
+  // active-turn pressure cannot safely deliver the pending tool-result batch: only a
+  // separate canonical Codex compaction request may settle it. Do not replay this
+  // ordinary request or manufacture a compaction_trigger here. Streaming callers have
+  // already received SSE headers and get the same typed failure in response.failed.
   const failure = json.error as { code?: string; type?: string; message?: string } | undefined;
   if (json.status === "failed"
-    && (failure?.code === "semantic_web_compaction_cap_hit"
+    && (failure?.code === "chatgpt_active_turn_compaction_required"
+      || failure?.code === "semantic_epoch_recovery_required"
+      || failure?.code === "semantic_atomic_result_too_large"
+      || failure?.code === "semantic_web_compaction_cap_hit"
       || failure?.code === "semantic_cost_budget_unavailable")) {
     return Response.json(json, { status: 409 });
   }
@@ -855,7 +889,10 @@ export async function compactRequest(
     body: JSON.stringify({ ...raw, stream: false, previous_response_id: undefined, input: [...input, { type: "compaction_trigger" }] }),
     signal: req.signal,
   });
-  const response = await responseRequest(internal, config, adapterFactory, options);
+  const response = await responseRequest(internal, config, adapterFactory, {
+    ...options,
+    canonicalCompactionProtocol: "v1",
+  });
   if (!response.ok) return response;
   let body: {
     output?: unknown[];

@@ -66,7 +66,10 @@ test.each([
       // Context ingestion cannot mistake tool activity for acknowledgement of a part.
       expect(args[4]).toBe(stage === "send" ? progress : undefined);
       const lifecycle = args[5] as { onSendActivated(): Promise<void>; onSubmitted?: () => void };
-      if (stage !== "send") expect(lifecycle.onSubmitted).toBeUndefined();
+      // Multipart stages now expose a submission receipt callback so accepted
+      // context-ingestion Sends can be charged to the physical occupancy ledger.
+      // The fixture mocks the Send and must preserve that lifecycle contract.
+      expect(typeof lifecycle.onSubmitted).toBe("function");
       await lifecycle.onSendActivated();
       if (cancellationCase || (sizeRejected && stage === "multipart_stage_2_send")) {
         // An observed size rejection must not replace the user's explicit tab-close verdict.
@@ -141,7 +144,7 @@ test.each([
       prepareResume: prepare,
     }, owned ? "owned-surface" : undefined, page, retained);
     if (sizeRejected) {
-      await expect(run).rejects.toMatchObject({ code: "context_length_exceeded", retryable: false });
+      await expect(run).rejects.toMatchObject({ code: "chatgpt_message_too_large", retryable: false });
       expect(rejectionAbortedWait).toBeTrue();
       expect(sendBudgets).toHaveLength(2);
       expect(actions.filter(action => action === "ack")).toHaveLength(1);

@@ -162,6 +162,47 @@ function withCompactionAbort<T>(promise: Promise<T>, signal?: AbortSignal): Prom
   });
 }
 
+// The remote Zero Risk owner does not accept an abort signal for revocation.
+// Bound the cleanup acknowledgement separately from the caller's abort signal;
+// a timeout means the owner may still be revoking, not that revocation succeeded.
+const COMPACTION_REVOKE_TIMEOUT_MS = 5_000;
+
+async function revokeCompactionToken(broker: TurnBroker | TurnBrokerOwner, token: string): Promise<void> {
+  await withCompactionAbort(
+    Promise.resolve(broker.revoke(token)),
+    AbortSignal.timeout(COMPACTION_REVOKE_TIMEOUT_MS),
+  );
+}
+
+async function acquireCompactionToken(
+  source: ChatGptTurnSession,
+  broker: TurnBroker | TurnBrokerOwner,
+  signal?: AbortSignal,
+): Promise<string> {
+  const runtime = source.runtime;
+  if (runtime.mode !== "tools") throw new Error("Compaction token requires an active MCP tool boundary");
+  const tokenPromise = runtime.token;
+  try {
+    return await withCompactionAbort(tokenPromise, signal);
+  } catch (error) {
+    if (signal?.aborted) {
+      // The acquisition may complete after we returned the abort to Codex.
+      // Retire that late capability exactly once; never wait indefinitely for it.
+      void tokenPromise.then(token => {
+        void revokeCompactionToken(broker, token).catch(() => {
+          console.error("[chatgpt-web] late compaction token revocation was not confirmed");
+        });
+      }, () => {});
+    }
+    throw error;
+  }
+}
+
+async function brokerOperation<T>(operation: () => T | Promise<T>, signal?: AbortSignal): Promise<T> {
+  if (signal?.aborted) throw abortReason(signal);
+  return withCompactionAbort(Promise.resolve(operation()), signal);
+}
+
 export async function settleActiveCompactionSource(
   parsed: CodexParsedRequest,
   source: ChatGptTurnSession,
@@ -191,23 +232,33 @@ export async function settleActiveCompactionSource(
       );
     }
     let token: string | undefined;
+    let handoffStarted = false;
+    let failed = false;
+    let originalFailure: unknown;
     try {
-      token = await source.runtime.token;
-      broker.requestCompaction(token, interruptedByActiveCompaction());
+      const acquiredToken = await acquireCompactionToken(source, broker, signal);
+      token = acquiredToken;
+      // A broker acknowledgement can be lost after the browser accepted a
+      // result. Once settlement starts, any failure leaves delivery ambiguous.
+      // Retire this browser source; never replay its remaining batch in place.
+      handoffStarted = true;
+      await brokerOperation(() => broker.requestCompaction(acquiredToken, interruptedByActiveCompaction()), signal);
       for (const request of outstanding) {
         const result = results.get(request.callId)!;
-        await broker.completeTool(
-          token,
+        await brokerOperation(() => broker.completeTool(
+          acquiredToken,
           request.callId,
           toolResult(result),
-        );
+        ), signal);
         source.runtime.semanticOccupancy?.recordToolResult(request.callId, result.content);
         source.runtime.externalProgress.recordToolResult();
         source.markResultDelivered(request.callId);
       }
       const browserOutcome = await withCompactionAbort(source.browserOutcome, signal);
       if (browserOutcome.type === "error") throw browserOutcome.error;
-      const compactionInstructionDelivered = broker.compactionDeliveryCount(token) > 0;
+      const compactionInstructionDelivered = await brokerOperation(
+        () => broker.compactionDeliveryCount(acquiredToken), signal,
+      ) > 0;
       // The one structured checkpoint message reuses this exact retained tab. It must not race the
       // helper's /turn/end handshake for the response that consumed the canonical tool results.
       // `requestCompaction` leaves those results untouched and only intercepts a later tool call, so
@@ -218,10 +269,32 @@ export async function settleActiveCompactionSource(
         compactionInstructionDelivered,
       };
     } catch (error) {
-      if (signal?.aborted) source.cancel(abortReason(signal));
+      failed = true;
+      originalFailure = error;
+      if (handoffStarted || signal?.aborted) {
+        try {
+          source.cancel(signal?.aborted ? abortReason(signal)
+            : error instanceof Error ? error : new Error("Compaction source settlement failed"));
+        } catch {
+          // Preserve the original delivery failure; the caller also retires
+          // the exact retained conversation before allowing another trace.
+        }
+      }
       throw error;
     } finally {
-      if (token) await broker.revoke(token);
+      if (token) {
+        try {
+          await revokeCompactionToken(broker, token);
+        } catch (revocationError) {
+          if (failed) {
+            throw new AggregateError(
+              [originalFailure, revocationError],
+              "Compaction source settlement failed and broker revocation was not confirmed",
+            );
+          }
+          throw revocationError;
+        }
+      }
     }
   });
 }
@@ -248,22 +321,27 @@ export async function settleActiveZeroRiskCompactionSource(
       );
     }
     let token: string | undefined;
+    let handoffStarted = false;
+    let failed = false;
+    let originalFailure: unknown;
     try {
-      token = await source.runtime.token;
-      const interruptedQueued = await broker.requestCompaction(
-        token,
+      const acquiredToken = await acquireCompactionToken(source, broker, signal);
+      token = acquiredToken;
+      handoffStarted = true;
+      const interruptedQueued = await brokerOperation(() => broker.requestCompaction(
+        acquiredToken,
         interruptedByZeroRiskCompaction(),
-      );
+      ), signal);
       for (const [index, request] of outstanding.entries()) {
         const result = results.get(request.callId)!;
         const canonical = toolResult(result);
-        await broker.completeTool(
-          token,
+        await brokerOperation(() => broker.completeTool(
+          acquiredToken,
           request.callId,
           interruptedQueued === 0 && index === outstanding.length - 1
             ? withZeroRiskCompactionInstruction(canonical)
             : canonical,
-        );
+        ), signal);
         source.runtime.externalProgress.recordToolResult();
         source.markResultDelivered(request.callId);
       }
@@ -271,16 +349,38 @@ export async function settleActiveZeroRiskCompactionSource(
       if (browserOutcome.type === "error") throw browserOutcome.error;
       await withCompactionAbort(source.physicalSettlement, signal);
       const instructionDelivered = outstanding.length > 0
-        || await broker.compactionDeliveryCount(token) > 0;
+        || await brokerOperation(() => broker.compactionDeliveryCount(acquiredToken), signal) > 0;
       if (!instructionDelivered) return undefined;
       const summary = browserOutcome.answer.trim();
       if (!summary) throw new Error("The active Zero Risk response returned an empty compaction summary");
       return summary;
     } catch (error) {
-      if (signal?.aborted) source.cancel(abortReason(signal));
+      failed = true;
+      originalFailure = error;
+      if (handoffStarted || signal?.aborted) {
+        try {
+          source.cancel(signal?.aborted ? abortReason(signal)
+            : error instanceof Error ? error : new Error("Zero Risk compaction settlement failed"));
+        } catch {
+          // Never hide the original delivery failure. The retained source
+          // cannot safely continue after an ambiguous result acknowledgement.
+        }
+      }
       throw error;
     } finally {
-      if (token) await broker.revoke(token);
+      if (token) {
+        try {
+          await revokeCompactionToken(broker, token);
+        } catch (revocationError) {
+          if (failed) {
+            throw new AggregateError(
+              [originalFailure, revocationError],
+              "Zero Risk compaction settlement failed and broker revocation was not confirmed",
+            );
+          }
+          throw revocationError;
+        }
+      }
     }
   });
 }

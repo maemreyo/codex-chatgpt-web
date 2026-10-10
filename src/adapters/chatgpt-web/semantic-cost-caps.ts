@@ -12,7 +12,7 @@ export const SEMANTIC_WEB_COMPACTIONS_PER_HOUR = 4;
 type Kind = "rotations" | "compactions";
 type Charge = { at: number; operationId: string };
 type ThreadCharges = { rotations: Charge[]; compactions: Charge[] };
-type CostFile = { version: 1; threads: Record<string, ThreadCharges> };
+type CostFile = { version: 1 | 2; threads: Record<string, ThreadCharges> };
 
 function unavailable(reason: string): ChatGptWebAdapterError {
   return new ChatGptWebAdapterError(`Semantic cost budget state is unavailable (${reason}); no additional Web work was authorized.`, {
@@ -35,6 +35,7 @@ function validCharges(value: unknown): value is Charge[] {
 export class SemanticCostCaps {
   private threads = new Map<string, ThreadCharges>();
   private failed = false;
+  private legacyHoldUntil = 0;
 
   constructor(
     private readonly now: () => number = Date.now,
@@ -72,12 +73,13 @@ export class SemanticCostCaps {
     try {
       if (!existsSync(this.stateFile)) {
         this.threads = new Map();
+        this.legacyHoldUntil = 0;
         return;
       }
       const file: unknown = JSON.parse(readFileSync(this.stateFile, "utf8"));
       if (!file || typeof file !== "object" || Array.isArray(file)) throw Error("invalid budget file");
       const state = file as Partial<CostFile>;
-      if (state.version !== 1 || !state.threads || typeof state.threads !== "object"
+      if ((state.version !== 1 && state.version !== 2) || !state.threads || typeof state.threads !== "object"
         || Array.isArray(state.threads)) throw Error("invalid budget schema");
       const next = new Map<string, ThreadCharges>();
       for (const [key, entry] of Object.entries(state.threads)) {
@@ -87,6 +89,22 @@ export class SemanticCostCaps {
         }
         next.set(key, entry);
       }
+      // V1 persisted only hashes of (mutable execution namespace, native thread).
+      // Their ownership cannot be reconstructed. For at most one rolling hour,
+      // deny new reservations rather than let a settings change reset the cap.
+      // Once they expire, the first successful reservation upgrades to stable V2.
+      const now = this.now();
+      let holdUntil = 0;
+      if (state.version === 1) {
+        for (const entry of next.values()) {
+          for (const charge of [...entry.rotations, ...entry.compactions]) {
+            if (charge.at <= now && now - charge.at < SEMANTIC_COST_WINDOW_MS) {
+              holdUntil = Math.max(holdUntil, charge.at + SEMANTIC_COST_WINDOW_MS);
+            }
+          }
+        }
+      }
+      this.legacyHoldUntil = holdUntil;
       this.threads = next;
     } catch {
       this.failed = true;
@@ -109,6 +127,7 @@ export class SemanticCostCaps {
   private allowed(kind: Kind, threadId: string, operationId: string): boolean {
     this.refresh();
     if (!operationId.trim()) throw unavailable("missing operation identity");
+    if (this.legacyHoldUntil > this.now()) return false;
     const charges = this.active(threadId)[kind];
     return charges.some(charge => charge.operationId === digest(operationId))
       || charges.length < (kind === "rotations" ? this.maxRotations : this.maxCompactions);
@@ -126,7 +145,7 @@ export class SemanticCostCaps {
       this.refresh();
       const result = this.chargeLoaded(kind, threadId, operationId);
       if (result === "new") {
-        atomicWriteFile(this.stateFile, `${JSON.stringify({ version: 1, threads: Object.fromEntries(this.threads) })}\n`,
+        atomicWriteFile(this.stateFile, `${JSON.stringify({ version: 2, threads: Object.fromEntries(this.threads) })}\n`,
           { durable: true });
         // Persist the rename as well as file content on filesystems supporting directory fsync.
         if (process.platform !== "win32") {
@@ -148,6 +167,7 @@ export class SemanticCostCaps {
 
   private chargeLoaded(kind: Kind, threadId: string, operationId: string): "new" | "existing" | "denied" {
     if (!operationId.trim()) throw unavailable("missing operation identity");
+    if (this.legacyHoldUntil > this.now()) return "denied";
     const charges = this.active(threadId)[kind];
     const key = digest(operationId);
     if (charges.some(charge => charge.operationId === key)) return "existing";

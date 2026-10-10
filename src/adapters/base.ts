@@ -8,6 +8,8 @@ export interface IncomingMeta {
 
 export interface ProviderAdapter {
   name: string;
+  /** Read-only rejection before HTTP stream headers; runTurn must retain its own guards. */
+  preflightTurn?(parsed: CodexParsedRequest): Extract<AdapterEvent, { type: "error" }> | undefined;
   runTurn(
     parsed: CodexParsedRequest,
     incoming: IncomingMeta,

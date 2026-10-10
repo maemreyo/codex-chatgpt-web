@@ -14,6 +14,8 @@ export interface CodexParsedRequest {
    * metadata. Both run without local tools; their output contracts differ.
    */
   _compactionRequest?: boolean;
+  /** Internal canonical compaction protocol binding derived by the server. */
+  _canonicalCompactionProtocol?: "v1" | "v2" | "memento";
   /** Native compact.rs expects assistant text; remote v2 (the default) expects a compaction item. */
   _compactionResponseFormat?: "message";
   /**

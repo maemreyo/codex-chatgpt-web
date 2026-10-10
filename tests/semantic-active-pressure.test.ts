@@ -38,7 +38,7 @@ function sourceRequest(input: unknown[], turnId = sourceTurnId): CodexParsedRequ
   return parsed;
 }
 
-function fixture() {
+function fixture(toolsOnFirst = false) {
   const dir = mkdtempSync(join(tmpdir(), "s8-active-pressure-"));
   const socketPath = join(dir, "broker.sock");
   const provider: CodexProviderConfig = {
@@ -82,8 +82,9 @@ function fixture() {
       return "Fake retained compaction acknowledged";
     }
     toolSubmissions += 1;
+    if (toolsOnFirst && toolSubmissions === 1) await turn.onPreparedSelected?.(false);
     const prepared = await turn.prepare();
-    if (toolSubmissions === 1) {
+    if (toolSubmissions === 1 && !toolsOnFirst) {
       prepared.release();
       const answer = "S8 seed answer";
       turn.onTextDelta(answer);
@@ -126,6 +127,65 @@ function fixture() {
     },
   };
 }
+
+test("SEM guards the first canonical tool-result batch before any epoch can exist", async () => {
+  const f = fixture(true);
+  try {
+    const environment = `<environment_context><cwd>${f.dir}</cwd><filesystem><workspace_roots><root>${f.dir}</root></workspace_roots><permission_profile type="disabled"><file_system type="unrestricted" /></permission_profile></filesystem></environment_context>`;
+    const canonical: unknown[] = [
+      { type: "message", role: "developer", content: "Preserve all tool results" },
+      { type: "message", role: "user", content: [{ type: "input_text", text: environment }],
+        internal_chat_message_metadata_passthrough: { turn_id: sourceTurnId } },
+      { type: "message", role: "user", content: "First native tool task",
+        internal_chat_message_metadata_passthrough: { turn_id: sourceTurnId } },
+    ];
+    const adapter = createChatGptWebAdapter(f.provider);
+    const first = sourceRequest(canonical);
+    const firstEvents: AdapterEvent[] = [];
+    await adapter.runTurn!(first, { headers: new Headers() }, event => firstEvents.push(event));
+    const ids = firstEvents.filter((event): event is Extract<AdapterEvent, { type: "tool_call_start" }> =>
+      event.type === "tool_call_start").map(event => event.id);
+    expect(ids).toHaveLength(2);
+    const key = `${chatGptWebExecutionNamespace(f.provider)}:${chatGptTurnExecutionKey(first)}`;
+    const source = chatGptTurnSessions.find(key);
+    const ledger = source?.runtime.semanticOccupancy;
+    expect(ledger).toBeDefined();
+    expect(source?.outstanding()).toHaveLength(2);
+    if (!ledger) throw new Error("Missing first-turn canonical occupancy guard");
+    expect(ledger.confidence).toBe("known");
+    ledger.record("retained-pressure", ledger.physicalLimit - 12_000);
+    const complete = ids.flatMap((id, index) => [
+      { type: "function_call", call_id: id, name: "exec_command", arguments: JSON.stringify({ cmd: `fake-tool-${index + 1}` }) },
+      { type: "function_call_output", call_id: id, output: `EXACT-FIRST-TURN-RESULT-${index}` },
+    ]);
+    const events: AdapterEvent[] = [];
+    // Production HTTP path must reject before SSE starts, leaving this exact
+    // batch available to the existing explicit canonical-compaction path.
+    const config = defaultConfig("full");
+    for (const stream of [true, false]) {
+      const response = await responseRequest(new Request("http://127.0.0.1/v1/responses", {
+        method: "POST", body: JSON.stringify({
+          ...sourceRequest([...canonical, ...complete])._rawBody as object,
+          model: "chatgpt-web/high", stream,
+        }),
+      }), config, () => adapter, { rememberState: false });
+      expect(response.status).toBe(400);
+      expect(response.headers.get("content-type")).toContain("application/json");
+      expect(await response.json()).toMatchObject({ error: {
+        code: "chatgpt_active_turn_compaction_required", retryable: false,
+      } });
+      expect(f.delivered).toHaveLength(0);
+      expect(source?.outstanding()).toHaveLength(2);
+      expect(f.toolSubmissions).toBe(1);
+    }
+    await adapter.runTurn!(sourceRequest([...canonical, ...complete]), { headers: new Headers() }, event => events.push(event));
+    expect(events.at(-1)).toMatchObject({ type: "error", code: "chatgpt_active_turn_compaction_required", status: 409 });
+    expect(f.delivered).toHaveLength(0);
+    expect(source?.outstanding()).toHaveLength(2);
+  } finally {
+    await f.close();
+  }
+});
 
 test("S8: atomic multi-tool pressure -> canonical Web compaction -> delta-only native continuation", async () => {
   const f = fixture();
@@ -199,6 +259,17 @@ test("S8: atomic multi-tool pressure -> canonical Web compaction -> delta-only n
     const config = defaultConfig("full");
     config.experimentalWebCompactor = true;
     config.experimentalSemanticMemory = true;
+    const pressureResponse = await responseRequest(new Request("http://127.0.0.1/v1/responses", {
+      method: "POST", body: JSON.stringify({
+        ...active._rawBody as object, model: "chatgpt-web/high", stream: true,
+      }),
+    }), config, () => adapter, { rememberState: false });
+    expect(pressureResponse.status).toBe(400);
+    expect(await pressureResponse.json()).toMatchObject({ error: {
+      code: "chatgpt_active_turn_compaction_required", retryable: false,
+    } });
+    expect(f.delivered).toHaveLength(0);
+    expect(source?.outstanding().map(request => request.callId)).toEqual(ids);
     const compactBody = {
       model: nativeModel, stream: false, reasoning: { effort: "high" },
       client_metadata: turnMetadata("s8_active_canonical_compact", true),

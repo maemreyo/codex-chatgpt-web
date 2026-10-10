@@ -1,7 +1,7 @@
 import { createHash, randomBytes } from "node:crypto";
 import { getCodexHome } from "../../codex-integration-shared";
 import { dirname, join, resolve } from "node:path";
-import { isChatGptWebZeroRiskBackendModel } from "../../chatgpt-web-models";
+import { isChatGptWebZeroRiskBackendModel, resolveChatGptWebPhysicalContextLimits } from "../../chatgpt-web-models";
 import { defaultBrokerEndpoint, expandUserPath, getConfigDir, resolveBrokerEndpoint } from "../../config";
 import {
   cancelLauncherManualTurn,
@@ -72,11 +72,18 @@ import {
   type SemanticIneligibleDetail,
   type SemanticRotationReason,
 } from "./semantic-log";
+import { classifyCanonicalCompaction } from "../../responses/compaction-route";
 
 // The occupancy ledger is process-local. After a restart, the old retained
 // browser chat cannot safely inherit an empty ledger, so each process must use
 // a fresh semantic conversation key and resend the verified projection.
 const SEMANTIC_BROWSER_PROCESS_NONCE = randomBytes(16).toString("hex");
+
+function bindAdapterCompactionProtocol(parsed: CodexParsedRequest): void {
+  if (parsed._canonicalCompactionProtocol !== undefined) return;
+  const protocol = classifyCanonicalCompaction(parsed._rawBody, "responses");
+  if (protocol !== undefined) parsed._canonicalCompactionProtocol = protocol;
+}
 
 function brokerSocketPath(provider: CodexProviderConfig): string {
   const configured = provider.chatgptWeb?.brokerSocketPath?.trim();
@@ -464,7 +471,9 @@ export function createChatGptWebAdapter(
     if (!semanticCostCaps) return;
     const identity = extractChatGptTurnIdentity(parsed);
     const threadHash = identity.threadId ? semanticThreadHash(identity.threadId) : "missing";
-    const threadKey = identity.threadId ? JSON.stringify([executionNamespace, identity.threadId]) : "";
+    // The durable cost file already scopes accounts/installations. A mutable
+    // browser execution namespace must never replenish one native thread's cap.
+    const threadKey = identity.threadId ?? "";
     if (!semanticCostCaps.recordCompaction(threadKey, physicalOperationId)) {
       emitSemanticLog({ event: "semantic_skip", threadHash, reason: "cap_hit" });
       emitSemanticLog({ event: "semantic_fallback", threadHash, to: "compaction_required",
@@ -538,10 +547,13 @@ export function createChatGptWebAdapter(
 
   interface SemanticRuntimeInput {
     parsed: CodexParsedRequest;
+    /** Exact quarantine created by this same fresh native compaction request. */
+    newlyQuarantinedFence?: string;
     epoch?: StoredChatGptSemanticEpochV1;
     metrics?: SemanticProjectionMetrics;
     threadHash?: string;
     rotated?: boolean;
+    rotation?: Extract<Parameters<typeof emitSemanticLog>[0], { event: "semantic_rotation" }>;
     forceFresh?: boolean;
   }
 
@@ -577,6 +589,7 @@ export function createChatGptWebAdapter(
     if (parsed._compactionRequest && identity.threadId && parsed._chatgptModelFamily
       && !manualInteraction) {
       const active = semanticEpochStore.get(identity.threadId, true);
+      let newlyQuarantinedFence: string | undefined;
       if (active) {
         try {
           const projected = projectSemanticEpoch(parsed, active);
@@ -587,8 +600,14 @@ export function createChatGptWebAdapter(
         } catch (error) {
           // Canonical compaction needs the original exact history when projection
           // validation fails. Only the small/physical-fit fallback is safe.
+          const reason = semanticValidationReason(error);
+          if (reason === "anchor_missing" || reason === "digest_mismatch" || reason === "cross_boundary") {
+            if (semanticEpochStore.quarantineIfCurrent(identity.threadId, active, reason)) {
+              newlyQuarantinedFence = semanticEpochStore.quarantineFence(identity.threadId);
+            }
+          }
           emitSemanticLog({ event: "semantic_validation_failed", threadHash,
-            reason: semanticValidationReason(error), fellBackTo: "legacy" });
+            reason, fellBackTo: "legacy" });
         }
       }
       try {
@@ -601,7 +620,7 @@ export function createChatGptWebAdapter(
           { status: 409, errorType: "invalid_request_error", code: "semantic_epoch_recovery_required", retryable: false },
         );
       }
-      return { parsed, threadHash };
+      return { parsed, threadHash, newlyQuarantinedFence };
     }
     // Preserve eligibility ordering while logging only a fixed, content-free category.
     const ineligibleDetail: SemanticIneligibleDetail | undefined = manualInteraction ? "manual_interaction"
@@ -621,9 +640,16 @@ export function createChatGptWebAdapter(
     const threadId = identity.threadId;
     const modelFamily = parsed._chatgptModelFamily;
     if (!threadId || !modelFamily) throw new Error("Semantic memory eligibility lost required native identity");
-    // A test or independent launcher may reuse native thread metadata. Match
-    // the same execution namespace used by runtime session ownership.
-    const costThreadKey = JSON.stringify([executionNamespace, threadId]);
+    // Native compact v2 is a durable history transition only once Codex
+    // actually replays this daemon's completed compaction item. Until then,
+    // a quarantined projection must stay disabled across process restarts.
+    if (semanticEpochStore.isQuarantined(threadId)) {
+      const input = (parsed._rawBody as { input?: unknown } | undefined)?.input;
+      semanticEpochStore.acceptCompletedCompaction(threadId, input);
+    }
+    // Budget identity follows canonical native thread identity, not mutable
+    // launcher/browser settings. Runtime lease ownership stays namespaced.
+    const costThreadKey = threadId;
 
     const mode = resolveChatGptWebModelMode(parsed.modelId, parsed.options.reasoning, turnCapabilities);
     const fallbackToLegacy = (reason: string, validationError?: unknown): SemanticRuntimeInput => {
@@ -668,6 +694,11 @@ export function createChatGptWebAdapter(
       });
       throw error;
     }
+    // A persisted invalid-epoch tombstone must bypass candidate rotation.
+    // Reuse the original, untouched canonical input while quarantine is active.
+    if (semanticEpochStore.isQuarantined(threadId)) {
+      return fallbackToLegacy("quarantined_epoch");
+    }
 
     // Native Responses history may omit item-level turn_id even when Codex's
     // canonical rollout recorded it. Reconstruct only exact verified user items;
@@ -706,7 +737,13 @@ export function createChatGptWebAdapter(
         activeProjected = projectSemanticEpoch(parsed, active);
       } catch (error) {
         const modelFamilyChange = /model-family mismatch/i.test(error instanceof Error ? error.message : String(error));
-        if (!modelFamilyChange || !candidate) return fallbackToLegacy("active_epoch_validation_failed", error);
+        if (!modelFamilyChange || !candidate) {
+          const reason = semanticValidationReason(error);
+          if (reason === "anchor_missing" || reason === "digest_mismatch" || reason === "cross_boundary") {
+            semanticEpochStore.quarantineIfCurrent(threadId, active, reason);
+          }
+          return fallbackToLegacy("active_epoch_validation_failed", error);
+        }
       }
     }
 
@@ -719,9 +756,6 @@ export function createChatGptWebAdapter(
     const reuseForCooldown = Boolean(active && activeProjected && candidate
       && active.modelFamily === candidate.modelFamily
       && !semanticRotationCooldownSatisfied(parsed, active, candidate));
-    if (reuseForCooldown) {
-      emitSemanticLog({ event: "semantic_skip", threadHash, reason: "cooldown" });
-    }
     if (active && activeProjected && (sameActiveSource || !candidate || reuseForCooldown)) {
       const continuation = retainedConversationResumeRequest(activeProjected.parsed) ?? activeProjected.parsed;
       let preflight: ReturnType<typeof preflightSemanticProjection> | undefined;
@@ -747,13 +781,22 @@ export function createChatGptWebAdapter(
       } catch {
         failedReason = "retained_epoch_preflight_failed";
       }
-      if (failedReason || !preflight) return fallbackToLegacy(failedReason ?? "retained_epoch_preflight_failed");
-      return {
-        parsed: activeProjected.parsed,
-        epoch: active,
-        threadHash,
-        metrics: { ...activeProjected.metrics, ...preflight.metrics },
-      };
+      if (!failedReason && preflight) {
+        if (reuseForCooldown) emitSemanticLog({ event: "semantic_skip", threadHash, reason: "cooldown" });
+        return {
+          parsed: activeProjected.parsed,
+          epoch: active,
+          threadHash,
+          metrics: { ...activeProjected.metrics, ...preflight.metrics },
+        };
+      }
+      // Cooldown controls optional rotations, never a safety reseed. If an
+      // independently validated newer candidate exists, evaluate its physical
+      // fit and the ordinary rotation cap before falling back to canonical.
+      // Without that candidate, no new epoch may be claimed.
+      if (!reuseForCooldown || !candidate || sameActiveSource) {
+        return fallbackToLegacy(failedReason ?? "retained_epoch_preflight_failed");
+      }
     }
 
     if (!candidate) {
@@ -861,22 +904,27 @@ export function createChatGptWebAdapter(
       expectedSemanticEpoch: active?.semanticEpoch,
       verifiedAuthority: true,
     });
-    if (committed.committed) {
-      emitSemanticLog({
-        event: "semantic_rotation",
-        threadHash,
-        fromEpoch: active?.semanticEpoch ?? 0,
-        toEpoch: committed.record.semanticEpoch,
-        reason: rotationReason,
-        firstMessageTokens: preflight.metrics.firstMessageTokens,
-        firstMessageChars: preflight.metrics.firstMessageChars,
-        fitsSingleMessage: preflight.metrics.multipartParts === undefined,
-        maskedResults: projected.metrics.maskedResults,
-        maskedTokensEst: projected.metrics.maskedTokensEst,
-        ledgerFiles: projected.metrics.ledgerFiles,
-        ledgerCommands: projected.metrics.ledgerCommands,
-        windowSize: projected.metrics.windowSize,
-      });
+    const rotation: SemanticRuntimeInput["rotation"] = committed.committed
+      ? {
+          event: "semantic_rotation",
+          threadHash,
+          fromEpoch: active?.semanticEpoch ?? 0,
+          toEpoch: committed.record.semanticEpoch,
+          reason: rotationReason,
+          firstMessageTokens: preflight.metrics.firstMessageTokens,
+          firstMessageChars: preflight.metrics.firstMessageChars,
+          fitsSingleMessage: preflight.metrics.multipartParts === undefined,
+          maskedResults: projected.metrics.maskedResults,
+          maskedTokensEst: projected.metrics.maskedTokensEst,
+          ledgerFiles: projected.metrics.ledgerFiles,
+          ledgerCommands: projected.metrics.ledgerCommands,
+          windowSize: projected.metrics.windowSize,
+        } : undefined;
+    if (rotation) {
+      // The durable epoch and its conservative budget charge precede browser
+      // submission. This stage must never enter accepted-rotation totals.
+      console.info(JSON.stringify({ event: "semantic_rotation_committed", threadHash,
+        fromEpoch: rotation.fromEpoch, toEpoch: rotation.toEpoch }));
     }
     let finalProjection: ReturnType<typeof projectSemanticEpoch>;
     try {
@@ -891,6 +939,7 @@ export function createChatGptWebAdapter(
       epoch: committed.record,
       threadHash,
       rotated: committed.committed,
+      rotation,
       metrics: { ...finalProjection.metrics, ...preflight.metrics },
     };
   };
@@ -932,15 +981,34 @@ export function createChatGptWebAdapter(
         ...(semantic.epoch ? semanticConversationOptions(semantic.epoch) : {}),
       })
       : undefined;
-    const semanticOccupancy = semantic.epoch && semantic.metrics && conversationKey
-      ? semanticEpochOccupancies.forConversation(
-        conversationKey, true, semantic.metrics.physicalLimit, parsed.modelId,
-      )
+    // Guard tool results even on the first native turn and on canonical fallback.
+    // A retained epochless browser tab may predate this process; only the lease
+    // callback can establish whether its physical occupancy is actually known.
+    const guardCanonical = experimentalSemanticMemory === true && !manualRequest
+      && !parsed._compactionRequest && parsed.modelId === CHATGPT_WEB_MODEL_ID
+      && mode.localTools;
+    const physicalLimit = semantic.metrics?.physicalLimit ?? (
+      "effort" in mode ? resolveChatGptWebPhysicalContextLimits(
+        CHATGPT_WEB_MODEL_ID, mode.effort,
+        { ...turnCapabilities, experimentalBiggerContext: experimentalBiggerContext === true },
+        parsed._chatgptModelFamily,
+      ).contextWindow : 0
+    );
+    const semanticOccupancy = (semantic.epoch || guardCanonical) && physicalLimit > 0
+      ? !retainedLauncherDescriptor
+        // Direct workers start a new browser conversation at every startRuntime.
+        // A reconnect reuses the existing runtime and its charged ledger.
+        ? semanticEpochOccupancies.resetForVerifiedFreshLease(`fresh:${traceId}`, physicalLimit, parsed.modelId)
+        : semanticEpochOccupancies.forConversation(
+          conversationKey ?? `fresh:${traceId}`, Boolean(semantic.epoch && conversationKey),
+          physicalLimit, parsed.modelId,
+        )
       : undefined;
     let selectedSemanticMetrics = semantic.metrics;
+    let canonicalPreparedTokens = 0;
     let freshLeasePrepared = false;
     let freshLeaseSubmitted = false;
-    const onPreparedSelected = semantic.epoch && semanticOccupancy
+    const onPreparedSelected = semanticOccupancy && retainedLauncherDescriptor
       ? (reused: boolean): void => {
         if (reused) {
           // A retained browser tab is only safe with a verified live ledger.
@@ -952,9 +1020,11 @@ export function createChatGptWebAdapter(
         if (!("effort" in mode)) throw new Error("Semantic browser recovery requires automatic mode");
         // The launcher can lose a retained tab and submit the full projection
         // instead of the continuation. Validate and charge the actual payload.
-        const full = semanticPreflight(browserInput, turnCapabilities, mode);
-        selectedSemanticMetrics = { ...semantic.metrics!, ...full.metrics };
-        freshLeasePrepared = true;
+        if (semantic.epoch && semantic.metrics) {
+          const full = semanticPreflight(browserInput, turnCapabilities, mode);
+          selectedSemanticMetrics = { ...semantic.metrics, ...full.metrics };
+          freshLeasePrepared = true;
+        }
         semanticOccupancy.resetForVerifiedFreshLease();
       }
       : undefined;
@@ -1077,6 +1147,21 @@ export function createChatGptWebAdapter(
       );
     };
     const submission: NonNullable<ChatGptTurnRuntime["submission"]> = { phase: "prepared" };
+    let rotationAttempted = false;
+    let rotationAccepted = false;
+    const markRotationAttempted = (): void => {
+      if (!semantic.rotation || rotationAttempted) return;
+      rotationAttempted = true;
+      console.info(JSON.stringify({ event: "semantic_rotation_attempted",
+        threadHash: semantic.rotation.threadHash,
+        fromEpoch: semantic.rotation.fromEpoch, toEpoch: semantic.rotation.toEpoch }));
+    };
+    const markRotationAccepted = (): void => {
+      if (!semantic.rotation || rotationAccepted) return;
+      markRotationAttempted(); // A confirmed submission also proves an attempt.
+      rotationAccepted = true;
+      emitSemanticLog(semantic.rotation);
+    };
     const onSemanticSizeRejection = semantic.threadHash
       ? (observation: ChatGptSubmissionRejectionObservation): void => {
         semanticOccupancy?.markRejected();
@@ -1108,15 +1193,21 @@ export function createChatGptWebAdapter(
     // ambiguous browser send. Normal task prompts must never be replayed after Send activation.
     const submissionLifecycle = {
       ...(!parsed._compactionRequest ? {
-        onSendActivated: () => { submission.phase = "send_activated" as const; },
+        onSendActivated: () => {
+          submission.phase = "send_activated" as const;
+          markRotationAttempted();
+        },
       } : {}),
       onSubmitted: () => {
         if (!parsed._compactionRequest) submission.phase = "accepted";
+        markRotationAccepted();
         if (freshLeasePrepared) freshLeaseSubmitted = true;
         if (semanticOccupancy && selectedSemanticMetrics) {
           // Charge the full preflighted semantic submission, including the
           // browser's non-visible reserve, to its physical occupancy ledger.
           semanticOccupancy.record(`submit:${traceId}`, selectedSemanticMetrics.estimatedInputTokens);
+        } else if (semanticOccupancy) {
+          semanticOccupancy.record(`submit:${traceId}`, canonicalPreparedTokens);
         }
         hooks.onCompactionProgress?.();
       },
@@ -1351,6 +1442,13 @@ export function createChatGptWebAdapter(
           turnToken,
           compileOptionsFor(input),
         );
+        if (semanticOccupancy && !semantic.epoch) {
+          // Sum every acknowledged Bigger Context stage and the final commit.
+          // Charging only the final message understates retained browser pressure.
+          canonicalPreparedTokens = compiledChatGptWebMessages(compiled)
+            .reduce((total, message) => total + estimateTokens(message, parsed.modelId), 0)
+            + skillFileTokens(compiled.skillFiles, parsed.modelId);
+        }
         // Publish only after preparation succeeds: otherwise its failure revokes the token
         // before the response observer uses it and masks the cause as an expired capability.
         observeCapabilityRetirement(turnToken, externalProgress);
@@ -1399,7 +1497,9 @@ export function createChatGptWebAdapter(
         onLunaCheckpoint: captureCheckpoint,
       } : {}),
     })).then(answer => {
-      // A completed browser response proves a submission even in local harnesses.
+      // A completed response proves submission even when a local harness omits
+      // the browser's onSubmitted callback; failed preflight cannot reach here.
+      markRotationAccepted();
       emitSemanticCost();
       return answer;
     }, error => {
@@ -1442,7 +1542,34 @@ export function createChatGptWebAdapter(
 
   return {
     name: "chatgpt-web",
+    preflightTurn(parsed) {
+      if (parsed._compactionRequest) return;
+      let key: string;
+      try {
+        key = `${executionNamespace}:${chatGptTurnExecutionKey(parsed)}`;
+      } catch {
+        // Missing native authority belongs to runTurn's existing validation path.
+        return;
+      }
+      const source = chatGptTurnSessions.find(key);
+      if (!source?.isActive() || source.runtime.mode !== "tools") return;
+      const results = currentToolResults(parsed, source);
+      if (results.length === 0 || results.length !== source.outstanding().length) return;
+      const pressure = source.runtime.semanticOccupancy?.batchPressureReason(results.map(result => ({
+        callId: result.toolCallId, content: result.content,
+      })));
+      if (!pressure) return;
+      return {
+        type: "error", status: 400, errorType: "invalid_request_error", retryable: false,
+        code: pressure === "atomic_result_oversize"
+          ? "semantic_atomic_result_too_large" : "chatgpt_active_turn_compaction_required",
+        message: pressure === "atomic_result_oversize"
+          ? "A complete canonical tool result exceeds the browser's physical capacity. Use an independently available native recovery route."
+          : "The retained ChatGPT browser epoch cannot safely accept the complete tool-result batch. Request canonical Codex compaction with the unchanged batch before continuing this turn.",
+      };
+    },
     async runTurn(parsed, incoming, emit) {
+      if (parsed._compactionRequest) bindAdapterCompactionProtocol(parsed);
       const observerAbort = new AbortController();
       incoming = {
         ...incoming,
@@ -1542,6 +1669,19 @@ export function createChatGptWebAdapter(
               .slice(0, 12);
             const freshCompactionTraceId = `${handoffTraceId}_${freshConversationPerTurn ? "fresh" : "fallback"}`;
             const compactionNativeIdentity = extractChatGptTurnIdentity(parsed);
+            let quarantineFence: string | undefined;
+            if (experimentalSemanticMemory && compactionNativeIdentity.threadId) {
+              try {
+                quarantineFence = semanticEpochStore.quarantineFence(compactionNativeIdentity.threadId);
+              } catch (error) {
+                // The active source may still be capable of an exact retained
+                // handoff when the on-disk epoch file is corrupt. The compact
+                // can proceed, but it must not acquire authority to lift a
+                // quarantine or rewrite the damaged state.
+                if (!(error instanceof ChatGptWebAdapterError)
+                  || error.code !== "semantic_epoch_state_invalid") throw error;
+              }
+            }
             let sharedSummary = existingStructuredCompactionRun(compactionExecutionKey);
             if (!sharedSummary) {
               sharedSummary = runStructuredCompactionOnce(
@@ -1608,6 +1748,10 @@ export function createChatGptWebAdapter(
                     // transport time cannot consume the model-generation window.
                     armHandoffDeadline();
                     const semanticCompaction = prepareSemanticRuntimeInput(parsed, undefined, turnCapabilities);
+                    // A fresh compact may itself discover invalid epoch evidence.
+                    // Bind its completed output only to the quarantine created
+                    // synchronously by this same verified validation attempt.
+                    quarantineFence ??= semanticCompaction.newlyQuarantinedFence;
                     reserveWebCompaction(parsed, `${compactionExecutionKey}:fresh:${freshCompactionTraceId}`);
                     const fallbackRuntime = startRuntime(
                       parsed,
@@ -1817,6 +1961,13 @@ export function createChatGptWebAdapter(
               });
               return;
             }
+            if (experimentalSemanticMemory
+              && parsed._canonicalCompactionProtocol === "v2"
+              && compactionNativeIdentity.threadId) {
+              semanticEpochStore.rememberCompletedCompaction(
+                compactionNativeIdentity.threadId, quarantineFence, summary,
+              );
+            }
             emit({ type: "text_delta", text: summary, phase: "final_answer" });
             emitBrowserCompletion(
               { type: "final", answer: summary },
@@ -1960,15 +2111,22 @@ export function createChatGptWebAdapter(
                   throw new Error(`Codex returned ${results.length} of ${outstanding.length} results for a parallel ChatGPT tool batch`);
                 }
                 const occupancy = session.runtime.semanticOccupancy;
-                if (occupancy && !occupancy.canDeliverBatch(results.map(message => ({
+                const batchPressure = occupancy?.batchPressureReason(results.map(message => ({
                   callId: message.toolCallId, content: message.content,
-                })))) {
+                })));
+                if (occupancy && batchPressure) {
                   if (session.runtime.semanticThreadHash) emitSemanticLog({
                     event: "semantic_fallback",
                     threadHash: session.runtime.semanticThreadHash,
-                    to: "compaction_required",
-                    reason: occupancy.confidence === "unknown" ? "unknown_occupancy" : "physical_pressure",
+                    to: batchPressure === "atomic_result_oversize" ? "recovery_error" : "compaction_required",
+                    reason: batchPressure,
                   });
+                  if (batchPressure === "atomic_result_oversize") {
+                    throw new ChatGptWebAdapterError(
+                      "A complete canonical tool result exceeds the browser's physical capacity, including during Web compaction. Use an independently available native recovery route.",
+                      { status: 409, errorType: "invalid_request_error", code: "semantic_atomic_result_too_large", retryable: false },
+                    );
+                  }
                   throw new ChatGptWebAdapterError(
                     "The retained ChatGPT browser epoch cannot safely accept the complete tool-result batch. "
                     + "Request canonical Codex compaction with the unchanged batch before continuing this turn.",

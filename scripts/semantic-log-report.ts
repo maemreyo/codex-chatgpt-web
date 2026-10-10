@@ -63,11 +63,11 @@ const FALLBACK_TARGETS = new Set(["legacy", "compaction_required", "recovery_err
 // string, which could contain a prompt or private model output.
 const FALLBACK_REASONS = new Set([
   "web_compaction_cap_hit", "compaction_view_unavailable",
-  "active_epoch_validation_failed", "retained_epoch_preflight_failed",
+  "active_epoch_validation_failed", "quarantined_epoch", "retained_epoch_preflight_failed",
   "rotation_cap_hit_epoch_no_fit", "rotation_cap_hit",
   "rotation_first_message_no_fit", "rotation_cap_changed_before_commit",
   "cross_boundary", "candidate_projection_failed", "committed_epoch_projection_failed",
-  "unknown_occupancy", "physical_pressure",
+  "unknown_occupancy", "physical_pressure", "atomic_result_oversize", "accumulated_occupancy",
 ]);
 const THREAD_HASH = /^[a-f0-9]{16}$/;
 const COST_KEYS = [

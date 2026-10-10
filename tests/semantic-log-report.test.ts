@@ -133,3 +133,27 @@ test("rotated logs are combined before per-thread ratios, epoch reuse and cost a
     rmSync(dir, { recursive: true, force: true });
   }
 });
+
+test("pressure and quarantine fallback diagnostics stay classified without exposing content", () => {
+  const dir = mkdtempSync(join(tmpdir(), "semantic-pressure-report-"));
+  const path = join(dir, "launcher.jsonl");
+  try {
+    const threadHash = "aaaaaaaaaaaaaaaa";
+    const rows = ["unknown_occupancy", "atomic_result_oversize", "accumulated_occupancy", "quarantined_epoch",
+      "PRIVATE-TOOL-CONTENT"].map(reason => ({
+      event: "semantic_fallback", threadHash, reason,
+      to: reason === "quarantined_epoch" ? "legacy" : "compaction_required",
+      content: "PRIVATE-TOOL-CONTENT",
+    }));
+    writeFileSync(path, rows.map(row => JSON.stringify(row)).join("\n") + "\n", "utf8");
+    const report = semanticLogReport(path);
+    expect(report.fallbacksByTarget).toEqual({ compaction_required: 4, legacy: 1 });
+    expect(report.fallbacksByReason).toEqual({
+      unknown_occupancy: 1, atomic_result_oversize: 1,
+      accumulated_occupancy: 1, quarantined_epoch: 1, unknown: 1,
+    });
+    expect(JSON.stringify(report)).not.toContain("PRIVATE-TOOL-CONTENT");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});

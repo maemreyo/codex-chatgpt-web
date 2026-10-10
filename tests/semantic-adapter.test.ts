@@ -3,7 +3,7 @@ import { mkdirSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { ChatGptBrowserWorker, type BrowserTurn } from "../src/adapters/chatgpt-web/browser-worker";
-import { createChatGptWebAdapter } from "../src/adapters/chatgpt-web/index";
+import { chatGptWebExecutionNamespace, createChatGptWebAdapter } from "../src/adapters/chatgpt-web/index";
 import { CHATGPT_WEB_MODEL_ID } from "../src/adapters/chatgpt-web/model";
 import { chatGptTurnSessions } from "../src/adapters/chatgpt-web/turn-execution";
 import { TurnBroker } from "../src/adapters/chatgpt-web/turn-broker";
@@ -12,6 +12,8 @@ import { parseRequest } from "../src/responses/parser";
 import { estimateTokens } from "../src/lib/token-estimate";
 import { estimateCompiledChatGptWebInputTokens } from "../src/adapters/chatgpt-web/input-tokens";
 import { semanticEpochOccupancies } from "../src/adapters/chatgpt-web/semantic-occupancy";
+import { SemanticCostCaps } from "../src/adapters/chatgpt-web/semantic-cost-caps";
+import { ChatGptSemanticEpochStore } from "../src/adapters/chatgpt-web/semantic-epoch-store";
 import type { CodexParsedRequest, CodexProviderConfig } from "../src/types";
 
 const root = join(tmpdir(), `semantic-adapter-${process.pid}-${Date.now()}`);
@@ -33,13 +35,13 @@ function turn(turnId: string) {
   return { internal_chat_message_metadata_passthrough: { turn_id: turnId } };
 }
 
-function request(turnId: string, input: unknown[]): CodexParsedRequest {
+function request(turnId: string, input: unknown[], nativeThreadId = "thread_semantic_adapter"): CodexParsedRequest {
   const parsed = parseRequest({
     model: CHATGPT_WEB_MODEL_ID,
     stream: true,
     reasoning: { effort: "high" },
     client_metadata: {
-      "x-codex-turn-metadata": JSON.stringify({ thread_id: "thread_semantic_adapter", turn_id: turnId, request_kind: "turn" }),
+      "x-codex-turn-metadata": JSON.stringify({ thread_id: nativeThreadId, turn_id: turnId, request_kind: "turn" }),
     },
     input,
   });
@@ -171,6 +173,163 @@ test("hidden semantic mode rotates between completed native turns without an ext
     expect(prompts[2]).toContain("Continue through the cooldown");
     expect(prompts[2]).not.toContain("OLD-SECRET-BODY");
     expect(prompts[3]).toContain("Continue after the cooldown");
+  } finally {
+    infoSpy.mockRestore();
+    (worker as unknown as { run: (turn: BrowserTurn) => Promise<string> }).run = originalRun;
+    chatGptTurnSessions.clear();
+    await TurnBroker.forSocket(socketPath).close();
+  }
+});
+
+test("committed, send-attempted and browser-accepted SEM rotations have separate counters", async () => {
+  for (const [index, stage] of (["pre_send_failure", "send_failure", "accepted_then_failure"] as const).entries()) {
+    const stamp = `${process.pid}-${Date.now()}-${stage}`;
+    const stageThreadId = `thread_semantic_stage_${stamp}`;
+    const socketPath = brokerEndpoint(`sr-${process.pid}-${index}`);
+    const statePath = join(root, `sem-rotation-stage-${stamp}.json`);
+    const provider: CodexProviderConfig = {
+      adapter: "chatgpt-web", baseUrl: `browser://sem-rotation-stage-${stamp}`,
+      chatgptWeb: {
+        browserHost: "launcher", browserHostDescriptorPath: join(root, "launcher.json"),
+        brokerSocketPath: socketPath, localToolsEnabled: true, solAvailable: true,
+        extraHighAvailable: true, proAvailable: true,
+        experimentalSemanticMemory: true, semanticCheckpointStatePath: statePath,
+      },
+    };
+    const worker = ChatGptBrowserWorker.forProvider(provider);
+    const originalRun = worker.run.bind(worker);
+    const logged: Array<{ event: string; epochRotations?: number }> = [];
+    const infoSpy = spyOn(console, "info").mockImplementation((value: unknown) => {
+      if (typeof value === "string" && value.startsWith('{"event":"semantic_')) {
+        logged.push(JSON.parse(value) as { event: string; epochRotations?: number });
+      }
+    });
+    let calls = 0;
+    (worker as unknown as { run: (turn: BrowserTurn) => Promise<string> }).run = async browserTurn => {
+      calls += 1;
+      const prepared = await browserTurn.prepare();
+      prepared.release();
+      if (calls === 1) {
+        browserTurn.onTextDelta("first completed answer");
+        return "first completed answer";
+      }
+      if (stage !== "pre_send_failure") await browserTurn.onSendActivated?.();
+      if (stage === "accepted_then_failure") {
+        await browserTurn.onSubmitted?.();
+        await browserTurn.onSubmitted?.(); // Duplicate notification must be idempotent.
+      }
+      throw new Error(`simulated ${stage}`);
+    };
+    const firstInput = [
+      { type: "message", role: "developer", content: "Keep authority intact." },
+      { type: "message", role: "user", content: [{ type: "input_text", text: environmentXml }], ...turn("turn_1") },
+      { type: "message", role: "user", id: "stage_user_1", content: "First task", ...turn("turn_1") },
+      { type: "function_call", name: "exec_command", call_id: "stage_call_1", arguments: "{}" },
+      { type: "function_call_output", call_id: "stage_call_1", output: "stage old result" },
+    ];
+    const secondInput = [
+      ...firstInput,
+      { type: "message", role: "assistant", content: [{ type: "output_text", text: "first completed answer" }] },
+      { type: "message", role: "user", content: [{ type: "input_text", text: environmentXml }], ...turn("turn_2") },
+      { type: "message", role: "user", id: "stage_user_2", content: "Second task", ...turn("turn_2") },
+    ];
+    try {
+      const adapter = createChatGptWebAdapter(provider);
+      const firstEvents: Array<{ type: string }> = [];
+      await adapter.runTurn!(request("turn_1", firstInput, stageThreadId), { headers: new Headers() }, event => firstEvents.push(event));
+      expect(firstEvents.at(-1)?.type).toBe("done");
+      try {
+        await adapter.runTurn!(request("turn_2", secondInput, stageThreadId), { headers: new Headers() }, () => {});
+      } catch { /* The simulated browser failure is expected. */ }
+      expect(calls).toBe(2);
+      expect(new ChatGptSemanticEpochStore(statePath).get(stageThreadId)?.semanticEpoch).toBe(1);
+      const costKey = stageThreadId;
+      // The conservative rolling-hour reservation survives even a failed send.
+      expect(new SemanticCostCaps(Date.now, 4, 4, join(root, "semantic-cost-caps.json")).count(costKey)).toBe(1);
+      const count = (event: string) => logged.filter(entry => entry.event === event).length;
+      expect(count("semantic_rotation_committed")).toBe(1);
+      expect(count("semantic_rotation_attempted")).toBe(stage === "pre_send_failure" ? 0 : 1);
+      expect(count("semantic_rotation")).toBe(stage === "accepted_then_failure" ? 1 : 0);
+      expect(logged.filter(entry => entry.event === "semantic_cost" && entry.epochRotations === 1))
+        .toHaveLength(stage === "accepted_then_failure" ? 1 : 0);
+    } finally {
+      infoSpy.mockRestore();
+      (worker as unknown as { run: (turn: BrowserTurn) => Promise<string> }).run = originalRun;
+      chatGptTurnSessions.clear();
+      await TurnBroker.forSocket(socketPath).close();
+    }
+  }
+});
+
+test("stale epoch anchor is quarantined once and later requests use canonical fallback", async () => {
+  const stamp = `${process.pid}-${Date.now()}`;
+  const socketPath = brokerEndpoint(`sem-quarantine-${stamp}`);
+  const statePath = join(root, `sem-quarantine-${stamp}.json`);
+  const provider: CodexProviderConfig = {
+    adapter: "chatgpt-web", baseUrl: `browser://sem-quarantine-${stamp}`,
+    chatgptWeb: {
+      browserHost: "launcher", browserHostDescriptorPath: join(root, "launcher.json"),
+      brokerSocketPath: socketPath, localToolsEnabled: true, solAvailable: true,
+      extraHighAvailable: true, proAvailable: true,
+      experimentalSemanticMemory: true, semanticCheckpointStatePath: statePath,
+    },
+  };
+  const worker = ChatGptBrowserWorker.forProvider(provider);
+  const originalRun = worker.run.bind(worker);
+  const prompts: string[] = [];
+  const observed: Array<{ event: string; reason?: string }> = [];
+  const infoSpy = spyOn(console, "info").mockImplementation((event: unknown) => {
+    if (typeof event === "string" && event.startsWith('{"event":"semantic_')) {
+      observed.push(JSON.parse(event) as { event: string; reason?: string });
+    }
+  });
+  (worker as unknown as { run: (turn: BrowserTurn) => Promise<string> }).run = async browserTurn => {
+    const prepared = await browserTurn.prepare();
+    prompts.push(prepared.text);
+    prepared.release();
+    const answer = `quarantine answer ${prompts.length}`;
+    browserTurn.onTextDelta(answer);
+    return answer;
+  };
+  const firstInput = [
+    { type: "message", role: "developer", content: "PRESERVE-EXACT-AUTHORITY" },
+    { type: "message", role: "user", content: [{ type: "input_text", text: environmentXml }], ...turn("turn_1") },
+    { type: "message", role: "user", id: "q_user_1", content: "First task", ...turn("turn_1") },
+    { type: "function_call", call_id: "q_old", name: "exec_command", arguments: '{"cmd":"git status --short"}' },
+    { type: "function_call_output", call_id: "q_old", output: "Earlier verified evidence" },
+  ];
+  const secondInput = [
+    ...firstInput,
+    { type: "message", role: "assistant", content: [{ type: "output_text", text: "quarantine answer 1" }] },
+    { type: "message", role: "user", content: [{ type: "input_text", text: environmentXml }], ...turn("turn_2") },
+    { type: "message", role: "user", id: "q_user_2", content: "Second task", ...turn("turn_2") },
+  ];
+  // Native history has changed and the prior answered anchor is absent.
+  const invalidThird = [
+    ...firstInput,
+    { type: "message", role: "user", id: "q_user_3", content: "Third task", ...turn("turn_3") },
+  ];
+  try {
+    const adapter = createChatGptWebAdapter(provider);
+    await adapter.runTurn!(request("turn_1", firstInput), { headers: new Headers() }, () => {});
+    await adapter.runTurn!(request("turn_2", secondInput), { headers: new Headers() }, () => {});
+    const store = new ChatGptSemanticEpochStore(statePath);
+    expect(store.get("thread_semantic_adapter")?.semanticEpoch).toBe(1);
+    await adapter.runTurn!(request("turn_3", invalidThird), { headers: new Headers() }, () => {});
+    expect(new ChatGptSemanticEpochStore(statePath).isQuarantined("thread_semantic_adapter")).toBeTrue();
+    const invalidFourth = [
+      ...invalidThird,
+      { type: "message", role: "assistant", content: [{ type: "output_text", text: "quarantine answer 3" }] },
+      { type: "message", role: "user", id: "q_user_4", content: "Fourth task", ...turn("turn_4") },
+    ];
+    await adapter.runTurn!(request("turn_4", invalidFourth), { headers: new Headers() }, () => {});
+    expect(prompts).toHaveLength(4);
+    expect(prompts[2]).toContain("PRESERVE-EXACT-AUTHORITY");
+    expect(prompts[3]).toContain("Third task");
+    expect(observed.filter(event => event.event === "semantic_validation_failed"
+      && event.reason === "anchor_missing")).toHaveLength(1);
+    expect(observed.some(event => event.event === "semantic_fallback"
+      && event.reason === "quarantined_epoch")).toBeTrue();
   } finally {
     infoSpy.mockRestore();
     (worker as unknown as { run: (turn: BrowserTurn) => Promise<string> }).run = originalRun;
@@ -458,6 +617,7 @@ test("a cross-boundary candidate preserves the canonical turn, and projection er
 
 test("canonical history reaches the guarded 220-240k target across multiple physically bounded epochs", async () => {
   const socketPath = brokerEndpoint(`semantic-long-${process.pid}-${Date.now()}`);
+  const longThreadId = `thread_semantic_long_${process.pid}_${Date.now()}`;
   const provider: CodexProviderConfig = {
     adapter: "chatgpt-web",
     baseUrl: `browser://semantic-long-${Date.now()}`,
@@ -500,7 +660,7 @@ test("canonical history reaches the guarded 220-240k target across multiple phys
         ...canonical,
         { type: "message", role: "user", content: [{ type: "input_text", text: environmentXml }], ...turn(id) },
         { type: "message", role: "user", id: `long_user_${n}`, content: `Continue verified stage ${n}`, ...turn(id) },
-      ]);
+      ], longThreadId);
       lastCanonicalTokens = estimateTokens(JSON.stringify(rawInput(parsed)));
       await adapter.runTurn!(parsed, { headers: new Headers() }, () => {});
       canonical = [...rawInput(parsed),

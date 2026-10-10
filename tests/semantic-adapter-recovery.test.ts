@@ -7,6 +7,7 @@ import { CHATGPT_WEB_MODEL_ID } from "../src/adapters/chatgpt-web/model";
 import { chatGptTurnExecutionKey, chatGptTurnSessions } from "../src/adapters/chatgpt-web/turn-execution";
 import { callTurnBroker, TurnBroker } from "../src/adapters/chatgpt-web/turn-broker";
 import { encodeCompactionSummary } from "../src/responses/compaction";
+import { ChatGptSemanticEpochStore } from "../src/adapters/chatgpt-web/semantic-epoch-store";
 import { parseRequest } from "../src/responses/parser";
 import { estimateTokens } from "../src/lib/token-estimate";
 import type { AdapterEvent, CodexParsedRequest, CodexProviderConfig } from "../src/types";
@@ -185,6 +186,167 @@ test("SEM and Bigger Context retain canonical compaction handoff after epoch rot
     expect(fixture.retainedHandoffs).toBe(1);
     expect(fixture.ordinarySubmissions).toBe(2);
     expect(fixture.prompts.at(-1)).not.toContain("S8-EXACT-OLD-EVIDENCE");
+  } finally {
+    await fixture.close();
+  }
+});
+
+test("S8: persisted quarantine lifts only when a completed retained native compact is replayed after restart", async () => {
+  const fixture = makeFixture();
+  try {
+    const { second, environment } = await seedOversizedHistory(fixture);
+    const store = new ChatGptSemanticEpochStore(fixture.statePath);
+    const active = store.get("s8_recovery_thread")!;
+    expect(store.quarantineIfCurrent("s8_recovery_thread", active, "digest_mismatch")).toBeTrue();
+
+    const sourceKey = `${chatGptWebExecutionNamespace(fixture.provider)}:${chatGptTurnExecutionKey(second)}`;
+    const source = chatGptTurnSessions.find(sourceKey);
+    expect(source).toBeDefined();
+    source!.runtime.releaseRetainedConversation = async () => {};
+    const compact = request("s8_quarantine_compact", [
+      ...rawInput(second), { type: "compaction_trigger" },
+    ], true);
+    const compactEvents: AdapterEvent[] = [];
+    await createChatGptWebAdapter(fixture.provider).runTurn!(
+      compact, { headers: new Headers() }, event => compactEvents.push(event),
+    );
+    expect(compactEvents.at(-1)).toMatchObject({ type: "done", stopReason: "stop" });
+    const summary = compactEvents.filter((event): event is Extract<AdapterEvent, { type: "text_delta" }> =>
+      event.type === "text_delta").map(event => event.text).join("");
+    expect(summary).toContain("S8 verified canonical compact summary");
+    expect(new ChatGptSemanticEpochStore(fixture.statePath).isQuarantined("s8_recovery_thread")).toBeTrue();
+
+    chatGptTurnSessions.clear();
+    const invalidReplay = request("s8_invalid_replay", [
+      { type: "message", role: "developer", content: "S8-EARLY-AUTHORITY must remain exact." },
+      { type: "compaction", encrypted_content: encodeCompactionSummary("wrong checkpoint") },
+      { type: "message", role: "user", content: [{ type: "input_text", text: environment }], ...nativeTurn("s8_invalid_replay") },
+      { type: "message", role: "user", id: "s8_invalid_user", content: "Continue safely", ...nativeTurn("s8_invalid_replay") },
+    ]);
+    const invalidEvents: AdapterEvent[] = [];
+    await createChatGptWebAdapter(fixture.provider).runTurn!(
+      invalidReplay, { headers: new Headers() }, event => invalidEvents.push(event),
+    );
+    expect(invalidEvents.at(-1)).toMatchObject({ type: "done" });
+    expect(new ChatGptSemanticEpochStore(fixture.statePath).isQuarantined("s8_recovery_thread")).toBeTrue();
+
+    const followup = request("s8_recovered_turn", [
+      { type: "message", role: "developer", content: "S8-EARLY-AUTHORITY must remain exact." },
+      { type: "compaction", encrypted_content: encodeCompactionSummary(summary) },
+      { type: "message", role: "user", content: [{ type: "input_text", text: environment }], ...nativeTurn("s8_recovered_turn") },
+      { type: "message", role: "user", id: "s8_recovered_user", content: "Continue after verified native compact", ...nativeTurn("s8_recovered_turn") },
+    ]);
+    const events: AdapterEvent[] = [];
+    await createChatGptWebAdapter(fixture.provider).runTurn!(
+      followup, { headers: new Headers() }, event => events.push(event),
+    );
+    expect(events.at(-1)).toMatchObject({ type: "done", stopReason: "stop" });
+    expect(new ChatGptSemanticEpochStore(fixture.statePath).isQuarantined("s8_recovery_thread")).toBeFalse();
+    expect(fixture.prompts.at(-1)).toContain("S8-EARLY-AUTHORITY");
+    expect(fixture.prompts.at(-1)).toContain("S8 verified canonical compact summary");
+    expect(fixture.prompts.at(-1)).not.toContain("S8-EXACT-OLD-EVIDENCE");
+  } finally {
+    await fixture.close();
+  }
+});
+
+for (const protocol of ["v1", "memento"] as const) {
+  test(`S8: completed retained ${protocol} compact cannot seed a v2 digest replay`, async () => {
+    const fixture = makeFixture();
+    try {
+      const { second, environment } = await seedOversizedHistory(fixture);
+      const store = new ChatGptSemanticEpochStore(fixture.statePath);
+      const active = store.get("s8_recovery_thread")!;
+      expect(store.quarantineIfCurrent("s8_recovery_thread", active, "digest_mismatch")).toBeTrue();
+
+      const sourceKey = `${chatGptWebExecutionNamespace(fixture.provider)}:${chatGptTurnExecutionKey(second)}`;
+      chatGptTurnSessions.find(sourceKey)!.runtime.releaseRetainedConversation = async () => {};
+      // The v1 endpoint synthesizes a trigger for Web execution; a trusted original
+      // protocol must win even when the adapter-visible input looks like native v2.
+      const compact = request(`s8_${protocol}_compact`, [
+        ...rawInput(second), { type: "compaction_trigger" },
+      ], true);
+      compact._canonicalCompactionProtocol = protocol;
+      const compactEvents: AdapterEvent[] = [];
+      await createChatGptWebAdapter(fixture.provider).runTurn!(
+        compact, { headers: new Headers() }, event => compactEvents.push(event),
+      );
+      expect(compactEvents.at(-1)).toMatchObject({ type: "done" });
+      expect(fixture.retainedHandoffs).toBe(1);
+      expect(compact._canonicalCompactionProtocol).toBe(protocol);
+      const summary = compactEvents.filter((event): event is Extract<AdapterEvent, { type: "text_delta" }> =>
+        event.type === "text_delta").map(event => event.text).join("");
+      expect(summary).toContain("S8 verified canonical compact summary");
+      expect(JSON.parse(readFileSync(fixture.statePath, "utf8"))
+        .quarantines.s8_recovery_thread.pendingCompactionDigest).toBeUndefined();
+
+      chatGptTurnSessions.clear();
+      const replay = request(`s8_${protocol}_replay`, [
+        { type: "message", role: "developer", content: "S8-EARLY-AUTHORITY must remain exact." },
+        { type: "compaction", encrypted_content: encodeCompactionSummary(summary) },
+        { type: "message", role: "user", content: [{ type: "input_text", text: environment }], ...nativeTurn(`s8_${protocol}_replay`) },
+        { type: "message", role: "user", id: `s8_${protocol}_user`, content: "Resume after compact", ...nativeTurn(`s8_${protocol}_replay`) },
+      ]);
+      await createChatGptWebAdapter(fixture.provider).runTurn!(
+        replay, { headers: new Headers() }, () => {},
+      );
+      expect(new ChatGptSemanticEpochStore(fixture.statePath).isQuarantined("s8_recovery_thread")).toBeTrue();
+    } finally {
+      await fixture.close();
+    }
+  });
+}
+
+test("S8: fresh native compact can clear a quarantine discovered during its own validation", async () => {
+  const fixture = makeFixture();
+  const environment = `<environment_context><cwd>${fixture.dir}</cwd><filesystem><workspace_roots><root>${fixture.dir}</root></workspace_roots><permission_profile type="disabled"><file_system type="unrestricted" /></permission_profile></filesystem></environment_context>`;
+  try {
+    const firstInput = [
+      { type: "message", role: "developer", content: "Keep canonical source authority exact." },
+      { type: "message", role: "user", content: [{ type: "input_text", text: environment }], ...nativeTurn("small_first") },
+      { type: "message", role: "user", id: "small_user_first", content: "First task", ...nativeTurn("small_first") },
+    ];
+    const adapter = createChatGptWebAdapter(fixture.provider);
+    const firstEvents: AdapterEvent[] = [];
+    await adapter.runTurn!(request("small_first", firstInput), { headers: new Headers() }, event => firstEvents.push(event));
+    expect(firstEvents.at(-1)).toMatchObject({ type: "done" });
+
+    const secondInput = [
+      ...firstInput,
+      { type: "message", role: "assistant", content: [{ type: "output_text", text: "S8 answer 1" }] },
+      { type: "message", role: "user", content: [{ type: "input_text", text: environment }], ...nativeTurn("small_second") },
+      { type: "message", role: "user", id: "small_user_second", content: "Second task", ...nativeTurn("small_second") },
+    ];
+    const secondEvents: AdapterEvent[] = [];
+    await adapter.runTurn!(request("small_second", secondInput), { headers: new Headers() }, event => secondEvents.push(event));
+    expect(secondEvents.at(-1)).toMatchObject({ type: "done" });
+    const saved = JSON.parse(readFileSync(fixture.statePath, "utf8"));
+    expect(saved.epochs.s8_recovery_thread.semanticEpoch).toBe(1);
+    saved.epochs.s8_recovery_thread.coveredHistoryDigest = "f".repeat(64);
+    writeFileSync(fixture.statePath, JSON.stringify(saved));
+    chatGptTurnSessions.clear(); // No retained browser source; use fresh compaction.
+
+    const compact = request("small_compact", [...secondInput, { type: "compaction_trigger" }], true);
+    const compactEvents: AdapterEvent[] = [];
+    await createChatGptWebAdapter(fixture.provider).runTurn!(compact, { headers: new Headers() }, event => compactEvents.push(event));
+    expect(compactEvents.at(-1)).toMatchObject({ type: "done" });
+    const summary = compactEvents.filter((event): event is Extract<AdapterEvent, { type: "text_delta" }> =>
+      event.type === "text_delta").map(event => event.text).join("");
+    expect(summary).not.toBe("");
+    const quarantine = JSON.parse(readFileSync(fixture.statePath, "utf8")).quarantines.s8_recovery_thread;
+    expect(quarantine).toMatchObject({ reason: "digest_mismatch" });
+    expect(typeof quarantine.pendingCompactionDigest).toBe("string");
+
+    const followup = request("small_after_compact", [
+      { type: "message", role: "developer", content: "Keep canonical source authority exact." },
+      { type: "compaction", encrypted_content: encodeCompactionSummary(summary) },
+      { type: "message", role: "user", content: [{ type: "input_text", text: environment }], ...nativeTurn("small_after_compact") },
+      { type: "message", role: "user", id: "small_user_after", content: "Continue", ...nativeTurn("small_after_compact") },
+    ]);
+    const events: AdapterEvent[] = [];
+    await createChatGptWebAdapter(fixture.provider).runTurn!(followup, { headers: new Headers() }, event => events.push(event));
+    expect(events.at(-1)).toMatchObject({ type: "done" });
+    expect(new ChatGptSemanticEpochStore(fixture.statePath).isQuarantined("s8_recovery_thread")).toBeFalse();
   } finally {
     await fixture.close();
   }
