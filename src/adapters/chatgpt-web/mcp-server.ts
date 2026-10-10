@@ -7,7 +7,7 @@ import { namespacedToolName, type CodexTool } from "../../types";
 import { VERSION } from "../../version";
 import type { ChatGptTurnEnvironment } from "./environment";
 import { CODEX_COMPACTION_CONTROL_WIRE_NAME } from "./native-compaction-control";
-import { callTurnBroker, TurnBrokerTimeoutError, type BrokerToolResult } from "./turn-broker";
+import { callTurnBroker, MAX_OVERSIZED_RESULT_CHUNK_CHARS, TurnBrokerTimeoutError, type BrokerToolResult } from "./turn-broker";
 import { emitNativeToolDiagnostic, mcpDiagnosticId, nativeToolSafetyMessage, observeMcpToolCalls, setNativeToolDiagnosticSink, type NativeToolDiagnosticFields } from "./mcp-observation";
 
 interface ClaimedTurn {
@@ -22,6 +22,8 @@ const BRIDGE_TOOL_NAMES = new Set([
   "codex_turn_start",
   "codex_exec",
   "codex_write_stdin",
+  "codex_result_chunk",
+  "codex_compaction_result_chunk",
   "codex_apply_patch",
   "codex_view_image",
   "codex_tool_inventory",
@@ -40,10 +42,10 @@ const jsonArgumentsSchema = z.record(z.string(), z.unknown()).default({});
 // Match Codex's default wait interval while returning before the MCP invocation deadline.
 export const CHATGPT_WEB_AGENT_WAIT_POLL_MS = 30_000;
 const AGENT_WAIT_TRANSPORT_RULE = `ChatGPT Web transport rule: wait for exactly ${CHATGPT_WEB_AGENT_WAIT_POLL_MS / 1_000} seconds per call, matching the Codex default, then release the MCP channel so spawned Web agents can use their own tools. A wait timeout is not task completion; check agent progress and wait again if needed. Keep the native tool's declared arguments.`;
-// The OpenAI tunnel currently owns a two-minute command-response deadline. The local MCP server
-// must settle first so an abandoned native tool call is returned as an MCP error instead of
-// letting the tunnel tear down and poison its long-lived stdio transport.
+// The current tunnel has a 120-second response deadline. Leave 30 seconds for MCP/broker
+// settlement, even for a Desktop turn with no explicit expiry. Never retry an ambiguous tool.
 export const CHATGPT_WEB_MCP_INVOCATION_TIMEOUT_MS = 90_000;
+const CHATGPT_WEB_MCP_BROKER_PROTOCOL_VERSION = 7;
 
 const ZERO_RISK_MCP_INSTRUCTIONS = [
   "For each pasted Codex Web GPT request, begin with codex_turn_start using the request_id in its request block.",
@@ -118,6 +120,17 @@ function wireName(tool: CodexTool): string {
 
 function exactTool(environment: ChatGptTurnEnvironment, name: string): CodexTool | undefined {
   return environment.tools.find(tool => !tool.namespace && tool.name === name);
+}
+
+// Cap routine command output at its source, while native Codex still owns the complete
+// command execution and truncation notice. This prevents large accidental stdout from
+// exhausting an entire ChatGPT browser epoch before any recovery can run.
+export const DEFAULT_CODEX_NATIVE_OUTPUT_TOKENS = 4_096;
+
+function nativeOutputBudget(requested: number | undefined, tool?: CodexTool): number | undefined {
+  if (requested !== undefined) return requested;
+  if (tool && !Object.hasOwn(tool.parameters.properties ?? {}, "max_output_tokens")) return undefined;
+  return DEFAULT_CODEX_NATIVE_OUTPUT_TOKENS;
 }
 
 function gatewayToolNameIsValid(name: string): boolean {
@@ -452,6 +465,14 @@ export async function runChatGptMcpServer(options: {
   brokerSocketPath: string;
   contract?: ChatGptMcpContract;
 }): Promise<void> {
+  // Negotiate before advertising tools/list: the desktop may reuse a connector process while
+  // the launcher/broker changes. An older broker cannot support canonical chunk reads safely.
+  const status = await callTurnBroker<{ protocolVersion?: unknown }>(options.brokerSocketPath, {
+    method: "owner_status",
+  }, 5_000);
+  if (status?.protocolVersion !== CHATGPT_WEB_MCP_BROKER_PROTOCOL_VERSION) {
+    throw new Error(`Incompatible Codex MCP broker protocol: expected ${CHATGPT_WEB_MCP_BROKER_PROTOCOL_VERSION}, got ${String(status?.protocolVersion)}. Restart the launcher and reconnect the ChatGPT connector.`);
+  }
   // The tunnel runs MCP in a separate process: its stdout/stderr is not
   // guaranteed to be included in the launcher's daemon log. Relay only
   // content-free metadata over the existing local broker socket, with a cap on
@@ -670,10 +691,54 @@ export async function runChatGptMcpServer(options: {
   };
 
   server.registerTool(
+    "codex_result_chunk",
+    {
+      title: "Read an oversized prior Codex tool result",
+      description: afterSafeStart(contract, "Read a bounded range of a canonical tool result referenced by a previous tool response in this same turn. This never executes that tool again. Start at offset=0; chunks are JSON-encoded canonical content and nextOffset gives the following range."),
+      inputSchema: {
+        ...turnReferenceInput(contract),
+        reference: z.string().regex(/^call_[A-Za-z0-9_-]+$/),
+        offset: z.number().int().nonnegative().default(0),
+        length: z.number().int().min(1).max(MAX_OVERSIZED_RESULT_CHUNK_CHARS).default(4_096),
+      },
+      annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false },
+    },
+    async (input, extra) => withClaimedTurn(
+      "codex_result_chunk",
+      turnReference(contract, input),
+      extra,
+      async claimed => result(await callTurnBroker<Record<string, unknown>>(options.brokerSocketPath, {
+        method: "read_oversized_result", bindingId: claimed.bindingId,
+        reference: input.reference, offset: input.offset, length: input.length,
+      }, 5_000, extra.signal)),
+    ),
+  );
+
+  server.registerTool(
+    "codex_compaction_result_chunk",
+    {
+      title: "Read exact canonical evidence for a pending compaction checkpoint",
+      description: "Read a bounded JSON chunk retained only for this one-shot compaction transaction. It cannot execute commands, access other turns, or outlive summary submission.",
+      inputSchema: {
+        control_token: z.string().regex(/^control_[a-f0-9]{32}$/),
+        handoff_id: z.string().regex(/^handoff_[a-f0-9]{32}$/),
+        reference: z.string().regex(/^call_[A-Za-z0-9_-]+$/),
+        offset: z.number().int().nonnegative().default(0),
+        length: z.number().int().min(1).max(MAX_OVERSIZED_RESULT_CHUNK_CHARS).default(4_096),
+      },
+      annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false },
+    },
+    async (input, extra) => result(await callTurnBroker<Record<string, unknown>>(options.brokerSocketPath, {
+      method: "read_compaction_evidence", token: input.control_token, handoffId: input.handoff_id,
+      reference: input.reference, offset: input.offset, length: input.length,
+    }, 5_000, extra.signal)),
+  );
+
+  server.registerTool(
     "codex_exec",
     {
       title: "Run a native Codex command",
-      description: afterSafeStart(contract, "Invoke the command tool advertised by the current outer Codex harness. A long-running command returns its native session_id."),
+      description: afterSafeStart(contract, "Invoke the command tool advertised by the current outer Codex harness. Defaults to 4096 output tokens when the native tool supports that limit. A long-running command returns its native session_id."),
       inputSchema: {
         ...turnReferenceInput(contract),
         cmd: z.string().min(1).max(100_000),
@@ -697,6 +762,8 @@ export async function runChatGptMcpServer(options: {
       async claimed => {
         const { cmd, workdir, yield_time_ms, max_output_tokens, tty, sandbox_permissions, justification, prefix_rule } = input;
         const bound = claimed.environment;
+        const tool = exactTool(bound, "exec_command") ?? exactTool(bound, "shell_command");
+        const outputBudget = nativeOutputBudget(max_output_tokens, tool);
         const permissions = {
           ...(sandbox_permissions !== undefined ? { sandbox_permissions } : {}),
           ...(justification !== undefined ? { justification } : {}),
@@ -706,7 +773,7 @@ export async function runChatGptMcpServer(options: {
           cmd,
           ...(workdir ? { workdir } : {}),
           ...(yield_time_ms !== undefined ? { yield_time_ms } : {}),
-          ...(max_output_tokens !== undefined ? { max_output_tokens } : {}),
+          ...(outputBudget !== undefined ? { max_output_tokens: outputBudget } : {}),
           ...(tty !== undefined ? { tty } : {}),
           ...permissions,
         };
@@ -716,7 +783,6 @@ export async function runChatGptMcpServer(options: {
           ...(yield_time_ms !== undefined ? { timeout_ms: yield_time_ms } : {}),
           ...permissions,
         };
-        const tool = exactTool(bound, "exec_command") ?? exactTool(bound, "shell_command");
         if (tool) {
           // Never silently discard an approval request on a native registry that cannot express it.
           const properties = tool.parameters.properties;
@@ -743,12 +809,12 @@ export async function runChatGptMcpServer(options: {
     "codex_write_stdin",
     {
       title: "Continue a native Codex command session",
-      description: afterSafeStart(contract, "Write characters to, or poll, a session_id returned by codex_exec."),
+      description: afterSafeStart(contract, "Write characters to, or poll, a session_id returned by codex_exec. Poll for up to 30 seconds per request; repeat polls for long-running sessions. Defaults to 4096 output tokens when supported by the native tool."),
       inputSchema: {
         ...turnReferenceInput(contract),
         session_id: z.number().int().nonnegative(),
         chars: z.string().max(1_000_000).optional(),
-        yield_time_ms: z.number().int().min(250).max(300_000).optional(),
+        yield_time_ms: z.number().int().min(250).max(30_000).optional(),
         max_output_tokens: z.number().int().min(1).max(1_000_000).optional(),
       },
       annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: false, openWorldHint: true },
@@ -761,11 +827,12 @@ export async function runChatGptMcpServer(options: {
         const { session_id, chars, yield_time_ms, max_output_tokens } = input;
         const bound = claimed.environment;
         const tool = exactTool(bound, "write_stdin");
+        const outputBudget = nativeOutputBudget(max_output_tokens, tool);
         const payload = { arguments: {
           session_id,
           ...(chars !== undefined ? { chars } : {}),
           ...(yield_time_ms !== undefined ? { yield_time_ms } : {}),
-          ...(max_output_tokens !== undefined ? { max_output_tokens } : {}),
+          ...(outputBudget !== undefined ? { max_output_tokens: outputBudget } : {}),
         } };
         return tool
           ? invoke(claimed.bindingId, bound, tool, payload, extra.signal)

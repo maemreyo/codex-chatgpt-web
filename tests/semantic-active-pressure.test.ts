@@ -6,7 +6,7 @@ import { ChatGptBrowserWorker, type BrowserTurn } from "../src/adapters/chatgpt-
 import { chatGptWebExecutionNamespace, createChatGptWebAdapter } from "../src/adapters/chatgpt-web/index";
 import { CHATGPT_WEB_MODEL_ID } from "../src/adapters/chatgpt-web/model";
 import { chatGptTurnExecutionKey, chatGptTurnSessions } from "../src/adapters/chatgpt-web/turn-execution";
-import { callTurnBroker, TurnBroker, type BrokerToolResult } from "../src/adapters/chatgpt-web/turn-broker";
+import { MAX_OVERSIZED_RESULT_CHARS, callTurnBroker, TurnBroker, type BrokerToolResult } from "../src/adapters/chatgpt-web/turn-broker";
 import { defaultConfig } from "../src/config";
 import { decodeCompactionSummary } from "../src/responses/compaction";
 import { parseRequest } from "../src/responses/parser";
@@ -65,6 +65,7 @@ function fixture(toolsOnFirst = false) {
   let retainedHandoffs = 0;
   let toolSubmissions = 0;
   let completedInvocationResults: BrokerToolResult[] = [];
+  let oversizedChunk: { text: string; nextOffset: number; sha256: string } | undefined;
   let token = "";
   (worker as unknown as { run: (turn: BrowserTurn) => Promise<string> }).run = async turn => {
     observed.push({ compaction: turn.compaction === true, family: turn.modelFamily, effort: turn.reasoning });
@@ -108,6 +109,13 @@ function fixture(toolsOnFirst = false) {
     }
     await progress.acknowledgeToolBatch(snapshot.lastToolBatchRevision);
     completedInvocationResults = await Promise.all(invocations);
+    if (JSON.stringify(completedInvocationResults[0]?.content).includes("codex_result_chunk")) {
+      const readBinding = await callTurnBroker<{ bindingId: string }>(socketPath, { method: "claim", token });
+      oversizedChunk = await callTurnBroker(socketPath, {
+        method: "read_oversized_result", bindingId: readBinding.bindingId,
+        reference: delivered[0]!.callId, offset: 0, length: 128,
+      });
+    }
     const answer = "S8 original browser turn settled after canonical tool delivery";
     turn.onTextDelta(answer);
     return answer;
@@ -118,6 +126,7 @@ function fixture(toolsOnFirst = false) {
     get retainedHandoffs() { return retainedHandoffs; },
     get toolSubmissions() { return toolSubmissions; },
     get completedInvocationResults() { return completedInvocationResults; },
+    get oversizedChunk() { return oversizedChunk; },
     async close() {
       (worker as unknown as { run: (turn: BrowserTurn) => Promise<string> }).run = originalRun;
       broker.completeTool = originalComplete;
@@ -164,7 +173,11 @@ test.each(["accumulated_occupancy", "unknown_occupancy"])("SEM continues the com
     const oversized = complete.map(item => item.type === "function_call_output"
       ? { ...item, output: "word ".repeat(120_000) } : item);
     const atomic = adapter.preflightTurn!(sourceRequest([...canonical, ...oversized]));
-    expect(atomic).toMatchObject({ code: "semantic_atomic_result_too_large", retryable: false });
+    expect(atomic).toBeUndefined(); // The exact oversized result can be fetched in bounded chunks.
+    const unreferenceable = complete.map(item => item.type === "function_call_output"
+      ? { ...item, output: "x".repeat(MAX_OVERSIZED_RESULT_CHARS + 1) } : item);
+    expect(adapter.preflightTurn!(sourceRequest([...canonical, ...unreferenceable])))
+      .toMatchObject({ code: "semantic_atomic_result_too_large", retryable: false });
     expect(f.delivered).toHaveLength(0);
     expect(source?.outstanding()).toHaveLength(2);
     expect(adapter.preflightTurn!(sourceRequest([...canonical, ...complete]))).toBeUndefined();
@@ -238,14 +251,21 @@ test("S8: advisory pressure delivers once -> explicit Web compaction -> delta-on
     occupancy.record("fake-already-retained-browser-epoch", occupancy.physicalLimit - 12_000);
     const completeBatch = ids.flatMap((id, index) => [
       { type: "function_call", call_id: id, name: "exec_command", arguments: JSON.stringify({ cmd: `fake-tool-${index + 1}` }) },
-      { type: "function_call_output", call_id: id, output: `S8-EXACT-RESULT-${index + 1} ${"alpha beta ".repeat(500)}` },
+      { type: "function_call_output", call_id: id, output: `S8-EXACT-RESULT-${index + 1} ${"alpha beta ".repeat(index === 0 ? 60_000 : 500)}` },
     ]);
     const fullCanonical = [...canonical, ...completeBatch];
     const active = sourceRequest(fullCanonical);
     expect(occupancy.canFitAtomicResults(completeBatch.filter((_, i) => i % 2 === 1)
-      .map(item => ({ content: (item as { output: string }).output })))).toBeTrue();
+      .map(item => ({ content: (item as { output: string }).output })))).toBeFalse();
     expect(occupancy.canDeliverBatch(completeBatch.filter((_, i) => i % 2 === 1)
       .map((item, i) => ({ callId: ids[i]!, content: (item as { output: string }).output })))).toBeFalse();
+    // A second native batch must account for references already committed in
+    // this turn, before acknowledging any new browser result.
+    source!.runtime.oversizedResultSizes = new Map([["prior-batch", 23_900_000]]);
+    expect(adapter.preflightTurn!(active)).toMatchObject({
+      code: "semantic_atomic_result_too_large", retryable: false,
+    });
+    source!.runtime.oversizedResultSizes = undefined;
     const failed: AdapterEvent[] = [];
     await adapter.runTurn!(active, { headers: new Headers() }, event => failed.push(event));
     expect(failed.at(-1)).toMatchObject({ type: "done", stopReason: "stop" });
@@ -292,10 +312,16 @@ test("S8: advisory pressure delivers once -> explicit Web compaction -> delta-on
     expect(upstreamCalls).toBe(0);
     expect(f.retainedHandoffs).toBe(1);
     expect(f.delivered.map(entry => entry.callId)).toEqual(ids);
-    expect(f.completedInvocationResults.map(result => result.content[0])).toEqual(
-      completeBatch.filter((_, i) => i % 2 === 1)
-        .map(item => ({ type: "text", text: (item as { output: string }).output })),
-    );
+    const overflowNote = f.completedInvocationResults[0]?.content[0] as { type: string; text: string };
+    expect(overflowNote.text).toContain(`reference=${ids[0]}`);
+    expect(overflowNote.text).toContain("codex_result_chunk");
+    const chunk = f.oversizedChunk!;
+    expect(chunk.text).toBe(JSON.stringify((completeBatch[1] as { output: string }).output).slice(0, 128));
+    expect(chunk.nextOffset).toBe(128);
+    expect(chunk.sha256).toHaveLength(64);
+    expect(f.completedInvocationResults[1]?.content[0]).toEqual({
+      type: "text", text: (completeBatch[3] as { output: string }).output,
+    });
     expect(f.observed.at(-1)).toMatchObject({ compaction: true, family: "5.6", effort: "medium" });
 
     // Model the already-local previous_response_id ledger used by the native continuation.
@@ -323,6 +349,44 @@ test("S8: advisory pressure delivers once -> explicit Web compaction -> delta-on
     expect(upstreamCalls).toBe(1);
     expect(f.delivered.map(entry => entry.callId)).toEqual(ids);
     expect(f.toolSubmissions).toBe(2);
+
+    // ChatGPT Desktop's ordinary configuration has SEM disabled. The broker
+    // reference must still protect an oversized native result in that mode.
+    const legacy = fixture(true);
+    try {
+      legacy.provider.chatgptWeb!.experimentalSemanticMemory = false;
+      const legacyAdapter = createChatGptWebAdapter(legacy.provider);
+      const legacyEnvironment = `<environment_context><cwd>${legacy.dir}</cwd><filesystem><workspace_roots><root>${legacy.dir}</root></workspace_roots><permission_profile type="disabled"><file_system type="unrestricted" /></permission_profile></filesystem></environment_context>`;
+      const legacyAuthority: unknown[] = [
+        firstAuthority[0],
+        { type: "message", role: "user", content: [{ type: "input_text", text: legacyEnvironment }],
+          internal_chat_message_metadata_passthrough: { turn_id: "legacy_tool_turn" } },
+        { type: "message", role: "user", content: "Check default-off oversized result",
+          internal_chat_message_metadata_passthrough: { turn_id: "legacy_tool_turn" } },
+      ];
+      const initial = sourceRequest(legacyAuthority, "legacy_tool_turn");
+      const pending: AdapterEvent[] = [];
+      await legacyAdapter.runTurn!(initial, { headers: new Headers() }, event => pending.push(event));
+      const legacyIds = pending.filter((event): event is Extract<AdapterEvent, { type: "tool_call_start" }> =>
+        event.type === "tool_call_start").map(event => event.id);
+      expect(legacyIds).toHaveLength(2);
+      const legacySource = chatGptTurnSessions.find(
+        `${chatGptWebExecutionNamespace(legacy.provider)}:${chatGptTurnExecutionKey(initial)}`,
+      );
+      expect(legacySource?.runtime.semanticOccupancy).toBeDefined();
+      const legacyResults = legacyIds.flatMap((id, index) => [
+        { type: "function_call", call_id: id, name: "exec_command", arguments: JSON.stringify({ cmd: `fake-tool-${index + 1}` }) },
+        { type: "function_call_output", call_id: id,
+          output: index === 0 ? `LEGACY-OVERSIZED ${"alpha beta ".repeat(60_000)}` : "LEGACY-SMALL" },
+      ]);
+      await legacyAdapter.runTurn!(sourceRequest([...legacyAuthority, ...legacyResults], "legacy_tool_turn"),
+        { headers: new Headers() }, () => {});
+      expect((legacy.delivered[0]?.result.content[0] as { text: string }).text)
+        .toContain(`reference=${legacyIds[0]}`);
+      expect(legacy.oversizedChunk?.text).toBe(JSON.stringify((legacyResults[1] as { output: string }).output).slice(0, 128));
+    } finally {
+      await legacy.close();
+    }
   } finally {
     await f.close();
   }

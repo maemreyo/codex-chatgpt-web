@@ -14,7 +14,7 @@ import {
   structuredCompactionHandoffInstruction,
   zeroRiskActiveCompactionToolResultInstruction,
 } from "./native-compaction-control";
-import type { BrokerToolResult, TurnBroker, TurnBrokerOwner } from "./turn-broker";
+import { MAX_OVERSIZED_RESULT_CHARS, MAX_OVERSIZED_TURN_CHARS, type BrokerToolResult, type TurnBroker, type TurnBrokerOwner } from "./turn-broker";
 import type { ChatGptTurnSession } from "./turn-execution";
 
 export const LATEST_USER_PROMPT_MARKER = "CODEX_LATEST_USER_PROMPT_JSON";
@@ -208,7 +208,8 @@ export async function settleActiveCompactionSource(
   source: ChatGptTurnSession,
   broker: TurnBroker,
   signal?: AbortSignal,
-): Promise<{ answer: string; compactionInstructionDelivered: boolean }> {
+): Promise<{ answer: string; compactionInstructionDelivered: boolean;
+  oversizedEvidence?: Array<{ callId: string; canonical: string }> }> {
   return source.runExclusive(async () => {
     if (signal?.aborted) {
       source.cancel(abortReason(signal));
@@ -224,10 +225,31 @@ export async function settleActiveCompactionSource(
         `Codex supplied ${results.size} of ${outstanding.length} required tool results for compaction`,
       );
     }
-    if (source.runtime.semanticOccupancy
-      && !source.runtime.semanticOccupancy.canFitAtomicResults([...results.values()].map(result => ({ content: result.content })))) {
+    // Reserve the whole bounded-reference budget before acknowledging *any*
+    // result. A partial compaction batch cannot be safely replayed in place.
+    const oversized = new Map<string, string>();
+    let storedChars = [...(source.runtime.oversizedResultSizes?.values() ?? [])].reduce((sum, size) => sum + size, 0);
+    let cannotStore = false;
+    for (const [callId, result] of results) {
+      const occupancy = source.runtime.semanticOccupancy;
+      if (!occupancy) continue;
+      if (typeof result.content === "string" && result.content.length > MAX_OVERSIZED_RESULT_CHARS) {
+        cannotStore = true;
+        break;
+      }
+      if (occupancy.canFitAtomicResults([{ content: result.content }])) continue;
+      const canonical = JSON.stringify(result.content);
+      if (canonical === undefined || canonical.length > MAX_OVERSIZED_RESULT_CHARS
+        || storedChars + (source.runtime.oversizedResultSizes?.has(callId) ? 0 : canonical.length) > MAX_OVERSIZED_TURN_CHARS) {
+        cannotStore = true;
+        break;
+      }
+      if (!source.runtime.oversizedResultSizes?.has(callId)) storedChars += canonical.length;
+      oversized.set(callId, canonical);
+    }
+    if (cannotStore) {
       throw new ChatGptWebAdapterError(
-        "A canonical tool result exceeds the browser's physical capacity even during compaction.",
+        "The canonical tool-result batch exceeds the bounded broker reference capacity during compaction.",
         { status: 409, errorType: "invalid_request_error", code: "semantic_atomic_result_too_large", retryable: false },
       );
     }
@@ -238,6 +260,13 @@ export async function settleActiveCompactionSource(
     try {
       const acquiredToken = await acquireCompactionToken(source, broker, signal);
       token = acquiredToken;
+      if (oversized.size > 0) await brokerOperation(() => broker.reserveOversizedResults(
+        acquiredToken, [...oversized].map(([callId, canonical]) => ({ callId, canonical })),
+      ), signal);
+      if (oversized.size > 0) {
+        const sizes = source.runtime.oversizedResultSizes ??= new Map<string, number>();
+        for (const [callId, canonical] of oversized) sizes.set(callId, canonical.length);
+      }
       // A broker acknowledgement can be lost after the browser accepted a
       // result. Once settlement starts, any failure leaves delivery ambiguous.
       // Retire this browser source; never replay its remaining batch in place.
@@ -245,12 +274,23 @@ export async function settleActiveCompactionSource(
       await brokerOperation(() => broker.requestCompaction(acquiredToken, interruptedByActiveCompaction()), signal);
       for (const request of outstanding) {
         const result = results.get(request.callId)!;
+        let visible = toolResult(result);
+        let visibleContent: unknown = result.content;
+        const canonical = oversized.get(request.callId);
+        if (canonical !== undefined) {
+          const reference = await brokerOperation(() => broker.storeOversizedResult(acquiredToken, request.callId, canonical), signal);
+          const note = `[Canonical Codex result retained by this turn; reference=${reference}; chars=${canonical.length}.`
+            + " Read exact JSON content using codex_result_chunk with this turn_token, reference and bounded offset/length."
+            + " The original native result remains complete; do not execute the tool again.]";
+          visible = { content: [{ type: "text", text: note }], ...(result.isError ? { isError: true } : {}) };
+          visibleContent = note;
+        }
         await brokerOperation(() => broker.completeTool(
           acquiredToken,
           request.callId,
-          toolResult(result),
+          visible,
         ), signal);
-        source.runtime.semanticOccupancy?.recordToolResult(request.callId, result.content);
+        source.runtime.semanticOccupancy?.recordToolResult(request.callId, visibleContent);
         source.runtime.externalProgress.recordToolResult();
         source.markResultDelivered(request.callId);
       }
@@ -264,9 +304,14 @@ export async function settleActiveCompactionSource(
       // `requestCompaction` leaves those results untouched and only intercepts a later tool call, so
       // a zero delivery count proves that this is an ordinary publishable terminal response.
       await withCompactionAbort(source.physicalSettlement, signal);
+      const evidence = source.runtime.oversizedResultSizes?.size
+        ? broker.snapshotOversizedResults(acquiredToken) : [];
       return {
         answer: browserOutcome.answer,
         compactionInstructionDelivered,
+        // Keep a bounded, read-only snapshot for the one-shot checkpoint after
+        // this native source binding is revoked. No native tool is re-executed.
+        ...(evidence.length > 0 ? { oversizedEvidence: evidence } : {}),
       };
     } catch (error) {
       failed = true;
@@ -320,6 +365,35 @@ export async function settleActiveZeroRiskCompactionSource(
         `Codex supplied ${results.size} of ${outstanding.length} required tool results for Zero Risk compaction`,
       );
     }
+    // Zero Risk has no automatic physical occupancy ledger. Bound both an
+    // individual result and the total inline batch before acknowledging any
+    // native result. References remain readable with the same request_id.
+    const oversized = new Map<string, string>();
+    let storedChars = [...(source.runtime.oversizedResultSizes?.values() ?? [])]
+      .reduce((sum, size) => sum + size, 0);
+    let inlineChars = 0;
+    for (const [callId, result] of results) {
+      const canonical = JSON.stringify(result.content);
+      if (canonical === undefined || canonical.length > MAX_OVERSIZED_RESULT_CHARS) {
+        throw new ChatGptWebAdapterError("Zero Risk canonical result exceeds bounded reference capacity.",
+          { status: 409, errorType: "invalid_request_error", code: "semantic_atomic_result_too_large", retryable: false });
+      }
+      const referenceNeeded = canonical.length > 16_384 || inlineChars + canonical.length > 64_000
+        || (source.runtime.semanticOccupancy !== undefined
+          && !source.runtime.semanticOccupancy.canFitAtomicResults([{ content: result.content }]));
+      if (!referenceNeeded) {
+        inlineChars += canonical.length;
+        continue;
+      }
+      const stored = source.runtime.oversizedResultSizes?.get(callId);
+      if ((stored !== undefined && stored !== canonical.length)
+        || storedChars + (stored === undefined ? canonical.length : 0) > MAX_OVERSIZED_TURN_CHARS) {
+        throw new ChatGptWebAdapterError("Zero Risk tool-result batch exceeds bounded reference capacity.",
+          { status: 409, errorType: "invalid_request_error", code: "semantic_atomic_result_too_large", retryable: false });
+      }
+      if (stored === undefined) storedChars += canonical.length;
+      oversized.set(callId, canonical);
+    }
     let token: string | undefined;
     let handoffStarted = false;
     let failed = false;
@@ -327,6 +401,12 @@ export async function settleActiveZeroRiskCompactionSource(
     try {
       const acquiredToken = await acquireCompactionToken(source, broker, signal);
       token = acquiredToken;
+      if (oversized.size > 0) {
+        await brokerOperation(() => broker.reserveOversizedResults(acquiredToken,
+          [...oversized].map(([callId, canonical]) => ({ callId, canonical }))), signal);
+        const sizes = source.runtime.oversizedResultSizes ??= new Map<string, number>();
+        for (const [callId, canonical] of oversized) sizes.set(callId, canonical.length);
+      }
       handoffStarted = true;
       const interruptedQueued = await brokerOperation(() => broker.requestCompaction(
         acquiredToken,
@@ -334,14 +414,25 @@ export async function settleActiveZeroRiskCompactionSource(
       ), signal);
       for (const [index, request] of outstanding.entries()) {
         const result = results.get(request.callId)!;
-        const canonical = toolResult(result);
+        let visible = toolResult(result);
+        const canonical = oversized.get(request.callId);
+        if (canonical !== undefined) {
+          const reference = await brokerOperation(() => broker.storeOversizedResult(
+            acquiredToken, request.callId, canonical), signal);
+          const note = `[Canonical Codex result retained for this Zero Risk request; reference=${reference}; chars=${canonical.length}.`
+            + " Read JSON using codex_result_chunk with the same request_id, reference and offset/length <=8192."
+            + " The native result is complete; do not re-execute the tool.]";
+          visible = { content: [{ type: "text", text: note }], ...(result.isError ? { isError: true } : {}) };
+        }
         await brokerOperation(() => broker.completeTool(
           acquiredToken,
           request.callId,
           interruptedQueued === 0 && index === outstanding.length - 1
-            ? withZeroRiskCompactionInstruction(canonical)
-            : canonical,
+            ? withZeroRiskCompactionInstruction(visible)
+            : visible,
         ), signal);
+        source.runtime.semanticOccupancy?.recordToolResult(request.callId, canonical !== undefined
+          ? `reference=${request.callId}` : result.content);
         source.runtime.externalProgress.recordToolResult();
         source.markResultDelivered(request.callId);
       }
@@ -394,6 +485,7 @@ export async function requestRetainedCompactionHandoff(
   traceId: string,
   signal?: AbortSignal,
   timeoutMs = MAX_COMPACTION_HANDOFF_TIMEOUT_MS,
+  oversizedEvidence: readonly { callId: string; canonical: string }[] = [],
 ): Promise<string> {
   const conversationKey = source.conversationKey();
   if (!conversationKey) throw new Error("The completed ChatGPT source has no retained conversation identity");
@@ -421,7 +513,12 @@ export async function requestRetainedCompactionHandoff(
       }
     }, () => {});
     transaction = await withCompactionAbort(transactionPromise, operationSignal);
-    const instruction = structuredCompactionHandoffInstruction(transaction);
+    if (oversizedEvidence.length > 0) {
+      broker.attachCompactionEvidence(transaction.token, transaction.handoffId, oversizedEvidence);
+    }
+    const instruction = structuredCompactionHandoffInstruction(
+      transaction, oversizedEvidence.map(item => ({ reference: item.callId, chars: item.canonical.length })),
+    );
     const prepare = async () => ({ text: instruction, images: [], release: () => {} });
     browser = worker.run({
       traceId,

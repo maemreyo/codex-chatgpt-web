@@ -64,10 +64,17 @@ export function zeroRiskActiveCompactionToolResultInstruction(toolExecuted: bool
 
 export function structuredCompactionHandoffInstruction(
   transaction: CompactionTransactionHandle,
+  references: readonly { reference: string; chars: number }[] = [],
 ): string {
   return [
     "Automatic Codex context compaction has started. Stop ordinary task work and do not call any more work tools.",
     COMPACT_PROMPT,
+    ...(references.length > 0 ? [
+      "Some canonical tool results were referenced in the previous response and remain available to this checkpoint only.",
+      `Available references: ${references.map(item => `${item.reference} (${item.chars} JSON chars)`).join(", ")}.`,
+      `Use read-only codex_compaction_result_chunk with control_token=${transaction.token}, handoff_id=${transaction.handoffId}, reference, offset and length<=8192 to inspect relevant exact evidence before summarizing.`,
+      "Read access expires when the summary is accepted. Never repeat the underlying native command.",
+    ] : []),
     ...compactionControlBinding(transaction),
     "After the control call returns submitted=true, call no more tools. The bridge will close this one-purpose Web response after accepting the checkpoint.",
     "If the call is rejected or fails, stop and report its actual error. Do not retry through another tool or claim the summary was submitted without submitted=true.",

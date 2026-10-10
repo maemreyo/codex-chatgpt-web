@@ -1,4 +1,4 @@
-import { randomBytes } from "node:crypto";
+import { createHash, randomBytes } from "node:crypto";
 
 export interface CompactionTransactionHandle {
   token: string;
@@ -14,6 +14,7 @@ interface TransactionWaiter {
 
 interface CompactionTransaction extends CompactionTransactionHandle {
   traceId: string;
+  evidence?: Map<string, { canonical: string; sha256: string }>;
   summary?: string;
   waiter?: TransactionWaiter;
   timer?: ReturnType<typeof setTimeout>;
@@ -43,6 +44,46 @@ export class CompactionTransactionStore {
     transaction.timer.unref?.();
     this.transactions.set(transaction.token, transaction);
     return { token: transaction.token, handoffId: transaction.handoffId };
+  }
+
+  /** Read-only evidence is scoped to this checkpoint and disappears with its one-shot control. */
+  attachEvidence(token: string, handoffId: string, entries: readonly { callId: string; canonical: string }[]): void {
+    const transaction = this.pending(token, handoffId);
+    if (transaction.evidence) throw new Error("compaction evidence was already attached");
+    const evidence = new Map<string, { canonical: string; sha256: string }>();
+    for (const { callId, canonical } of entries) {
+      if (!/^call_[A-Za-z0-9_-]+$/.test(callId) || typeof canonical !== "string"
+        || canonical.length > 8_000_000 || evidence.has(callId)) {
+        throw new Error("compaction evidence entry is invalid");
+      }
+      evidence.set(callId, { canonical, sha256: createHash("sha256").update(canonical).digest("hex") });
+    }
+    if ([...evidence.values()].reduce((total, item) => total + item.canonical.length, 0) > 24_000_000) {
+      throw new Error("compaction evidence exceeds bounded reference capacity");
+    }
+    transaction.evidence = evidence;
+  }
+
+  readEvidence(token: string, handoffId: string, reference: string, offset: number, length: number) {
+    const transaction = this.pending(token, handoffId);
+    const entry = transaction.evidence?.get(reference);
+    if (!entry) throw new Error("compaction evidence reference is unavailable");
+    if (!Number.isSafeInteger(offset) || offset < 0 || offset > entry.canonical.length
+      || !Number.isSafeInteger(length) || length < 1 || length > 8_192) {
+      throw new Error("compaction evidence read range is invalid");
+    }
+    const text = entry.canonical.slice(offset, offset + length);
+    return { reference, offset, text, totalChars: entry.canonical.length,
+      nextOffset: offset + text.length, done: offset + text.length === entry.canonical.length,
+      sha256: entry.sha256 };
+  }
+
+  private pending(token: string, handoffId: string): CompactionTransaction {
+    const transaction = this.transactions.get(token);
+    if (!transaction || transaction.summary !== undefined || transaction.handoffId !== handoffId) {
+      throw new Error("compaction control token is invalid, expired, or consumed");
+    }
+    return transaction;
   }
 
   submit(token: string, handoffId: string, summary: string): void {
