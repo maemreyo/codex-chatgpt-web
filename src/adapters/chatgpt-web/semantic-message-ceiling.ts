@@ -64,7 +64,7 @@ export class SemanticMessageCeilings {
     if (ceiling === undefined || messageTokens <= ceiling) return;
     throw new ChatGptWebAdapterError(
       `This semantic browser message is estimated at ${messageTokens} tokens, above the observed ${ceiling}-token rejection ceiling. Canonical compaction is required.`,
-      { status: 400, errorType: "invalid_request_error", code: "context_length_exceeded", retryable: false },
+      { status: 400, errorType: "invalid_request_error", code: "chatgpt_message_too_large", retryable: false },
     );
   }
 

@@ -899,7 +899,7 @@ export class ChatGptSubmissionRejectionObserver {
         const error = new ChatGptWebAdapterError(
           "ChatGPT rejected this message because it exceeds the selected mode's input-size limit. Compact the task before retrying."
             + (diagnostics ? ` Submission diagnostics: ${JSON.stringify({ rejectionKind, ...diagnostics })}` : ""),
-          { status: 400, errorType: "invalid_request_error", code: "context_length_exceeded", retryable: false },
+          { status: 400, errorType: "invalid_request_error", code: "chatgpt_message_too_large", retryable: false },
         );
         this.onRejected?.(error, { rejectionKind, diagnostics });
         return error;
@@ -1051,7 +1051,7 @@ export function assertChatGptWebInputWithinLimits(
   ) {
     throw new ChatGptWebAdapterError(
       `This Luna turn requires ${estimatedInputTokens.toLocaleString("en-US")} estimated input tokens, which exceeds the measured ${CHATGPT_LUNA_BROWSER_INPUT_TOKEN_BUDGET.toLocaleString("en-US")}-token ChatGPT Free browser transport budget. Completed Luna history is already replaced by its rolling checkpoint; the remaining payload is the current Codex turn and cannot be reduced by /compact.`,
-      { status: 400, errorType: "invalid_request_error", code: "context_length_exceeded", retryable: false },
+      { status: 400, errorType: "invalid_request_error", code: "chatgpt_message_too_large", retryable: false },
     );
   }
   const { contextWindow } = resolveChatGptWebPhysicalContextLimits(modelId, effort, capabilities);
@@ -1067,13 +1067,13 @@ export function assertChatGptWebInputWithinLimits(
   ) {
     throw new ChatGptWebAdapterError(
       `This prompt contains ${promptChars.toLocaleString("en-US")} inline characters, which exceeds the measured ${browserComposerCharLimit.toLocaleString("en-US")}-character ChatGPT composer boundary for this account and effort. Run /compact, then retry this Web model.`,
-      { status: 400, errorType: "invalid_request_error", code: "context_length_exceeded", retryable: false },
+      { status: 400, errorType: "invalid_request_error", code: "chatgpt_message_too_large", retryable: false },
     );
   }
   if (browserMessageTokenLimit !== undefined && estimatedMessageTokens > browserMessageTokenLimit) {
     throw new ChatGptWebAdapterError(
       `This prompt requires ${estimatedMessageTokens.toLocaleString("en-US")} visible message tokens, which exceeds the measured ${browserMessageTokenLimit.toLocaleString("en-US")}-token ChatGPT browser message boundary for this account and effort. The model context window is ${contextWindow.toLocaleString("en-US")} tokens; run /compact to reduce the next browser message without changing that model window.`,
-      { status: 400, errorType: "invalid_request_error", code: "context_length_exceeded", retryable: false },
+      { status: 400, errorType: "invalid_request_error", code: "chatgpt_message_too_large", retryable: false },
     );
   }
   if (estimatedInputTokens < contextWindow) return;
@@ -1136,13 +1136,13 @@ export function assertChatGptWebMultipartInputWithinLimits(
     if (browserComposerCharLimit !== undefined && messageChars > browserComposerCharLimit) {
       throw new ChatGptWebAdapterError(
         `A Bigger Context ${label} contains ${messageChars.toLocaleString("en-US")} characters, which exceeds the measured ${browserComposerCharLimit.toLocaleString("en-US")}-character ChatGPT composer boundary. The bridge will not split an individual Codex message or JSON record; compact the task before retrying.`,
-        { status: 400, errorType: "invalid_request_error", code: "context_length_exceeded", retryable: false },
+        { status: 400, errorType: "invalid_request_error", code: "chatgpt_message_too_large", retryable: false },
       );
     }
     if (browserMessageTokenLimit !== undefined && messageTokens > browserMessageTokenLimit) {
       throw new ChatGptWebAdapterError(
         `A Bigger Context ${label} requires ${messageTokens.toLocaleString("en-US")} visible message tokens, which exceeds the measured ${browserMessageTokenLimit.toLocaleString("en-US")}-token ChatGPT message boundary. The bridge will not split an individual Codex message or JSON record; compact the task before retrying.`,
-        { status: 400, errorType: "invalid_request_error", code: "context_length_exceeded", retryable: false },
+        { status: 400, errorType: "invalid_request_error", code: "chatgpt_message_too_large", retryable: false },
       );
     }
     const messageBudget = label === "stage"
@@ -1151,7 +1151,7 @@ export function assertChatGptWebMultipartInputWithinLimits(
     if (messageTokens > messageBudget) {
       throw new ChatGptWebAdapterError(
         `A Bigger Context ${label} requires ${messageTokens.toLocaleString("en-US")} visible message tokens, which exceeds its ${messageBudget.toLocaleString("en-US")}-token input budget after reserving space for ChatGPT and attachments. The bridge will not split an individual Codex message or JSON record; compact the task before retrying.`,
-        { status: 400, errorType: "invalid_request_error", code: "context_length_exceeded", retryable: false },
+        { status: 400, errorType: "invalid_request_error", code: "chatgpt_message_too_large", retryable: false },
       );
     }
   };
@@ -1195,7 +1195,7 @@ export function resolveChatGptWebMultipartStagingMode(
   if (modelId === CHATGPT_WEB_LUNA_MODEL_ID || !capabilities.solAvailable) {
     throw new ChatGptWebAdapterError(
       "Bigger Context staging is unavailable for a Luna-only account.",
-      { status: 400, errorType: "invalid_request_error", code: "context_length_exceeded", retryable: false },
+      { status: 400, errorType: "invalid_request_error", code: "chatgpt_staging_unavailable", retryable: false },
     );
   }
   if (modelId !== CHATGPT_WEB_MODEL_ID) {
@@ -1215,7 +1215,7 @@ export function resolveChatGptWebMultipartStagingMode(
   }
   throw new ChatGptWebAdapterError(
     `No ChatGPT effort available to this account can carry a Bigger Context stage with ${maxStageMessageTokens.toLocaleString("en-US")} estimated tokens and ${maxStageChars.toLocaleString("en-US")} characters.`,
-    { status: 400, errorType: "invalid_request_error", code: "context_length_exceeded", retryable: false },
+    { status: 400, errorType: "invalid_request_error", code: "chatgpt_message_too_large", retryable: false },
   );
 }
 

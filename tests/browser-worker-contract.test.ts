@@ -2894,7 +2894,7 @@ test("only a size rejection of the current owned browser submission is non-retry
   expect(rejected).toEqual([]);
   const current = makeRequest(); page.emit("request", current); respond(current);
   expect(await observer.failure()).toMatchObject({
-    status: 400, code: "context_length_exceeded", errorType: "invalid_request_error", retryable: false,
+    status: 400, code: "chatgpt_message_too_large", errorType: "invalid_request_error", retryable: false,
   });
   expect(rejected).toHaveLength(1);
   observer.begin(page as unknown as Page);
@@ -2958,7 +2958,7 @@ test("completed SSE size errors reject only their current submission, not model 
   expect(rejected).toHaveLength(0);
   // Use actual SSE framing, including CRLF and a multiline data event.
   page.emit("requestfinished", stream(`event: message\r\ndata: ${JSON.stringify(error, null, 2).replaceAll("\n", "\r\ndata: ")}\r\n\r\ndata: [DONE]\r\n\r\n`));
-  expect(await observer.failure()).toMatchObject({ code: "context_length_exceeded", retryable: false });
+  expect(await observer.failure()).toMatchObject({ code: "chatgpt_message_too_large", retryable: false });
   expect(rejected).toHaveLength(1);
   let finish!: (body: string) => void;
   page.emit("requestfinished", stream(new Promise<string>(resolve => { finish = resolve; })));
@@ -3109,7 +3109,7 @@ for (const rejectionKind of ["http_413", "sse_input_too_large"] as const) {
           }, undefined, page, scenario === "retained");
         } catch (error) { failure = error; }
         expect(failure).toMatchObject({ status: 400, errorType: "invalid_request_error",
-          code: "context_length_exceeded", retryable: false });
+          code: "chatgpt_message_too_large", retryable: false });
         const diagnostic = JSON.parse(failure.message.split("Submission diagnostics: ")[1]!);
         expect(diagnostic).toMatchObject({ rejectionKind, mode: "sol", accountTier: "plus",
           effort: scenario === "stage" ? "low" : "high",
@@ -3538,6 +3538,14 @@ test("browser preflight separates model context from one-message transport limit
   const plus = { localToolsEnabled: false, solAvailable: true, extraHighAvailable: false, proAvailable: false };
   const pro = { localToolsEnabled: false, solAvailable: true, extraHighAvailable: true, proAvailable: true };
   const luna = { localToolsEnabled: false, solAvailable: false, extraHighAvailable: false, proAvailable: false };
+
+  for (const check of [
+    () => assertChatGptWebInputWithinLimits(1, 1, "gpt-5.6-sol", "medium", plus, 500_001),
+    () => assertChatGptWebInputWithinLimits(1, 103_001, "gpt-5.6-sol", "high", pro),
+  ]) {
+    try { check(); throw new Error("Expected message-size rejection"); }
+    catch (error) { expect(error).toMatchObject({ code: "chatgpt_message_too_large", retryable: false }); }
+  }
 
   try {
     assertChatGptWebInputWithinLimits(90_000, 81_808, "gpt-5.6-sol", "medium", plus);

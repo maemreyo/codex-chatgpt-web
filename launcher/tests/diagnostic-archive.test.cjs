@@ -75,6 +75,20 @@ test("archive accepts only a bounded allowlist of content-free semantic and tool
     to: "legacy", reason: "active_epoch_validation_failed",
   })));
   assert.equal(JSON.parse(fallback.detail.line).reason, "active_epoch_validation_failed");
+  for (const reason of ["unknown_occupancy", "atomic_result_oversize", "accumulated_occupancy", "quarantined_epoch"]) {
+    const safe = safeObservation(wrapped(semantic("semantic_fallback", {
+      to: "compaction_required", reason, prompt: secret, toolResult: secret,
+    })));
+    assert.deepEqual(JSON.parse(safe.detail.line), {
+      event: "semantic_fallback", threadHash, to: "compaction_required", reason,
+    });
+  }
+  const unsafe = safeObservation(wrapped(semantic("semantic_fallback", {
+    to: "compaction_required", reason: secret, prompt: secret,
+  })));
+  assert.deepEqual(JSON.parse(unsafe.detail.line), {
+    event: "semantic_fallback", threadHash, to: "compaction_required",
+  });
   const tool = safeObservation(wrapped(JSON.stringify({
     event: "native_tool_diagnostic", stage: "broker_queued", diagnosticId: "diag_0123456789abcdef",
     traceId: "trace_0123456789abcdef", outcome: "is_error", elapsedMs: 12,

@@ -155,7 +155,7 @@ test("S8 physical cap exhaustion: fifth rotation cannot bypass occupied epoch or
     }
     expect(f.submissions).toBe(9);
     expect(f.epoch()).toMatchObject({ semanticEpoch: 4, tier: 0 });
-    const costKey = JSON.stringify([chatGptWebExecutionNamespace(f.provider), f.threadId]);
+    const costKey = f.threadId;
     const caps = new SemanticCostCaps(Date.now, 4, 4, join(f.dir, "semantic-cost-caps.json"));
     expect(caps.count(costKey)).toBe(4);
     const persisted = readFileSync(f.statePath, "utf8");
@@ -197,6 +197,7 @@ test("S8 restart rejects checkpoint whose covered-history digest no longer match
     expect((await f.run(f.request("second", secondInput))).at(-1)).toMatchObject({ type: "done" });
     expect(f.epoch().semanticEpoch).toBe(1);
     const checkpointBytes = readFileSync(f.statePath, "utf8");
+    const previous = f.epoch();
     const before = f.submissions;
 
     // Restart removes the only live locator. A changed result is not covered
@@ -212,7 +213,27 @@ test("S8 restart rejects checkpoint whose covered-history digest no longer match
       status: 409, code: "semantic_epoch_recovery_required", retryable: false,
     });
     expect(f.submissions).toBe(before);
-    expect(readFileSync(f.statePath, "utf8")).toBe(checkpointBytes);
+    // A mismatched canonical digest invalidates the persisted epoch exactly
+    // once. Durable quarantine replaces the unsafe checkpoint; it must not
+    // silently regenerate another epoch from the mutated native history.
+    const quarantinedBytes = readFileSync(f.statePath, "utf8");
+    expect(quarantinedBytes).not.toBe(checkpointBytes);
+    const persisted = JSON.parse(quarantinedBytes) as {
+      epochs: Record<string, unknown>;
+      quarantines: Record<string, { reason: string; semanticEpoch: number }>;
+    };
+    expect(persisted.epochs[f.threadId]).toBeUndefined();
+    expect(persisted.quarantines[f.threadId]).toMatchObject({
+      reason: "digest_mismatch", semanticEpoch: previous.semanticEpoch,
+    });
+    const restartedStore = new ChatGptSemanticEpochStore(f.statePath);
+    expect(restartedStore.isQuarantined(f.threadId)).toBeTrue();
+    expect(restartedStore.get(f.threadId)).toBeUndefined();
+    await expectAdapterErrorEvent(() => f.run(f.request("third", third)), {
+      status: 409, code: "semantic_epoch_recovery_required", retryable: false,
+    });
+    expect(f.submissions).toBe(before);
+    expect(readFileSync(f.statePath, "utf8")).toBe(quarantinedBytes);
   } finally {
     await f.close();
   }

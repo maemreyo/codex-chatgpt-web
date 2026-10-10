@@ -1,4 +1,4 @@
-import { expect, test } from "bun:test";
+import { expect, spyOn, test } from "bun:test";
 import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { basename, join } from "node:path";
@@ -198,6 +198,72 @@ test("combined SEM+Bigger Context resumes the persisted epoch after restart with
   }
 }, 20_000);
 
+test("pressure during rotation cooldown authorizes a bounded safety reseed", async () => {
+  const f = makeHarness();
+  const rotationEvents: Array<{ event: string; toEpoch?: number; epochRotations?: number }> = [];
+  const infoSpy = spyOn(console, "info").mockImplementation((value: unknown) => {
+    if (typeof value === "string" && value.startsWith('{"event":"semantic_')) {
+      rotationEvents.push(JSON.parse(value) as { event: string; toEpoch?: number; epochRotations?: number });
+    }
+  });
+  try {
+    const second = await seedEpoch(f);
+    const previous = f.epoch();
+    const retainedKey = f.submitted[1]!.key!;
+    const ledger = semanticEpochOccupancies.forConversation(retainedKey, false, 111_193, CHATGPT_WEB_MODEL_ID);
+    ledger.record("synthetic-physical-pressure", ledger.physicalLimit - 10_000);
+    const third = f.extend([
+      ...second,
+      { type: "message", role: "assistant", content: [{ type: "output_text", text: "REG answer 2" }] },
+    ], "third");
+    expect((await f.run(f.request("third", third))).at(-1))
+      .toMatchObject({ type: "done", stopReason: "stop" });
+    expect(f.epoch().semanticEpoch).toBe(previous.semanticEpoch + 1);
+    expect(f.epoch().sourceTurnId).toBe(`${f.threadId}:second`);
+    expect(f.submitted).toHaveLength(3);
+    expect(f.submitted[2]!.key).not.toBe(retainedKey);
+    expect(f.submitted[2]!.text).toContain("REG-IMMUTABLE-DEVELOPER-AUTHORITY");
+    expect(f.submitted[2]!.text).not.toContain("REGRESSION-EXACT-OLD-RESULT");
+    const costKey = f.threadId;
+    expect(new SemanticCostCaps(Date.now, 4, 4, join(f.dir, "semantic-cost-caps.json")).count(costKey)).toBe(2);
+    // This harness returns a completed browser answer without calling onSubmitted.
+    // Completion is sufficient to count one accepted rotation, exactly once.
+    expect(rotationEvents.filter(event => event.toEpoch === 2).map(event => event.event))
+      .toEqual(["semantic_rotation_committed", "semantic_rotation_attempted", "semantic_rotation"]);
+    expect(rotationEvents.filter(event => event.event === "semantic_cost" && event.epochRotations === 1))
+      .toHaveLength(2);
+  } finally {
+    infoSpy.mockRestore();
+    await f.close();
+  }
+}, 20_000);
+
+test("cooldown pressure with exhausted cap fails closed before browser submission", async () => {
+  const f = makeHarness();
+  try {
+    const second = await seedEpoch(f);
+    const before = readFileSync(f.statePath, "utf8");
+    const retainedKey = f.submitted[1]!.key!;
+    const ledger = semanticEpochOccupancies.forConversation(retainedKey, false, 111_193, CHATGPT_WEB_MODEL_ID);
+    ledger.record("synthetic-physical-pressure", ledger.physicalLimit - 10_000);
+    const costKey = f.threadId;
+    const caps = new SemanticCostCaps(Date.now, 4, 4, join(f.dir, "semantic-cost-caps.json"));
+    for (let i = 0; i < 3; i += 1) expect(caps.recordRotation(costKey, `spent_${i}`)).toBeTrue();
+    expect(caps.count(costKey)).toBe(4);
+    const third = f.extend([
+      ...second,
+      { type: "message", role: "assistant", content: [{ type: "output_text", text: "REG answer 2" }] },
+    ], "third");
+    expect((await f.run(f.request("third", third))).at(-1))
+      .toMatchObject({ type: "error", status: 409, code: "semantic_epoch_recovery_required" });
+    expect(f.submitted).toHaveLength(2);
+    expect(readFileSync(f.statePath, "utf8")).toBe(before);
+    expect(caps.count(costKey)).toBe(4);
+  } finally {
+    await f.close();
+  }
+}, 20_000);
+
 test("a model-family change reseeds immediately after restart despite the rotation cooldown", async () => {
   const f = makeHarness();
   try {
@@ -231,7 +297,7 @@ test("rotation cap falls back to lossless canonical Bigger Context multipart", a
       { type: "message", role: "developer", content: "REG-CAP-AUTHORITY-MUST-SURVIVE" },
     ], "first");
     expect((await f.run(f.request("first", first))).at(-1)).toMatchObject({ type: "done" });
-    const costKey = JSON.stringify([chatGptWebExecutionNamespace(f.provider), f.threadId]);
+    const costKey = f.threadId;
     const caps = new SemanticCostCaps(Date.now, 4, 4, join(f.dir, "semantic-cost-caps.json"));
     for (let i = 0; i < 4; i++) expect(caps.recordRotation(costKey, `prior_${i}`)).toBeTrue();
     expect(caps.count(costKey)).toBe(4);
@@ -266,7 +332,7 @@ test("canonical multipart fallback respects learned stage rejection ceilings bef
   try {
     const first = f.extend([{ type: "message", role: "developer", content: "RETAIN-EXACT-AUTHORITY" }], "first");
     expect((await f.run(f.request("first", first))).at(-1)).toMatchObject({ type: "done" });
-    const costKey = JSON.stringify([chatGptWebExecutionNamespace(f.provider), f.threadId]);
+    const costKey = f.threadId;
     const caps = new SemanticCostCaps(Date.now, 4, 4, join(f.dir, "semantic-cost-caps.json"));
     for (let i = 0; i < 4; i++) caps.recordRotation(costKey, `prior_${i}`);
     // Reject an otherwise stageable canonical fallback under the persisted
@@ -301,7 +367,7 @@ test("retained resume selects canonical fallback when a fresh lease cannot fit t
     ], "second");
     expect((await f.run(f.request("second", second))).at(-1)).toMatchObject({ type: "done" });
     expect(f.epoch().semanticEpoch).toBe(1);
-    const costKey = JSON.stringify([chatGptWebExecutionNamespace(f.provider), f.threadId]);
+    const costKey = f.threadId;
     const caps = new SemanticCostCaps(Date.now, 4, 4, join(f.dir, "semantic-cost-caps.json"));
     for (let i = 0; i < 4; i++) caps.recordRotation(costKey, `prior_${i}`);
     const laterHistory = Array.from({ length: 19 }, (_, index) => ({
@@ -356,7 +422,7 @@ test("untransportable canonical record fails closed before epoch commit or rotat
     // browser submission is permitted even with Bigger Context enabled.
     expect(f.submitted).toHaveLength(1);
     expect(existsSync(f.statePath)).toBeFalse();
-    const costKey = JSON.stringify([chatGptWebExecutionNamespace(f.provider), f.threadId]);
+    const costKey = f.threadId;
     expect(new SemanticCostCaps(Date.now, 4, 4, join(f.dir, "semantic-cost-caps.json")).count(costKey)).toBe(0);
   } finally {
     await f.close();

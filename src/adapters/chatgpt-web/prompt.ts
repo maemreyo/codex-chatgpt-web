@@ -673,7 +673,7 @@ export function compileChatGptWebPrompt(
           if (tokens <= 0 || chars <= 0) {
             throw new ChatGptWebAdapterError(
               `The Bigger Context ${final ? "final part's instructions and attachments" : "stage wrapper"} exceed the available message budget before any task history is added. Reduce those inputs before retrying.`,
-              { status: 400, errorType: "invalid_request_error", code: "context_length_exceeded", retryable: false },
+              { status: 400, errorType: "invalid_request_error", code: "chatgpt_message_too_large", retryable: false },
             );
           }
           return { tokens, chars, tokenLimit, charLimit: limits.browserComposerCharLimit ?? Infinity };

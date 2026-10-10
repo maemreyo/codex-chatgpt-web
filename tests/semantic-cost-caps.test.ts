@@ -79,6 +79,35 @@ test("rotation and compaction reservations survive fresh instances and expire in
   }
 });
 
+test("legacy provider-scoped reservations cannot be bypassed while migrating to stable native-thread budget keys", () => {
+  const dir = mkdtempSync(join(tmpdir(), "semantic-legacy-cap-migrate-"));
+  const file = join(dir, "caps.json");
+  const at = 1_000_000;
+  try {
+    const legacyThreadKey = "[\"old-settings-namespace\",\"native-thread\"]";
+    const legacy = new SemanticCostCaps(() => at, 4, 4, file);
+    expect(legacy.recordRotation(legacyThreadKey, "epoch-a")).toBe(true);
+    // Simulate a pre-upgrade V1 budget file. Its keys were hashed with mutable
+    // provider configuration, so we cannot attribute them to a native thread.
+    const legacyRecord = JSON.parse(readFileSync(file, "utf8"));
+    legacyRecord.version = 1;
+    writeFileSync(file, JSON.stringify(legacyRecord));
+    const afterSettingsChange = new SemanticCostCaps(() => at + 100, 4, 4, file);
+    expect(afterSettingsChange.canRotate("native-thread", "epoch-b")).toBe(false);
+    expect(afterSettingsChange.recordRotation("native-thread", "epoch-b")).toBe(false);
+    expect(afterSettingsChange.recordCompaction("native-thread", "compaction-a")).toBe(false);
+    expect(JSON.parse(readFileSync(file, "utf8")).version).toBe(1);
+    const afterExpiry = new SemanticCostCaps(() => at + SEMANTIC_COST_WINDOW_MS, 4, 4, file);
+    expect(afterExpiry.recordRotation("native-thread", "epoch-b")).toBe(true);
+    expect(JSON.parse(readFileSync(file, "utf8")).version).toBe(2);
+    const changedConfig = new SemanticCostCaps(() => at + SEMANTIC_COST_WINDOW_MS + 1, 4, 4, file);
+    expect(changedConfig.count("native-thread")).toBe(1);
+    expect(changedConfig.recordRotation("native-thread", "epoch-b")).toBe(true);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test("atomic cross-instance reservations honor the cap and idempotency", () => {
   const dir = mkdtempSync(join(tmpdir(), "semantic-cost-fence-"));
   const file = join(dir, "caps.json");

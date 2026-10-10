@@ -26,6 +26,36 @@ their existing occupancy evidence; occupancy that cannot be reconstructed fails 
 tool-result delivery. `semantic_cost` is emitted only for active SEM epochs after
 a successful browser response or an acknowledged submission; failed attempts
 before submission are excluded.
+The physical tool-result guard also applies to the first canonical turn and
+epochless fallbacks when SEM is enabled. A retained tab without a verified
+process-local occupancy ledger cannot accept another tool-result batch. For
+canonical Bigger Context, accepted multipart stages and the final submission
+are charged to that physical ledger; individual oversized tool results return
+the terminal `semantic_atomic_result_too_large` error because Web compaction
+cannot fit them either. Native Codex's response to recovery error codes still
+requires independent integration acceptance.
+When an active compaction's tool-result batch is only partially acknowledged,
+the retained browser source is canceled and its broker capability revoked.
+An acknowledgement failure may mean the browser received the result already;
+the bridge does not resend the uncertain remainder to that same source. This
+fail-closed rule also applies to Zero Risk compaction. The canonical native
+tool results remain unchanged, and end-to-end recovery still needs acceptance
+with a real native Codex client and authenticated browser session.
+Invalid epoch provenance creates a durable, per-thread quarantine that forces
+the canonical path until the original history is recoverable. For a completed
+native v2 Web compaction, the bridge persists only a digest of its summary;
+quarantine clears when the same native thread later replays that exact summary
+as its latest `compaction` output item. A failed compaction, unverified user-text
+summary, or unrelated checkpoint does not clear quarantine. This acceptance
+path has offline adapter tests and still needs authenticated native acceptance;
+native v1/memento replay remains quarantined until a separate verified policy.
+
+Rotation and Web-compaction limits are keyed by native thread identity within
+the durable cost-budget file. Legacy V1 budget entries were hashed with mutable
+provider settings and cannot be safely attributed. Upgrading a nonempty V1
+file conservatively prevents new reservations until its previous charges
+expire (at most one hour), then writes V2 with stable thread keys. Older
+versions must not write a V2 file concurrently with this runtime.
 `extraStageSubmissions` is currently always `0` because those epochs use inline
 transport. Canonical Bigger Context multipart fallback does not emit a
 `semantic_cost` event, so this field does not measure fallback stage submissions.
@@ -39,6 +69,17 @@ resume and full fresh-tab reseed before selecting the browser lease.
 
 Keep substantially more canonical Codex history than one ChatGPT browser request can physically
 carry, while preserving exact authority, current-turn evidence, and tool-call/result pairing.
+
+## Recovery evidence and managed compaction routing
+
+Recovery evidence is retained through canonical entry binding. Native v2 compaction items are
+recovery evidence only when their canonical identity and retained entry binding are preserved;
+caller-provided protocol fields do not select the trusted classification. The managed direct
+runtime has verified the new-page reset path through a fresh retained conversation boundary.
+
+The same-session reconnect path preserves the recovery ledger so retained evidence remains bound to
+the existing semantic epoch. These properties are covered by protocol tests with the managed fake
+adapter; browser execution and authenticated live model sessions remain separate acceptance gates.
 
 ## Non-negotiable invariants
 

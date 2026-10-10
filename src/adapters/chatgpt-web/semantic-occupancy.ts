@@ -1,5 +1,7 @@
 import { estimateTokens } from "../../lib/token-estimate";
 
+export type SemanticBatchPressureReason = "unknown_occupancy" | "atomic_result_oversize" | "accumulated_occupancy";
+
 /** An estimate of physical retained-chat pressure; never used for logical Codex usage. */
 export class SemanticEpochOccupancy {
   private readonly seen = new Set<string>();
@@ -58,13 +60,19 @@ export class SemanticEpochOccupancy {
     ));
   }
 
-  /** Atomically assess the complete batch before the first broker.completeTool. */
-  canDeliverBatch(results: readonly { callId: string; content: unknown }[]): boolean {
-    if (!this.known || this.atLimit) return false;
-    if (!this.canFitAtomicResults(results)) return false;
+  /** Classify failure before any broker result is delivered; never include result content in telemetry. */
+  batchPressureReason(results: readonly { callId: string; content: unknown }[]): SemanticBatchPressureReason | undefined {
+    if (!this.canFitAtomicResults(results)) return "atomic_result_oversize";
+    if (!this.known || this.atLimit) return "unknown_occupancy";
     const batchTokens = results.reduce((total, item) => total + estimateTokens(JSON.stringify(item.content), this.modelId), 0);
     // Fixed conservative allowance for browser wrappers and subsequent model output.
-    return this.totalTokens + batchTokens + 12_288 < this.physicalLimit;
+    return this.totalTokens + batchTokens + 12_288 < this.physicalLimit
+      ? undefined : "accumulated_occupancy";
+  }
+
+  /** Atomically assess the complete batch before the first broker.completeTool. */
+  canDeliverBatch(results: readonly { callId: string; content: unknown }[]): boolean {
+    return this.batchPressureReason(results) === undefined;
   }
 
   recordToolResult(callId: string, content: unknown): void {
@@ -91,6 +99,17 @@ class SemanticEpochOccupancies {
       if (oldest === undefined) break;
       this.entries.delete(oldest);
     }
+    return ledger;
+  }
+
+  /**
+   * A recreated direct worker may only start a zeroed ledger after its caller
+   * has an independent fresh-conversation proof. The proof is represented by
+   * this explicit API boundary; ordinary lookup remains fail-closed.
+   */
+  resetForVerifiedFreshLease(key: string, physicalLimit: number, modelId: string): SemanticEpochOccupancy {
+    const ledger = this.forConversation(key, false, physicalLimit, modelId);
+    ledger.resetForVerifiedFreshLease();
     return ledger;
   }
 }
