@@ -137,6 +137,9 @@ export const CHATGPT_RESPONSE_DOM_GRACE_MS = 60_000;
 export const CHATGPT_MULTIPART_RESPONSE_DOM_GRACE_MS = 180_000;
 export const CHATGPT_EMPTY_RESPONSE_GRACE_MS = 10_000;
 export const CHATGPT_COMPLETION_ACTION_GRACE_MS = 60_000;
+// No Stop control and no completed-turn action is ambiguous while ChatGPT is thinking or
+// handing off tool results. Allow the same bounded silence as external tool progress.
+export const CHATGPT_UNCONFIRMED_IDLE_GRACE_MS = 10 * 60_000;
 export const CHATGPT_COMPLETION_SETTLE_MS = 2_000;
 export const CHATGPT_TOOL_CONFIRMATION_TIMEOUT_MS = 60_000;
 export const MAX_CHATGPT_CONNECTOR_TRIGGER_ATTEMPTS = 3;
@@ -1692,7 +1695,7 @@ export class ChatGptTurnDomHealthTracker {
   constructor(
     private readonly missingResponseMs = CHATGPT_RESPONSE_DOM_GRACE_MS,
     private readonly emptyCompletionMs = CHATGPT_EMPTY_RESPONSE_GRACE_MS,
-    private readonly missingCompletionActionMs = CHATGPT_COMPLETION_ACTION_GRACE_MS,
+    private readonly missingCompletionActionMs = CHATGPT_UNCONFIRMED_IDLE_GRACE_MS,
   ) {}
 
   /**
@@ -1756,7 +1759,7 @@ export class ChatGptTurnDomHealthTracker {
     } else if (now - this.missingCompletionAction.since >= this.missingCompletionActionMs) {
       return state.currentText.length > 0
         ? "ChatGPT stopped generating but did not expose its completed-turn action; the ChatGPT DOM may have changed"
-        : "ChatGPT stopped showing generation or tool activity without a final answer. Check the ChatGPT tab for an error before retrying.";
+        : "ChatGPT showed no new response or tool activity within the idle timeout, without a final answer or confirmed completion. Check the ChatGPT tab before retrying.";
     }
     return undefined;
   }
@@ -3930,6 +3933,8 @@ export class ChatGptBrowserWorker {
     // dedicated multipart acknowledgement budget back down after that transient shell appears.
     // Keep DOM absence bounded by the same per-stage budget that owns this protocol step.
     const domHealthTracker = new ChatGptTurnDomHealthTracker(
+      CHATGPT_MULTIPART_RESPONSE_DOM_GRACE_MS,
+      CHATGPT_EMPTY_RESPONSE_GRACE_MS,
       CHATGPT_MULTIPART_RESPONSE_DOM_GRACE_MS,
     );
     const responseDomCache: ChatGptResponseDomCache = {};

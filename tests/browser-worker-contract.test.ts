@@ -4230,6 +4230,23 @@ test("an idle empty response without completion controls cannot keep the turn al
   expect(health.update({ ...progressing, currentText: "Final answer", completionActionVisible: true }, 301_000)).toBeUndefined();
 });
 
+test("default idle grace waits through slow thinking and resumes the same answer", () => {
+  const health = new ChatGptTurnDomHealthTracker();
+  const idle = { responsePresent: true, running: false, currentText: "", completionActionVisible: false };
+  expect(health.update(idle, 0)).toBeUndefined();
+  expect(health.update(idle, 60_000)).toBeUndefined();
+  expect(health.update(idle, 180_000)).toBeUndefined();
+  expect(health.update({ ...idle, currentText: "Final answer", completionActionVisible: true }, 240_000)).toBeUndefined();
+  const stalled = new ChatGptTurnDomHealthTracker();
+  expect(stalled.update(idle, 0)).toBeUndefined();
+  expect(stalled.update(idle, 599_999)).toBeUndefined();
+  expect(stalled.update(idle, 600_000)).toContain("idle timeout");
+  // Visible completion with an empty answer remains a confirmed failure.
+  const empty = new ChatGptTurnDomHealthTracker();
+  expect(empty.update({ ...idle, completionActionVisible: true }, 0)).toBeUndefined();
+  expect(empty.update({ ...idle, completionActionVisible: true }, 10_000)).toContain("completed without a final answer");
+});
+
 test("stalled-turn diagnostics record DOM metrics without response or overlay content", () => {
   const workerSource = readFileSync(new URL("../src/adapters/chatgpt-web/browser-worker.ts", import.meta.url), "utf8");
   const start = workerSource.indexOf("private async stalledTurnDiagnostic");
