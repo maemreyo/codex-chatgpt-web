@@ -32,6 +32,17 @@ test("archive accepts only a bounded allowlist of content-free semantic and tool
     event: "semantic_reject", threadHash, kind: "http_413", effort: "high",
     messageChars: 999, class: "D",
   });
+  const cut = safeObservation(wrapped(semantic("semantic_skip", {
+    reason: "cross_boundary", prompt: secret,
+  })));
+  assert.deepEqual(JSON.parse(cut.detail.line), {
+    event: "semantic_skip", threadHash, reason: "cross_boundary",
+  });
+  assert.deepEqual(JSON.parse(safeObservation(wrapped(semantic("semantic_validation_failed", {
+    reason: "cross_boundary", fellBackTo: "legacy",
+  }))).detail.line), {
+    event: "semantic_validation_failed", threadHash, reason: "cross_boundary", fellBackTo: "legacy",
+  });
   const skip = safeObservation(wrapped(semantic("semantic_skip", {
     reason: "ineligible", detail: "missing_turn_provenance", prompt: secret,
   })));

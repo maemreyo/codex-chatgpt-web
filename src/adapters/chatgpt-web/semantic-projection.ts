@@ -48,6 +48,7 @@ type RotationSkipReason =
   | "no_completed_turn"
   | "missing_turn_provenance"
   | "missing_source_revision"
+  | "cross_boundary"
   | "outstanding_tools";
 
 export interface SemanticTier0CandidateResult {
@@ -163,6 +164,26 @@ function priorSourceTurnId(parsed: CodexParsedRequest, cut: number, currentTurnI
   return undefined;
 }
 
+// The parser may fold an assistant message and later tool calls into one browser
+// message. Never rotate at a canonical anchor that divides that message in two.
+function semanticCutCrossesMessage(parsed: CodexParsedRequest, cut: number): boolean {
+  const provenance = parsed._semanticProvenance;
+  if (!provenance) return true;
+  const positions = new Map(provenance.items.map((item, index) => [item.ref, index]));
+  return provenance.messageSourceRefs.some(refs => {
+    let beforeOrAtCut = false;
+    let afterCut = false;
+    for (const ref of refs) {
+      const index = positions.get(ref);
+      if (index === undefined) continue; // Projection validates missing refs separately.
+      if (index <= cut) beforeOrAtCut = true;
+      else afterCut = true;
+      if (beforeOrAtCut && afterCut) return true;
+    }
+    return false;
+  });
+}
+
 export function buildSemanticTier0Candidate(
   parsed: CodexParsedRequest,
   modelFamily: string,
@@ -185,6 +206,7 @@ export function buildSemanticTier0Candidate(
   }
   if (cut < 0) return { reason: "no_completed_turn" };
   if (!coveredCallsAreSettled(parsed, cut)) return { reason: "outstanding_tools" };
+  if (semanticCutCrossesMessage(parsed, cut)) return { reason: "cross_boundary" };
 
   const sourceTurnId = priorSourceTurnId(parsed, cut, identity.turnId);
   if (!sourceTurnId) return { reason: "missing_source_revision" };

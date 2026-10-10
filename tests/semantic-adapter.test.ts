@@ -381,6 +381,81 @@ test("an existing native-turn session bypasses semantic reseed preflight on an e
   }
 });
 
+test("a cross-boundary candidate preserves the canonical turn, and projection errors safely fall back", async () => {
+  const suffix = `semantic-cross-boundary-${process.pid}-${Date.now()}`;
+  const socketPath = brokerEndpoint(suffix);
+  const statePath = join(root, `${suffix}.json`);
+  const provider: CodexProviderConfig = {
+    adapter: "chatgpt-web",
+    baseUrl: `browser://${suffix}`,
+    chatgptWeb: {
+      browserHost: "launcher",
+      browserHostDescriptorPath: join(root, "launcher.json"),
+      brokerSocketPath: socketPath,
+      localToolsEnabled: true,
+      solAvailable: true,
+      extraHighAvailable: true,
+      proAvailable: true,
+      experimentalSemanticMemory: true,
+      semanticCheckpointStatePath: statePath,
+    },
+  };
+  const worker = ChatGptBrowserWorker.forProvider(provider);
+  const originalRun = worker.run.bind(worker);
+  const prompts: string[] = [];
+  (worker as unknown as { run: (turn: BrowserTurn) => Promise<string> }).run = async turn => {
+    const prepared = await turn.prepare();
+    prompts.push(prepared.text);
+    prepared.release();
+    const answer = `Safe answer ${prompts.length}`;
+    turn.onTextDelta(answer);
+    return answer;
+  };
+  const firstInput = [
+    { type: "message", role: "developer", content: "Keep canonical policy." },
+    { type: "message", role: "user", content: [{ type: "input_text", text: environmentXml }], ...turn("cross_1") },
+    { type: "message", role: "user", content: "First native turn", ...turn("cross_1") },
+  ];
+  const secondInput = [
+    ...firstInput,
+    { type: "message", role: "assistant", content: "Safe answer 1", ...turn("cross_1") },
+    { type: "function_call", name: "codex_exec", call_id: "late", arguments: '{"cmd":"inspect"}' },
+    { type: "function_call_output", call_id: "late", output: "EXACT-LATE-RESULT" },
+    { type: "message", role: "user", content: [{ type: "input_text", text: environmentXml }], ...turn("cross_2") },
+    { type: "message", role: "user", content: "Second native turn", ...turn("cross_2") },
+  ];
+  try {
+    const adapter = createChatGptWebAdapter(provider);
+    const events: unknown[] = [];
+    await adapter.runTurn!(request("cross_1", firstInput), { headers: new Headers() }, event => events.push(event));
+    await adapter.runTurn!(request("cross_2", secondInput), { headers: new Headers() }, event => events.push(event));
+    expect(prompts).toHaveLength(2);
+    expect(prompts[1]).toContain("EXACT-LATE-RESULT");
+    expect(prompts[1]).toContain("Keep canonical policy.");
+    expect(prompts[1]).not.toContain("<semantic_artifact_ledger");
+
+    const third = request("cross_3", [
+      ...secondInput,
+      { type: "message", role: "assistant", content: "Safe answer 2", ...turn("cross_2") },
+      { type: "message", role: "user", content: [{ type: "input_text", text: environmentXml }], ...turn("cross_3") },
+      { type: "message", role: "user", content: "Third native turn", ...turn("cross_3") },
+    ]);
+    // Simulate a malformed provenance sidecar after candidate selection. The
+    // adapter must still avoid an unhandled candidate-projection exception.
+    third._semanticProvenance!.messageSourceRefs[0] = [];
+    await adapter.runTurn!(third, { headers: new Headers() }, event => events.push(event));
+    expect(prompts).toHaveLength(3);
+    expect(prompts[2]).toContain("Third native turn");
+    expect(prompts[2]).toContain("EXACT-LATE-RESULT");
+    expect(prompts[2]).not.toContain("<semantic_artifact_ledger");
+    expect(events.at(-1)).toMatchObject({ type: "done", stopReason: "stop" });
+  } finally {
+    (worker as unknown as { run: (turn: BrowserTurn) => Promise<string> }).run = originalRun;
+    chatGptTurnSessions.clear();
+    await TurnBroker.forSocket(socketPath).close();
+  }
+});
+
 test("canonical history reaches the guarded 220-240k target across multiple physically bounded epochs", async () => {
   const socketPath = brokerEndpoint(`semantic-long-${process.pid}-${Date.now()}`);
   const provider: CodexProviderConfig = {
