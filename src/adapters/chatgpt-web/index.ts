@@ -693,11 +693,12 @@ export function createChatGptWebAdapter(
     const modelFamily = parsed._chatgptModelFamily;
     if (!threadId || !modelFamily) throw new Error("Semantic memory eligibility lost required native identity");
     // Native compact v2 is a durable history transition only once Codex
-    // actually replays this daemon's completed compaction item. Until then,
-    // a quarantined projection must stay disabled across process restarts.
-    if (semanticEpochStore.isQuarantined(threadId)) {
-      const input = (parsed._rawBody as { input?: unknown } | undefined)?.input;
-      semanticEpochStore.acceptCompletedCompaction(threadId, input);
+    // actually replays this daemon's completed compaction item.
+    const input = (parsed._rawBody as { input?: unknown } | undefined)?.input;
+    // Native compaction replaces healthy history too. Retire its old anchor before
+    // projection validation, only after the exact completed summary is replayed.
+    if (semanticEpochStore.acceptCompletedCompaction(threadId, input)) {
+      emitSemanticLog({ event: "semantic_compaction_accepted", threadHash });
     }
     // Budget identity follows canonical native thread identity, not mutable
     // launcher/browser settings. Runtime lease ownership stays namespaced.
@@ -1726,7 +1727,7 @@ export function createChatGptWebAdapter(
             let quarantineFence: string | undefined;
             if (experimentalSemanticMemory && compactionNativeIdentity.threadId) {
               try {
-                quarantineFence = semanticEpochStore.quarantineFence(compactionNativeIdentity.threadId);
+                quarantineFence = semanticEpochStore.compactionFence(compactionNativeIdentity.threadId);
               } catch (error) {
                 // The active source may still be capable of an exact retained
                 // handoff when the on-disk epoch file is corrupt. The compact
@@ -1805,7 +1806,7 @@ export function createChatGptWebAdapter(
                     // A fresh compact may itself discover invalid epoch evidence.
                     // Bind its completed output only to the quarantine created
                     // synchronously by this same verified validation attempt.
-                    quarantineFence ??= semanticCompaction.newlyQuarantinedFence;
+                    quarantineFence = semanticCompaction.newlyQuarantinedFence ?? quarantineFence;
                     reserveWebCompaction(parsed, `${compactionExecutionKey}:fresh:${freshCompactionTraceId}`);
                     const fallbackRuntime = startRuntime(
                       parsed,
@@ -2018,10 +2019,23 @@ export function createChatGptWebAdapter(
             }
             if (experimentalSemanticMemory
               && parsed._canonicalCompactionProtocol === "v2"
-              && compactionNativeIdentity.threadId) {
-              semanticEpochStore.rememberCompletedCompaction(
+              && compactionNativeIdentity.threadId && quarantineFence) {
+              const remembered = semanticEpochStore.rememberCompletedCompaction(
                 compactionNativeIdentity.threadId, quarantineFence, summary,
               );
+              if (!remembered) {
+                // ChatGPT finished, but a concurrent epoch transition made this
+                // receipt stale. Native Codex must not accept an untracked compact.
+                emit({
+                  type: "error",
+                  message: "Native compaction completed, but its semantic recovery receipt could not be retained. Retry the compaction from canonical history.",
+                  status: 409,
+                  errorType: "invalid_request_error",
+                  code: "semantic_compaction_receipt_stale",
+                  retryable: false,
+                });
+                return;
+              }
             }
             emit({ type: "text_delta", text: summary, phase: "final_answer" });
             emitBrowserCompletion(

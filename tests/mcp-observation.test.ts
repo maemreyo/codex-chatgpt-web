@@ -55,14 +55,17 @@ test("tool request shape and safety signals are useful without logging payload c
 test("MCP observations separate pre-handler validation and returned tool errors without recording content", async () => {
   const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
   const events: Array<Record<string, unknown>> = [];
+  const invocationIds = new Map<string | number, string>();
+  const handlerIds: string[] = [];
   const secret = "fixture-private-path-token-and-command";
   let invoked = 0;
   const server = new McpServer({ name: "observation-test", version: "1" });
-  server.registerTool("codex_exec", { inputSchema: { cmd: z.string() } }, async () => {
+  server.registerTool("codex_exec", { inputSchema: { cmd: z.string() } }, async (_args, extra) => {
+    handlerIds.push(invocationIds.get(extra.requestId) ?? "missing");
     invoked += 1;
     return { isError: invoked === 1, content: [{ type: "text", text: secret }] };
   });
-  observeMcpToolCalls(serverTransport, new Set(["codex_exec"]), event => events.push(event));
+  observeMcpToolCalls(serverTransport, new Set(["codex_exec"]), event => events.push(event), invocationIds);
   await server.connect(serverTransport);
   const client = new Client({ name: "test-client", version: "1" });
   try {
@@ -76,6 +79,9 @@ test("MCP observations separate pre-handler validation and returned tool errors 
     expect(accepted.isError).toBeFalse();
     expect(refused.content).toEqual(accepted.content);
     expect(invoked).toBe(2);
+    expect(handlerIds).toEqual(events.filter(event => event.event === "call_received")
+      .slice(1).map(event => String(event.diagnosticId)));
+    expect(invocationIds.size).toBe(0);
     expect(events.map(event => event.event)).toEqual(Array(3).fill(["call_received", "reply_sent"]).flat());
     expect(events.filter(event => event.event === "reply_sent").map(event => event.is_error)).toEqual([true, true, false]);
     expect(events.map(event => event.call)).toEqual([1, 1, 2, 2, 3, 3]);
@@ -94,11 +100,12 @@ test("MCP observations separate pre-handler validation and returned tool errors 
   }
 });
 
-test("diagnostic correlation is local, deterministic, and does not expose MCP request IDs", () => {
-  const requestId = "private-sequential-request-123";
-  expect(mcpDiagnosticId(requestId)).toBe(mcpDiagnosticId(requestId));
-  expect(mcpDiagnosticId(requestId)).not.toBe(mcpDiagnosticId(requestId + "-next"));
-  expect(mcpDiagnosticId(requestId)).not.toContain(requestId);
+test("each opaque diagnostic identity is unique and does not encode transport IDs", () => {
+  const first = mcpDiagnosticId();
+  const second = mcpDiagnosticId();
+  expect(first).toMatch(/^diag_[a-f0-9]{16}$/);
+  expect(second).not.toBe(first);
+  expect(first).not.toContain("private-sequential-request-123");
 });
 
 test("safety-status text is only a visible browser signal", () => {
@@ -111,7 +118,7 @@ test("failed diagnostic sink cannot interrupt the tool lifecycle", () => {
   const original = console.error;
   try {
     console.error = () => { throw new Error("diagnostic sink unavailable"); };
-    expect(() => emitNativeToolDiagnostic({ stage: "handler_entered", diagnosticId: mcpDiagnosticId(42) })).not.toThrow();
+    expect(() => emitNativeToolDiagnostic({ stage: "handler_entered", diagnosticId: mcpDiagnosticId() })).not.toThrow();
   } finally {
     console.error = original;
   }
@@ -147,4 +154,57 @@ test("MCP observation failures, arbitrary IDs and unknown names never alter tran
   expect(events).toHaveLength(count);
   transport.onclose?.();
   expect(closed).toBeTrue();
+});
+
+test("sequential reused JSON-RPC IDs receive independent lifecycle identities and release pending references", async () => {
+  const events: Array<Record<string, unknown>> = [];
+  const registry = new Map<string | number, string>();
+  const transport: Transport = {
+    start: async () => {}, close: async () => {}, onmessage: () => {}, send: async () => {},
+  };
+  observeMcpToolCalls(transport, new Set(["codex_exec"]), event => events.push(event), registry);
+  const secret = "private-protocol-id";
+  const request = { jsonrpc: "2.0" as const, id: secret, method: "tools/call", params: { name: "codex_exec", arguments: { cmd: "private-command" } } };
+  for (let index = 0; index < 775; index += 1) {
+    transport.onmessage?.(request);
+    expect(registry.get(secret)).toBe(String(events.at(-1)?.diagnosticId));
+    await transport.send({ jsonrpc: "2.0", id: secret, result: {} });
+    expect(registry.size).toBe(0);
+  }
+  const received = events.filter(event => event.event === "call_received");
+  const replies = events.filter(event => event.event === "reply_sent");
+  expect(new Set(received.map(event => event.diagnosticId)).size).toBe(775);
+  expect(replies.map(event => event.diagnosticId)).toEqual(received.map(event => event.diagnosticId));
+  expect(JSON.stringify(events)).not.toContain(secret);
+  expect(JSON.stringify(events)).not.toContain("private-command");
+});
+
+test("overlapping duplicate IDs stay ambiguous until both replies settle", async () => {
+  const events: Array<Record<string, unknown>> = [];
+  const registry = new Map<string | number, string>();
+  const transport: Transport = {
+    start: async () => {}, close: async () => {}, onmessage: () => {}, send: async () => {},
+  };
+  observeMcpToolCalls(transport, new Set(["codex_exec"]), event => events.push(event), registry);
+  const request = { jsonrpc: "2.0" as const, id: 12, method: "tools/call", params: { name: "codex_exec" } };
+  transport.onmessage?.(request);
+  const firstId = registry.get(12);
+  transport.onmessage?.(request);
+  expect(registry.has(12)).toBeFalse();
+  expect(events.at(-1)).toMatchObject({ event: "uncorrelated_call", reason: "duplicate_id" });
+  await transport.send({ jsonrpc: "2.0", id: 12, result: {} });
+  // The first reply must not free the ambiguous slot for premature reuse.
+  transport.onmessage?.(request);
+  expect(events.at(-1)).toMatchObject({ event: "uncorrelated_call", reason: "duplicate_id" });
+  await transport.send({ jsonrpc: "2.0", id: 12, result: {} });
+  await transport.send({ jsonrpc: "2.0", id: 12, result: {} });
+  transport.onmessage?.(request);
+  expect(registry.get(12)).toMatch(/^diag_[a-f0-9]{16}$/);
+  expect(registry.get(12)).not.toBe(firstId);
+  await transport.send({ jsonrpc: "2.0", id: 12, result: {} });
+  expect(registry.size).toBe(0);
+  transport.onmessage?.(request);
+  expect(registry.size).toBe(1);
+  transport.onclose?.();
+  expect(registry.size).toBe(0);
 });

@@ -46,6 +46,7 @@ const TURN_HEARTBEAT_SWEEP_MS = 5_000;
 const TURN_HEARTBEAT_TIMEOUT_MS = 60_000;
 const TURN_TAB_BOOTSTRAP_TIMEOUT_MS = 120_000;
 const RETAINED_TURN_TAB_TTL_MS = 30 * 60 * 1000;
+const TERMINAL_REMOTE_STOP_TIMEOUT_MS = 2_000;
 
 function recordTurnActivity(tab, now = Date.now()) {
   const state = tab.approvalPending ? "approval"
@@ -2586,6 +2587,17 @@ class BrowserHost {
     const cancelledByUser = this.userCancelledTurnOwners.get(traceId) === helperPid;
     const authenticationRequired = tab.authenticationRequired === true;
     if (authenticationRequired && status === "completed") status = "failed";
+    // The helper has retired this turn's tools, but ChatGPT may still be generating on its
+    // dedicated tab. Attempt Stop before destroying that document. Never act on a sibling,
+    // completed handoff, or a tab already replaced by a different owner.
+    if ((status === "failed" || status === "aborted") && tab.status === "running") {
+      await this.stopFailedTurnGeneration(tab);
+      // A cancellation can retire this tab while Chromium is processing Stop.
+      // Never let its delayed completion mutate a replacement owner.
+      if (this.turnTabs.get(tab.id) !== tab || tab.traceId !== traceId || tab.helperPid !== helperPid) {
+        return { cancelledByUser };
+      }
+    }
     tab.status = status === "completed" ? "ready" : status === "aborted" ? "aborted" : "error";
     tab.approvalPending = false;
     tab.turnProgress = undefined;
@@ -2615,6 +2627,46 @@ class BrowserHost {
     if (hideAfterTurn && !this.activeTraceId) this.hide();
     this.logger.info("browser.tab_released", { tabId: tab.id, traceId, status: tab.status });
     return { cancelledByUser, ...(authenticationRequired ? { authenticationRequired: true } : {}) };
+  }
+
+  async stopFailedTurnGeneration(tab) {
+    if (this.turnTabs.get(tab.id) !== tab || tab.status !== "running") return;
+    const contents = tab.view?.webContents;
+    if (!contents || contents.isDestroyed() || typeof contents.executeJavaScript !== "function") return;
+    let timeout;
+    try {
+      const stop = contents.executeJavaScript(`(() => {
+      if (location.origin !== "https://chatgpt.com") return "foreign_document";
+      const controls = [...document.querySelectorAll(
+        '[data-testid="stop-button"], form[data-chatgpt-composer] button[type="button"][aria-label="Stop"]'
+      )].filter(button => {
+        for (let node = button; node; node = node.parentElement) {
+          if (node.hidden || node.getAttribute('aria-hidden') === 'true') return false;
+          const style = getComputedStyle(node);
+          if (style.display === 'none' || style.visibility === 'hidden') return false;
+        }
+        return !button.disabled;
+      });
+      if (controls.length !== 1) return controls.length ? "ambiguous" : "absent";
+      controls[0].click();
+      return "clicked";
+    })()`, true);
+      const result = await Promise.race([
+        stop,
+        new Promise(resolve => { timeout = setTimeout(() => resolve("timeout"), TERMINAL_REMOTE_STOP_TIMEOUT_MS); }),
+      ]);
+      this.logger.info("browser.terminal_remote_stop", {
+        tabId: tab.id, traceId: tab.traceId,
+        result: ["clicked", "absent", "ambiguous", "foreign_document", "timeout"].includes(result)
+          ? result : "unknown",
+      });
+    } catch (error) {
+      this.logger.warn("browser.terminal_remote_stop_failed", {
+        tabId: tab.id, traceId: tab.traceId, errorType: error?.name || "Error",
+      });
+    } finally {
+      if (timeout) clearTimeout(timeout);
+    }
   }
 
   async returnToIdle() {

@@ -2370,10 +2370,13 @@ describe("ChatGPT outer-native harness v4", () => {
           freeform: false,
           arguments: { cmd: "collect-large-evidence", workdir: tempRoot },
         }, 30_000));
-        const output = (nativeResult.structuredContent as { output: string }).output;
-        turn.onTextDelta("Evidence bytes: ");
-        turn.onTextDelta(String(output.length));
-        return `Evidence bytes: ${output.length}`;
+        // Large native tool results are retained canonically and returned to the browser
+        // as a bounded reference; the model can fetch portions without replaying the tool.
+        const firstContent = nativeResult.content?.[0] as { type?: string; text?: string } | undefined;
+        const reference = firstContent?.type === "text" ? firstContent.text : "";
+        expect(reference).toContain("Use codex_result_chunk");
+        turn.onTextDelta("Evidence retained for bounded inspection");
+        return "Evidence retained for bounded inspection";
       } finally {
         prepared.release();
       }
@@ -3354,6 +3357,7 @@ describe("ChatGPT outer-native harness v4", () => {
     });
     const client = new Client({ name: "native-permissions-test", version: "1" });
     try {
+      await broker.listen();
       await client.connect(transport);
       for (const name of ["exec_command", "shell_command"]) {
         environment.tools = [{ name, description: "Native command", parameters: {

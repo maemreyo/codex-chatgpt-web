@@ -491,6 +491,9 @@ export async function runChatGptMcpServer(options: {
     contract === "safe" ? { instructions: ZERO_RISK_MCP_INSTRUCTIONS } : undefined,
   );
   const invocationDiagnostics = new AsyncLocalStorage<{ diagnosticId: string; tool: string }>();
+  // Populated by the transport observer before SDK dispatch. The SDK passes
+  // the same JSON-RPC ID to tool callbacks as extra.requestId.
+  const invocationIds = new Map<string | number, string>();
 
   const failureCategory = (error: unknown): "timeout" | "aborted" | "unclassified_error" => (
     error instanceof TurnBrokerTimeoutError ? "timeout"
@@ -509,7 +512,8 @@ export async function runChatGptMcpServer(options: {
     try {
       const claimed = await callTurnBroker<Omit<ClaimedTurn, "activityId">>(
         options.brokerSocketPath,
-        { method: "claim", token: turnToken, activityId, contract, diagnosticId: mcpDiagnosticId(extra.requestId) },
+        { method: "claim", token: turnToken, activityId, contract,
+          diagnosticId: invocationDiagnostics.getStore()?.diagnosticId },
         contract === "safe" ? null : 5_000,
         extra.signal,
       );
@@ -553,7 +557,9 @@ export async function runChatGptMcpServer(options: {
     turnToken: string,
     extra: McpRequestExtra,
     action: (claimed: ClaimedTurn) => Promise<T> | T,
-  ): Promise<T> => invocationDiagnostics.run({ diagnosticId: mcpDiagnosticId(extra.requestId), tool: toolName }, async () => {
+  ): Promise<T> => invocationDiagnostics.run({
+    diagnosticId: invocationIds.get(extra.requestId) ?? mcpDiagnosticId(), tool: toolName,
+  }, async () => {
     const observation = invocationDiagnostics.getStore()!;
     const started = performance.now();
     emitNativeToolDiagnostic({ stage: "handler_entered", ...observation });
@@ -1123,5 +1129,5 @@ export async function runChatGptMcpServer(options: {
     } else if (event.event === "reply_send_failed") {
       emitNativeToolDiagnostic({ stage: "mcp_reply_send_failed", diagnosticId, tool, outcome: "unclassified_error" });
     }
-  }));
+  }, invocationIds));
 }

@@ -3,6 +3,7 @@ const assert = require("node:assert/strict");
 const fs = require("node:fs");
 const os = require("node:os");
 const path = require("node:path");
+const { spawn } = require("node:child_process");
 const { createLogger, exportSanitizedLogs } = require("../electron/logging.cjs");
 const {
   appendObservation, archiveDirectory, observationPaths, readObservations, safeObservation,
@@ -43,6 +44,14 @@ test("archive accepts only a bounded allowlist of content-free semantic and tool
   }))).detail.line), {
     event: "semantic_validation_failed", threadHash, reason: "cross_boundary", fellBackTo: "legacy",
   });
+  assert.deepEqual(JSON.parse(safeObservation(wrapped(semantic("semantic_validation_failed", {
+    reason: "operational_unknown", fellBackTo: "legacy", error: secret,
+  }))).detail.line), {
+    event: "semantic_validation_failed", threadHash, reason: "operational_unknown", fellBackTo: "legacy",
+  });
+  assert.deepEqual(JSON.parse(safeObservation(wrapped(semantic("semantic_compaction_accepted", {
+    prompt: secret, source: secret,
+  }))).detail.line), { event: "semantic_compaction_accepted", threadHash });
   const skip = safeObservation(wrapped(semantic("semantic_skip", {
     reason: "ineligible", detail: "missing_turn_provenance", prompt: secret,
   })));
@@ -171,9 +180,130 @@ test("observation archive bounds each day to 4 MiB and keeps only the most recen
   assert.equal(readObservations(filePath, atMs).length, 2);
   const file = observationPaths(filePath, atMs).at(-1);
   fs.appendFileSync(file, "x".repeat(4 * 1024 * 1024));
-  assert.equal(appendObservation(filePath, record("2026-10-08"), atMs), false);
-  assert.equal(readObservations(filePath, atMs).length, 2);
+  assert.equal(appendObservation(filePath, record("2026-10-08"), atMs), true);
+  assert.equal(readObservations(filePath, atMs).length, 4);
+  assert.ok(fs.statSync(file).size <= 4 * 1024 * 1024);
 }));
+
+test("legacy 2026 archive saturated at 4,194,287 bytes retains later failures and SEM acceptance", () => scratch(filePath => {
+  const now = Date.parse("2026-10-11T16:30:00.000Z");
+  const date = "2026-10-11T16:00:00.000Z";
+  const folder = archiveDirectory(filePath);
+  fs.mkdirSync(folder, { recursive: true });
+  const destination = path.join(folder, "2026-10-11.jsonl");
+  const encoded = line => `${JSON.stringify(safeObservation(wrapped(line, date)))}\n`;
+  const rotation = encoded(semantic("semantic_rotation", {
+    fromEpoch: 1, toEpoch: 2, reason: "physical_pressure",
+  }));
+  const ingress = encoded(JSON.stringify({
+    event: "native_tool_diagnostic", stage: "mcp_ingress", diagnosticId: "diag_0123456789abcdef",
+    requestKind: "shell", command: "PRIVATE_COMMAND_AND_TOKEN",
+  }));
+  const target = 4_194_287;
+  const repeats = Math.floor((target - Buffer.byteLength(rotation)) / Buffer.byteLength(ingress));
+  const padding = target - Buffer.byteLength(rotation) - repeats * Buffer.byteLength(ingress);
+  const legacy = rotation + ingress.repeat(repeats - 1)
+    + ingress.trimEnd().padEnd(ingress.length + padding - 1, " ") + "\n";
+  assert.equal(Buffer.byteLength(legacy), target);
+  fs.writeFileSync(destination, legacy);
+
+  const after = [
+    semantic("semantic_validation_failed", { reason: "operational_unknown", fellBackTo: "legacy", error: "SECRET_ERROR" }),
+    semantic("semantic_compaction_accepted", { prompt: "SECRET_PROMPT" }),
+    JSON.stringify({
+      event: "native_tool_diagnostic", stage: "handler_failed", outcome: "unclassified_error",
+      diagnosticId: "diag_ffffffffffffffff", error: "SECRET_ERROR",
+    }),
+  ];
+  for (const line of after) {
+    assert.equal(appendObservation(filePath, wrapped(line, date), now), true);
+    assert.ok(fs.statSync(destination).size <= 4 * 1024 * 1024);
+  }
+  const archived = readObservations(filePath, now).map(item => JSON.parse(item.detail.line));
+  const overflow = archived.find(item => item.event === "diagnostic_archive_overflow");
+  assert.ok(overflow.droppedRoutine > 0);
+  assert.equal(overflow.droppedActionable, 0);
+  assert.ok(archived.some(item => item.event === "semantic_rotation" && item.reason === "physical_pressure"));
+  assert.ok(archived.some(item => item.event === "semantic_validation_failed" && item.reason === "operational_unknown"));
+  assert.ok(archived.some(item => item.event === "semantic_compaction_accepted"));
+  assert.ok(archived.some(item => item.event === "native_tool_diagnostic" && item.stage === "handler_failed"));
+  assert.doesNotMatch(JSON.stringify(archived), /SECRET_|PRIVATE_/);
+  assert.ok(fs.statSync(destination).size < target);
+}));
+
+test("simultaneous launcher processes append after legacy saturation without losing actionable records", async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "codex-archive-concurrent-"));
+  const filePath = path.join(root, "launcher.jsonl");
+  const folder = archiveDirectory(filePath);
+  const destination = path.join(folder, "2026-10-11.jsonl");
+  const barrier = path.join(root, "start");
+  const date = "2026-10-11T16:00:00.000Z";
+  const now = Date.parse("2026-10-11T16:30:00.000Z");
+  const workers = 8;
+  const perWorker = 7;
+  try {
+    fs.mkdirSync(folder, { recursive: true });
+    const routine = `${JSON.stringify(safeObservation(wrapped(JSON.stringify({
+      event: "native_tool_diagnostic", stage: "mcp_ingress",
+      diagnosticId: "diag_0123456789abcdef",
+    }), date)))}\n`;
+    const rotation = `${JSON.stringify(safeObservation(wrapped(semantic("semantic_rotation", {
+      fromEpoch: 1, toEpoch: 2, reason: "physical_pressure",
+    }), date)))}\n`;
+    const target = 4_194_287;
+    const count = Math.floor((target - Buffer.byteLength(rotation)) / Buffer.byteLength(routine));
+    const padding = target - Buffer.byteLength(rotation) - count * Buffer.byteLength(routine);
+    fs.writeFileSync(destination, rotation + routine.repeat(count - 1)
+      + routine.trimEnd().padEnd(routine.length + padding - 1, " ") + "\n");
+    assert.equal(fs.statSync(destination).size, target);
+
+    const workerSource = [
+      'const fs = require("node:fs");',
+      'const { appendObservation } = require(process.argv[1]);',
+      'const [filePath, barrier, worker, count, date] = process.argv.slice(2);',
+      'const gate = new Int32Array(new SharedArrayBuffer(4));',
+      'const deadline = Date.now() + 5_000;',
+      'while (!fs.existsSync(barrier) && Date.now() < deadline) Atomics.wait(gate, 0, 0, 5);',
+      'if (!fs.existsSync(barrier)) process.exit(2);',
+      'for (let i = 0; i < Number(count); i++) {',
+      '  const diagnosticId = "diag_" + (Number(worker) * 100 + i).toString(16).padStart(16, "0");',
+      '  const line = JSON.stringify({ event: "native_tool_diagnostic", stage: "handler_failed",',
+      '    diagnosticId, outcome: "unclassified_error", error: "PRIVATE_ERROR" });',
+      '  const record = { at: date, event: "runtime.daemon_stderr", detail: { line } };',
+      '  if (!appendObservation(filePath, record, Date.parse(date) + 30_000)) process.exit(3);',
+      '}',
+    ].join("\n");
+    const modulePath = require.resolve("../electron/diagnostic-archive.cjs");
+    const processes = Array.from({ length: workers }, (_, worker) => new Promise((resolve, reject) => {
+      const child = spawn(process.execPath, ["-e", workerSource, modulePath, filePath,
+        barrier, String(worker), String(perWorker), date], { stdio: ["ignore", "ignore", "pipe"] });
+      let stderr = "";
+      child.stderr.on("data", chunk => { stderr += String(chunk).slice(0, 1024); });
+      child.once("error", reject);
+      child.once("exit", (code, signal) => resolve({ worker, code, signal, stderr }));
+    }));
+    fs.writeFileSync(barrier, "go");
+    const outcomes = await Promise.all(processes);
+    assert.ok(outcomes.every(result => result.code === 0), JSON.stringify(outcomes));
+
+    const observations = readObservations(filePath, now).map(record => JSON.parse(record.detail.line));
+    const recorded = observations.filter(record => record.event === "native_tool_diagnostic"
+      && record.stage === "handler_failed").map(record => record.diagnosticId);
+    const expected = Array.from({ length: workers }, (_, worker) => Array.from(
+      { length: perWorker }, (_, index) => `diag_${(worker * 100 + index).toString(16).padStart(16, "0")}`,
+    )).flat();
+    assert.equal(recorded.length, expected.length);
+    assert.deepEqual(new Set(recorded), new Set(expected));
+    assert.ok(observations.some(record => record.event === "semantic_rotation"));
+    assert.ok(observations.some(record => record.event === "diagnostic_archive_overflow"
+      && record.droppedRoutine > 0));
+    assert.ok(fs.statSync(destination).size <= 4 * 1024 * 1024);
+    assert.equal(fs.existsSync(`${destination}.lock`), false);
+    assert.doesNotMatch(fs.readFileSync(destination, "utf8"), /PRIVATE_ERROR/);
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
 
 test("unavailable archive never blocks ordinary launcher logging", () => scratch(filePath => {
   fs.writeFileSync(archiveDirectory(filePath), "occupied");

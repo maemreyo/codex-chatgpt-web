@@ -214,6 +214,30 @@ function chatGptConnectorUnavailableError(message: string): ChatGptWebAdapterErr
 }
 
 const CHATGPT_MODEL_CONTROL_UNAVAILABLE_MESSAGE = "ChatGPT model controls are unavailable. Reload ChatGPT and retry the task.";
+export type ChatGptModelControlReadinessCause = "control_missing" | "menu_unavailable" | "slider_missing";
+export class ChatGptModelControlReadinessError extends Error {
+  constructor(readonly fixedCause: ChatGptModelControlReadinessCause) {
+    super(CHATGPT_MODEL_CONTROL_UNAVAILABLE_MESSAGE);
+    this.name = "ChatGptModelControlReadinessError";
+  }
+}
+
+/** One pre-send observation/rebind and an exact-mode reprobe. Never wrap a Send in this helper. */
+export async function recoverChatGptPreSendModelControl<T>(
+  select: () => Promise<T>,
+  recover: (cause: ChatGptModelControlReadinessCause) => Promise<void>,
+  signal?: AbortSignal,
+): Promise<T> {
+  signal?.throwIfAborted();
+  try {
+    return await select();
+  } catch (error) {
+    if (!(error instanceof ChatGptModelControlReadinessError) || signal?.aborted) throw error;
+    await recover(error.fixedCause);
+    signal?.throwIfAborted();
+    return select();
+  }
+}
 
 function chatGptModelControlUnavailableError(diagnostic: string): Error {
   return new Error(CHATGPT_MODEL_CONTROL_UNAVAILABLE_MESSAGE, { cause: new Error(diagnostic) });
@@ -2628,6 +2652,7 @@ export class ChatGptBrowserWorker {
     captureDiagnostic?: (checkpoint: string) => Promise<void>,
     trackUsage = false,
     modelFamily?: "5.6" | "6",
+    readinessWaitMs = 70_000,
   ): Promise<SelectedChatGptWebModelMode> {
     const mode = resolveChatGptWebModelMode(modelId, reasoning, capabilities);
     const composer = await this.activeComposer(page);
@@ -2651,9 +2676,9 @@ export class ChatGptBrowserWorker {
     const effortWaitAbort = new AbortController();
     try {
       const ready = await Promise.race([
-        currentEffort.waitFor({ state: "visible", timeout: 70_000, signal: effortWaitAbort.signal }).then(() => "effort" as const),
-        chatGptRateLimitDialog(page).waitFor({ state: "visible", timeout: 70_000, signal: effortWaitAbort.signal }).then(() => "rate-limit" as const),
-        chatGptExpiredSessionAlert(page).waitFor({ state: "visible", timeout: 70_000, signal: effortWaitAbort.signal }).then(() => "session-expired" as const),
+        currentEffort.waitFor({ state: "visible", timeout: readinessWaitMs, signal: effortWaitAbort.signal }).then(() => "effort" as const),
+        chatGptRateLimitDialog(page).waitFor({ state: "visible", timeout: readinessWaitMs, signal: effortWaitAbort.signal }).then(() => "rate-limit" as const),
+        chatGptExpiredSessionAlert(page).waitFor({ state: "visible", timeout: readinessWaitMs, signal: effortWaitAbort.signal }).then(() => "session-expired" as const),
       ]);
       if (ready === "rate-limit") await throwIfChatGptRateLimitDialog(page);
       if (ready === "session-expired") await throwIfChatGptSessionFailureAlert(page);
@@ -2661,9 +2686,7 @@ export class ChatGptBrowserWorker {
       if (error instanceof ChatGptWebAdapterError) throw error;
       await throwIfChatGptRateLimitDialog(page);
       await throwIfChatGptSessionFailureAlert(page);
-      throw chatGptModelControlUnavailableError(
-        "ChatGPT rendered the composer but its model/effort control did not become ready",
-      );
+      throw new ChatGptModelControlReadinessError("control_missing");
     } finally {
       effortWaitAbort.abort();
     }
@@ -2671,7 +2694,13 @@ export class ChatGptBrowserWorker {
     await throwIfChatGptRateLimitDialog(page);
     await captureDiagnostic?.("effort-control-ready");
     await throwIfChatGptRateLimitDialog(page);
-    let activation = await activateChatGptEffortMenu(page, currentEffort);
+    let activation;
+    try {
+      activation = await activateChatGptEffortMenu(page, currentEffort);
+    } catch (error) {
+      if (!(error instanceof Error) || !error.message.includes("did not expose its owned menu or structural slider")) throw error;
+      throw new ChatGptModelControlReadinessError("menu_unavailable");
+    }
     if (modelFamily) activation = await selectChatGptModelFamily(
       activation, modelFamily, () => activateChatGptEffortMenu(page, currentEffort),
     );
@@ -2684,11 +2713,11 @@ export class ChatGptBrowserWorker {
     const waitAbort = new AbortController();
     try {
       const ready = await Promise.race([
-        sliderContainer.waitFor({ state: "visible", timeout: 70_000, signal: waitAbort.signal })
-          .then(() => effortSlider.waitFor({ state: "attached", timeout: 70_000, signal: waitAbort.signal }))
+        sliderContainer.waitFor({ state: "visible", timeout: readinessWaitMs, signal: waitAbort.signal })
+          .then(() => effortSlider.waitFor({ state: "attached", timeout: readinessWaitMs, signal: waitAbort.signal }))
           .then(() => "slider" as const),
-        chatGptRateLimitDialog(page).waitFor({ state: "visible", timeout: 70_000, signal: waitAbort.signal }).then(() => "rate-limit" as const),
-        chatGptExpiredSessionAlert(page).waitFor({ state: "visible", timeout: 70_000, signal: waitAbort.signal }).then(() => "session-expired" as const),
+        chatGptRateLimitDialog(page).waitFor({ state: "visible", timeout: readinessWaitMs, signal: waitAbort.signal }).then(() => "rate-limit" as const),
+        chatGptExpiredSessionAlert(page).waitFor({ state: "visible", timeout: readinessWaitMs, signal: waitAbort.signal }).then(() => "session-expired" as const),
       ]);
       if (ready === "rate-limit") await throwIfChatGptRateLimitDialog(page);
       if (ready === "session-expired") await throwIfChatGptSessionFailureAlert(page);
@@ -2697,9 +2726,7 @@ export class ChatGptBrowserWorker {
       if (error instanceof ChatGptWebAdapterError) throw error;
       await throwIfChatGptRateLimitDialog(page);
       await throwIfChatGptSessionFailureAlert(page);
-      throw chatGptModelControlUnavailableAdapterError(
-        `ChatGPT effort slider did not become ready for item index ${uiEffortIndex}`,
-      );
+      throw new ChatGptModelControlReadinessError("slider_missing");
     } finally {
       waitAbort.abort();
     }
@@ -5274,6 +5301,7 @@ export class ChatGptBrowserWorker {
       }
       // A retained lease proves conversation ownership. Model selection and plugin attachment
       // must still be established for each new submission on that page.
+      let firstModelReadinessWaitMs = 10_000;
       const selectStagingMode = () => (
         this.selectModelAndEffort(
           page,
@@ -5283,9 +5311,29 @@ export class ChatGptBrowserWorker {
           checkpoint => diagnostics.capture(page, checkpoint),
           trackUsage,
           stagingFamily,
+          firstModelReadinessWaitMs,
         )
       );
-      let mode = await this.runStage(turn.traceId, "effort_selection", browserStageTimeouts.effortSelection, selectStagingMode);
+      let mode = await this.runStage(turn.traceId, "effort_selection", browserStageTimeouts.effortSelection, async stageSignal => {
+        const signal = turn.abortSignal
+          ? AbortSignal.any([turn.abortSignal, stageSignal]) : stageSignal;
+        return recoverChatGptPreSendModelControl(selectStagingMode, async cause => {
+          firstModelReadinessWaitMs = 70_000;
+          console.warn(`[chatgpt-web] browser turn ${turn.traceId} effort readiness recovery cause=${cause}`);
+          await diagnostics.capture(page, `effort-readiness-${cause}`);
+          // Exactly one recovery before the first Send: preserve the requested family and effort.
+          // Never use this path for subsequent multipart submissions or an already sent prompt.
+          if (launcherObservationRecovery) {
+            await rebindLauncherPage(1, new ChatGptModelControlReadinessError(cause), signal);
+          } else {
+            await waitForOperationalChatGptViewport(page, signal);
+          }
+          signal.throwIfAborted();
+          await throwIfChatGptRateLimitDialog(page);
+          await throwIfChatGptSessionFailureAlert(page);
+          await diagnostics.capture(page, "effort-readiness-reprobe");
+        }, signal);
+      });
       await diagnostics.capture(page, "effort-selection-complete");
 
       // One receipt per physical Send, not per native tool call or stream attachment.

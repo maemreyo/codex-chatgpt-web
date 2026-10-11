@@ -17,11 +17,12 @@ export type SemanticIneligibleDetail =
   | "fresh_conversation" | "thread_missing" | "missing_turn_provenance"
   | "no_completed_turn" | "missing_source_revision";
 
-export type SemanticValidationReason = "digest_mismatch" | "anchor_missing" | "cross_boundary" | "schema" | "corrupt_store";
+export type SemanticValidationReason = "digest_mismatch" | "anchor_missing" | "cross_boundary" | "schema" | "corrupt_store" | "operational_unknown";
 export type SemanticRotationReason = "initial" | "unknown_occupancy" | "model_family_change"
   | "physical_pressure" | "token_savings";
 
 export type SemanticLogEvent =
+  | { event: "semantic_compaction_accepted"; threadHash: string }
   | {
       event: "semantic_turn";
       threadHash: string;
@@ -105,5 +106,5 @@ export function semanticValidationReason(error: unknown): SemanticValidationReas
   if (/anchor is missing/i.test(message)) return "anchor_missing";
   if (/unsupported|invalid format|invalid epoch records|invalid persisted/i.test(message)) return "schema";
   if (/invalid JSON|changed during recovery/i.test(message)) return "corrupt_store";
-  return "schema";
+  return "operational_unknown";
 }

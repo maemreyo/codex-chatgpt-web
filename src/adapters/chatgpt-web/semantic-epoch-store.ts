@@ -48,6 +48,9 @@ export interface StoredChatGptSemanticEpochV1 {
   artifactLedger: ChatGptArtifactLedgerV1;
   checkpoint?: ChatGptSemanticCheckpointPayloadV1;
   updatedAt: number;
+  /** A completed compact is a pending transition until native history replays it. */
+  pendingCompactionDigest?: string;
+  pendingCompactionCaptureFence?: string;
 }
 
 interface StoredChatGptSemanticEpochFileV1 {
@@ -72,6 +75,22 @@ function quarantineDigestFence(entry: StoredSemanticEpochQuarantineV1, includePe
     entry.semanticEpoch, entry.identityDigest, entry.reason, entry.updatedAt,
     ...(includePending && entry.pendingCompactionDigest ? [entry.pendingCompactionDigest] : []),
   ]);
+}
+
+function activeCompactionFence(epoch: StoredChatGptSemanticEpochV1, includePending = true): string {
+  const { pendingCompactionDigest, pendingCompactionCaptureFence: _capture, ...source } = epoch;
+  return semanticHash(["active_epoch_compaction", source,
+    ...(includePending && pendingCompactionDigest ? [pendingCompactionDigest] : []),
+  ]);
+}
+
+function validPendingCompaction(value: Record<string, unknown>): boolean {
+  return (value.pendingCompactionDigest === undefined || (
+    typeof value.pendingCompactionDigest === "string" && /^[a-f0-9]{64}$/.test(value.pendingCompactionDigest)
+  )) && (value.pendingCompactionCaptureFence === undefined || (
+    typeof value.pendingCompactionCaptureFence === "string" && /^[a-f0-9]{64}$/.test(value.pendingCompactionCaptureFence)
+    && value.pendingCompactionDigest !== undefined
+  ));
 }
 
 const QUARANTINE_REASONS: ReadonlySet<string> = new Set([
@@ -179,6 +198,7 @@ function validateStoredEpoch(value: unknown): StoredChatGptSemanticEpochV1 {
     || !validLedger(epoch.artifactLedger)
     || (epoch.checkpoint !== undefined && !validCheckpoint(epoch.checkpoint))
     || (epoch.tier === 0 && epoch.checkpoint !== undefined)
+    || !validPendingCompaction(epoch)
     || typeof epoch.updatedAt !== "number" || !Number.isFinite(epoch.updatedAt)) {
     throw new Error("Invalid persisted ChatGPT semantic epoch record");
   }
@@ -294,6 +314,18 @@ export class ChatGptSemanticEpochStore {
       : undefined;
   }
 
+  /** Snapshot either state before compacting, without invalidating a healthy epoch. */
+  compactionFence(threadId: string): string | undefined {
+    this.load();
+    const quarantine = this.quarantines.get(threadId);
+    if (quarantine && this.now() - quarantine.updatedAt <= SEMANTIC_EPOCH_TTL_MS) {
+      return quarantineDigestFence(quarantine);
+    }
+    const active = this.epochs.get(threadId);
+    return active && this.now() - active.updatedAt <= SEMANTIC_EPOCH_TTL_MS
+      ? activeCompactionFence(active) : undefined;
+  }
+
   /** Remember an actually completed browser compact. It is not yet native acceptance. */
   rememberCompletedCompaction(threadId: string, expectedFence: string | undefined, summary: string): boolean {
     if (!expectedFence || !summary.trim()) return false;
@@ -301,7 +333,21 @@ export class ChatGptSemanticEpochStore {
       this.load(false, true);
       const entry = this.quarantines.get(threadId);
       if (!entry || this.now() - entry.updatedAt > SEMANTIC_EPOCH_TTL_MS) {
-        return false;
+        const active = this.epochs.get(threadId);
+        if (!active || this.now() - active.updatedAt > SEMANTIC_EPOCH_TTL_MS) return false;
+        const digest = semanticHash(summary);
+        const currentFence = activeCompactionFence(active);
+        if (active.pendingCompactionDigest === digest && (
+          expectedFence === currentFence || expectedFence === (
+            active.pendingCompactionCaptureFence ?? activeCompactionFence(active, false)
+          )
+        )) return true;
+        if (currentFence !== expectedFence) return false;
+        const next = new Map(this.epochs);
+        next.set(threadId, { ...active, pendingCompactionDigest: digest, pendingCompactionCaptureFence: expectedFence });
+        this.persist(next, this.quarantines);
+        this.epochs = next;
+        return true;
       }
       const digest = semanticHash(summary);
       const currentFence = quarantineDigestFence(entry);
@@ -320,8 +366,8 @@ export class ChatGptSemanticEpochStore {
   }
 
   /**
-   * Reopen only after native Codex sends back the exact v2 compaction item
-   * that this bridge completed while the same quarantine was active.
+   * Retire the old epoch or reopen quarantine only after native Codex sends
+   * back the exact v2 compaction this bridge completed for that fenced state.
    * A user-text summary, unrelated compact, or failed compact cannot suffice.
    */
   acceptCompletedCompaction(threadId: string, input: unknown): boolean {
@@ -334,18 +380,23 @@ export class ChatGptSemanticEpochStore {
       const summary = decodeCompactionSummary(last.encrypted_content);
       return summary !== null && semanticHash(summary) === expected;
     };
-    // Check before taking a write lock so ordinary quarantined requests make
+    // Check before taking a write lock so ordinary requests make
     // no needless disk mutation. Recheck under the lock against other processes.
     this.load();
-    const observed = this.quarantines.get(threadId);
-    if (!observed?.pendingCompactionDigest || !hasExpectedSummary(observed.pendingCompactionDigest)) return false;
+    const observed = this.quarantines.get(threadId) ?? this.epochs.get(threadId);
+    if (!observed?.pendingCompactionDigest || this.now() - observed.updatedAt > SEMANTIC_EPOCH_TTL_MS
+      || !hasExpectedSummary(observed.pendingCompactionDigest)) return false;
     return this.withWriteLock(() => {
       this.load(false, true);
-      const current = this.quarantines.get(threadId);
-      if (!current?.pendingCompactionDigest || !hasExpectedSummary(current.pendingCompactionDigest)) return false;
+      const current = this.quarantines.get(threadId) ?? this.epochs.get(threadId);
+      if (!current?.pendingCompactionDigest || this.now() - current.updatedAt > SEMANTIC_EPOCH_TTL_MS
+        || !hasExpectedSummary(current.pendingCompactionDigest)) return false;
       const next = new Map(this.quarantines);
       next.delete(threadId);
-      this.persist(this.epochs, next);
+      const epochs = new Map(this.epochs);
+      epochs.delete(threadId);
+      this.persist(epochs, next);
+      this.epochs = epochs;
       this.quarantines = next;
       return true;
     });
@@ -426,6 +477,7 @@ export class ChatGptSemanticEpochStore {
         identityDigest: semanticHash(current),
         reason,
         updatedAt: this.now(),
+        ...(current.pendingCompactionDigest ? { pendingCompactionDigest: current.pendingCompactionDigest } : {}),
       });
       const nextEpochs = new Map(this.epochs);
       nextEpochs.delete(threadId);

@@ -202,6 +202,23 @@ test("file preview removal preserves a pending paragraph through movement and re
   }
 });
 
+test("DOM finalization recovers a remounted pending tail after the streamed prefix is virtualized", async () => {
+  const [streaming, final] = await snapshots(`<section id="turn"><div class="markdown">
+    <p>Delivered prefix.</p><p>Pending tail.</p>
+  </div></section>`, [document => {
+    document.querySelector(".markdown")!.innerHTML = "<div>Pending tail.</div><p>Final addition.</p>";
+  }]);
+  expect(streaming!.markdownSegments.map(segment => segment.tag)).toEqual(["p", "p"]);
+  expect(final!.markdownSegments.map(segment => segment.tag)).toEqual(["div", "p"]);
+  const buffer = new ChatGptMarkdownBuffer(undefined, 0);
+  expect(buffer.observe(streaming!.markdownSegments, 0)).toBe("Delivered prefix.");
+  expect(buffer.observe(final!.markdownSegments, 1)).toBe("\n\nPending tail.");
+  expect(buffer.finish()).toEqual({
+    markdown: "Delivered prefix.\n\nPending tail.\n\nFinal addition.",
+    delta: "\n\nFinal addition.",
+  });
+});
+
 test("resource preview filtering preserves actual links, plain file labels and ordinary wrappers", async () => {
   const result = await snapshot(`<section id="turn"><div class="markdown">
     <div data-markdown-copy="contents">Ordinary content.</div>
