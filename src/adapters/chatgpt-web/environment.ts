@@ -34,6 +34,16 @@ export interface ChatGptThreadSpawnLineage {
   workspaceRoots: string[];
 }
 
+/** A child follow-up can omit its spawn fields; its native session must supply the parent. */
+export interface ChatGptContinuedSubagentMetadata {
+  continuation: true;
+  threadId: string;
+  agentName: string;
+  parentThreadIdHint?: string;
+  sandboxType?: ChatGptSandboxPolicy["type"];
+  workspaceRoots: string[];
+}
+
 export interface ChatGptRootThreadMetadata {
   threadId: string;
   sandboxType: ChatGptSandboxPolicy["type"] | "platform";
@@ -913,6 +923,33 @@ export function extractChatGptThreadSpawnLineage(
   if (workspacePaths.some(path => !isAbsolute(path))) return undefined;
   const workspaceRoots = [...new Set(workspacePaths.map(path => resolve(path)))];
   return { threadId, parentThreadId, agentName, sandboxType, workspaceRoots };
+}
+
+/** Hints only: these fields cannot grant cwd or permissions without native session proof. */
+export function extractChatGptContinuedSubagentMetadata(
+  parsed: CodexParsedRequest,
+): ChatGptContinuedSubagentMetadata | undefined {
+  const metadata = clientTurnMetadata(parsed);
+  if (!metadata || !isEnvironmentRequest(metadata, parsed) || metadata.request_kind !== "turn") return undefined;
+  const threadId = typeof metadata.thread_id === "string" ? metadata.thread_id.trim() : "";
+  const agentName = typeof metadata.agent_name === "string" ? metadata.agent_name.trim() : "";
+  const parent = metadata.parent_thread_id;
+  if (!threadId || !/^\/root\/(?:[^/]+\/)*[^/]+$/.test(agentName)
+    || (metadata.subagent_kind != null && metadata.subagent_kind !== "thread_spawn")
+    || (parent != null && (typeof parent !== "string" || !parent.trim() || parent === threadId))
+    || (parent != null && metadata.subagent_kind === "thread_spawn")) return undefined;
+  const sandbox = canonicalSandboxMetadata(metadata);
+  const sandboxType = sandboxTypeFromMetadata(sandbox);
+  if ((sandbox !== undefined && !sandboxType) || sandboxType === "platform") return undefined;
+  const workspaces = record(metadata.workspaces);
+  const workspacePaths = workspaces ? Object.keys(workspaces) : [];
+  if (workspacePaths.some(path => !isAbsolute(path))) return undefined;
+  return {
+    continuation: true, threadId, agentName,
+    ...(typeof parent === "string" ? { parentThreadIdHint: parent.trim() } : {}),
+    ...(sandboxType ? { sandboxType } : {}),
+    workspaceRoots: [...new Set(workspacePaths.map(path => resolve(path)))],
+  };
 }
 
 /** Root tasks have no spawn edge; their canonical session and current turn must prove authority. */

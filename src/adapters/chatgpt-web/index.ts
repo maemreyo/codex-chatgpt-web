@@ -23,7 +23,7 @@ import type { ProviderAdapter } from "../base";
 import { parseDataUrl } from "../image";
 import { ChatGptWebAdapterError, chatGptToolTimeoutError } from "./adapter-error";
 import { ChatGptBrowserWorker, resolveChatGptWebMultipartStagingMode, type ChatGptSubmissionRejectionObservation } from "./browser-worker";
-import { chatGptTurnUserRevisionHistory, extractChatGptTurnEnvironment, extractChatGptTurnIdentity, extractChatGptRootThreadMetadata, extractChatGptThreadSpawnLineage, priorChatGptAbortedTurnIds } from "./environment";
+import { chatGptTurnUserRevisionHistory, extractChatGptTurnEnvironment, extractChatGptTurnIdentity, extractChatGptRootThreadMetadata, extractChatGptThreadSpawnLineage, extractChatGptContinuedSubagentMetadata, priorChatGptAbortedTurnIds } from "./environment";
 import { verifiedCodexSemanticUserTurns } from "./codex-rollout-environment";
 import { CHATGPT_WEB_LUNA_MODEL_ID, CHATGPT_WEB_MODEL_ID, resolveChatGptWebModelMode, type ChatGptWebCapabilities, type ChatGptWebModelMode } from "./model";
 import { chatGptReadOnlyContextWarning, compileChatGptWebPrompt } from "./prompt";
@@ -776,7 +776,8 @@ export function createChatGptWebAdapter(
     // the raw body and all authority-bearing input remain untouched.
     if (parsed._semanticProvenance?.items.some(item => item.type === "message" && item.role === "user" && !item.turnId)) {
       try {
-        const lineage = extractChatGptThreadSpawnLineage(parsed) ?? extractChatGptRootThreadMetadata(parsed);
+        const lineage = extractChatGptThreadSpawnLineage(parsed)
+          ?? extractChatGptContinuedSubagentMetadata(parsed) ?? extractChatGptRootThreadMetadata(parsed);
         if (lineage && identity.turnId) {
           const users = parsed._semanticProvenance.items
             .filter(item => item.type === "message" && item.role === "user" && item.itemId && !item.turnId)

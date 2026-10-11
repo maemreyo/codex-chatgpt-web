@@ -7,6 +7,7 @@ import { createContext, runInContext } from "node:vm";
 import type { Page } from "playwright-core";
 import { CHATGPT_BROWSER_OBSERVATION_PROBE_TIMEOUT_MS, CHATGPT_COMPLETION_SETTLE_MS, CHATGPT_EXTERNAL_PROGRESS_CLOCK_SKEW_MS, CHATGPT_EXTERNAL_PROGRESS_STALL_CEILING_MS, ChatGptCompletionTracker, chatGptExternalProgressSuppressesDomHealth, CHATGPT_RESPONSE_DOM_GRACE_MS, MAX_CHATGPT_INTERNAL_OBSERVATION_FAULTS, CHATGPT_COMPOSER_DOCUMENT_END_KEY, CHATGPT_COMPOSER_SELECT_ALL_KEY, ChatGptBrowserObservationTimeoutError, ChatGptBrowserWorker, ChatGptSubmissionRejectionObserver, ChatGptPromptAttachmentIntegrityError, ChatGptTurnDomHealthTracker, ChatGptVisibleTraceTracker, MAX_CHATGPT_BROWSER_PAGE_REBINDS, MAX_CHATGPT_BROWSER_TABS, MAX_CHATGPT_CONNECTOR_TRIGGER_ATTEMPTS, assertChatGptWebInputWithinLimits, assertChatGptWebMultipartInputWithinLimits, browserDiagnosticCheckpoint, chatGptNewTurnIdentity, chatGptReboundTurnIdentity, chatGptSubmissionEvidence, connectAfterClosingBrowserConnection, dismissChatGptTemporaryChatOnboarding, isChatGptTraceControl, redactChatGptUiDiagnostic, resolveBrowserConfig, resolveChatGptToolConfirmation, resolveChatGptWebMultipartStagingMode, sanitizeChatGptBrowserDiagnosticState, setChatGptThinkMode, stripChatGptTraceControlSuffix, throwIfChatGptRateLimitDialog, throwIfChatGptSessionFailureAlert, throwIfChatGptTerminalErrorAlert, withChatGptBrowserObservationTimeout, CHATGPT_MULTIPART_RESPONSE_DOM_GRACE_MS, browserStageTimeouts, ChatGptSuspensionClock, remainingStageBudgetMs } from "../src/adapters/chatgpt-web/browser-worker";
 import { ensureChatGptPersonalizedConnectorAccess, chatGptUnavailableProDetail, ChatGptModelControlReadinessError, recoverChatGptPreSendModelControl } from "../src/adapters/chatgpt-web/browser-worker";
+import { composerTransportText, splitComposerRecoveryText } from "../src/adapters/chatgpt-web/browser-worker";
 import { chatGptStoppedThinkingError } from "../src/adapters/chatgpt-web/adapter-error";
 import { CHATGPT_STOPPED_THINKING_LABELS } from "../src/adapters/chatgpt-web/ui-labels";
 import { CHATGPT_WEB_LUNA_MODEL_ID, CHATGPT_WEB_MODEL_ID, resolveChatGptWebModelMode } from "../src/adapters/chatgpt-web/model";
@@ -553,11 +554,10 @@ test("compaction retry submission evidence cannot make prompt-stage settlement u
       clock: { suspendedMs(): number },
       awaitAbortedActionSettlement: boolean,
     ): Promise<T>;
-    attachPromptWithCompactionRetry(
+    attachPromptWithIntegrityRetry(
       page: unknown,
       prompt: string,
       localTools: boolean,
-      compaction: boolean,
       baseline: unknown,
       capture: undefined,
       signal: AbortSignal,
@@ -578,12 +578,11 @@ test("compaction retry submission evidence cannot make prompt-stage settlement u
     "trace_compaction_retry_timeout",
     "prompt_attachment",
     10,
-    signal => prototype.attachPromptWithCompactionRetry.call(
+    signal => prototype.attachPromptWithIntegrityRetry.call(
       fixture,
       page,
       "prompt",
       false,
-      true,
       baseline,
       undefined,
       signal,
@@ -922,7 +921,7 @@ test("two-part saved chats re-prove unchanged effort after the first message cre
         selection: { url, label: "Instant" } };
     },
     captureSubmissionBaseline: async () => ({}),
-    attachPrompt: async () => {}, attachPromptWithCompactionRetry: async () => {}, attachFiles: async () => {},
+    attachPrompt: async () => {}, attachPromptWithIntegrityRetry: async () => {}, attachFiles: async () => {},
     waitForNewAssistantTurn: async () => ({}),
     waitForMultipartAcknowledgement: async () => ({ identity: "stage:1" }),
     sendAttachedPrompt: async (_page: unknown, _baseline: unknown, _capture: unknown, _signal: unknown,
@@ -1160,7 +1159,11 @@ test("missing-assistant expiry checks fresh DOM after a delayed wake while prese
         };
       };
       worker.waitForTurnDomOrExternalProgress = async () => {
-        if (++waits > (scenario === "running" ? 2 : 1)) throw new Error("missing response was allowed to wait past its grace");
+        // A missing assistant gets two short same-turn observation refreshes after the
+        // original grace. Neither retry relaxes an explicit caller deadline.
+        const maxWaits = scenario === "missing" || scenario === "stopped" ? 3
+          : scenario === "running" ? 2 : 1;
+        if (++waits > maxWaits) throw new Error("missing response was allowed to wait past its bounded recovery");
         // Renderer or scheduler resumes after the response grace with a newly rendered turn.
         now += CHATGPT_RESPONSE_DOM_GRACE_MS + 1;
       };
@@ -1176,8 +1179,10 @@ test("missing-assistant expiry checks fresh DOM after a delayed wake while prese
           ? "ChatGPT accepted the message but did not expose its assistant turn in the DOM"
           : "ChatGPT web turn timed out");
       }
-      expect(observations).toBe(scenario === "turn-deadline" ? 1 : scenario === "running" ? 3 : 2);
-      expect(waits).toBe(scenario === "running" ? 2 : 1);
+      expect(observations).toBe(scenario === "turn-deadline" ? 1
+        : scenario === "running" ? 3 : scenario === "appeared" ? 2 : 6);
+      expect(waits).toBe(scenario === "missing" || scenario === "stopped" ? 3
+        : scenario === "running" ? 2 : 1);
     }
   } finally {
     Date.now = realDateNow;
@@ -1268,6 +1273,9 @@ test("prompt verification accepts Lexical NBSP preservation without weakening ot
   // Other whitespace and same-length text mutations must remain fail closed.
   expect(promptTextEquivalent.call(worker, "a b", "a\tb")).toBeFalse();
   expect(promptTextEquivalent.call(worker, "a\nb", "a b")).toBeFalse();
+  expect(promptTextEquivalent.call(worker, "a\r\nb", "a\nb")).toBeTrue();
+  expect(promptTextEquivalent.call(worker, "a\rb", "a\nb")).toBeTrue();
+  expect(promptTextEquivalent.call(worker, "a\r\nb", "a b")).toBeFalse();
   expect(promptTextEquivalent.call(worker, "abc", "abd")).toBeFalse();
   expect(promptTextEquivalent.call(worker, "abc", "ab")).toBeFalse();
 
@@ -1282,6 +1290,46 @@ test("prompt verification accepts Lexical NBSP preservation without weakening ot
   await expect(
     assertPromptAttached.call(worker, {} as Page, expected),
   ).resolves.toBeUndefined();
+});
+
+test("composer readback retains leading whitespace and strips only the connector separator", async () => {
+  const { createDocument } = require("@mixmark-io/domino");
+  const attachedPromptText = (ChatGptBrowserWorker.prototype as unknown as {
+    attachedPromptText(page: unknown): Promise<string>;
+  }).attachedPromptText;
+  const readback = async (html: string) => {
+    const document = createDocument(`<div id="composer">${html}</div>`);
+    const element = document.getElementById("composer");
+    return attachedPromptText.call({
+      activeComposer: async () => ({ evaluate: async (fn: (element: HTMLElement) => string) => fn(element) }),
+    }, {});
+  };
+
+  expect(await readback('<div><br></div><div>body</div>')).toBe("\nbody");
+  expect(await readback('<div><br></div><div><br></div><div>body</div>')).toBe("\n\nbody");
+  expect(await readback('  leading<div>next</div>')).toBe("  leading\nnext");
+  const pill = '<span app-mention-path="app://id" app-mention-display-name="Codex" contenteditable="false">Codex</span>';
+  expect(await readback(`${pill}&nbsp;<div><br></div><div>body</div>`)).toBe("\nbody");
+  expect(await readback(`${pill}   leading`)).toBe("  leading");
+  expect(await readback('<p><span>inline</span><strong> text</strong><br><span>next</span></p><p><br></p><p>last</p>')).toBe("inline text\nnext\n\nlast");
+  expect(await readback(`${pill}<span> </span><p>body</p>`)).toBe("body");
+  expect(await readback('<p>text<br></p>')).toBe("text");
+  expect(await readback('<p>text<br><br></p>')).toBe("text\n");
+});
+
+test("CR and CRLF use browser LF transport without changing the source or accepting lost lines", async () => {
+  const worker = Object.create(ChatGptBrowserWorker.prototype) as any;
+  const written: string[] = [];
+  worker.activeComposer = async () => ({ focus: async () => {}, evaluate: async (_fn: unknown, text: string) => { written.push(text); return true; } });
+  for (const text of ["alpha\r\nbeta", "alpha\rbeta"]) {
+    const request = Object.freeze({ text });
+    await worker.insertPromptText({} as Page, request.text);
+    expect(request.text).toBe(text);
+    expect(composerTransportText(request.text)).toBe("alpha\nbeta");
+    expect(worker.promptTextEquivalent(request.text, "alpha\nbeta")).toBeTrue();
+    expect(worker.promptTextEquivalent(request.text, "alphabeta")).toBeFalse();
+  }
+  expect(written).toEqual(["alpha\nbeta", "alpha\nbeta"]);
 });
 
 test("large Markdown-rich context uses one plain-text editing command before exact verification", async () => {
@@ -1340,41 +1388,85 @@ test("plain-text editing command fails closed when the focused composer rejects 
     .rejects.toThrow("rejected the plain-text editing command");
 });
 
-test("compaction prompt attachment retries once only before submission evidence", async () => {
+test("large composer retry is segmented without splitting UTF-16 pairs or CRLF", async () => {
+  const source = "x".repeat(63_999) + "🌏" + "y".repeat(63_999) + "\n" + "z".repeat(132_230);
+  const parts = splitComposerRecoveryText(source);
+  expect(parts.length).toBeGreaterThan(1);
+  expect(parts.join("")).toBe(source);
+  expect(parts.every(part => part.length <= 64_000)).toBeTrue();
+  expect(parts.every(part => !/\r$/.test(part))).toBeTrue();
+  expect(parts.every(part => !/[\uD800-\uDBFF]$/.test(part))).toBeTrue();
+  const crlfBoundary = "q".repeat(63_999) + "\r\n" + "tail";
+  expect(splitComposerRecoveryText(crlfBoundary).join("")).toBe(crlfBoundary);
+  expect(splitComposerRecoveryText(crlfBoundary)[0]).toBe("q".repeat(63_999));
+
+  const written: string[] = [];
+  let focusCount = 0;
+  const endKeys: string[] = [];
+  const composer = {
+    focus: async () => { focusCount += 1; },
+    press: async (key: string) => { endKeys.push(key); },
+    evaluate: async (_fn: unknown, value: string) => { written.push(value); return true; },
+  };
+  const insertPromptText = (ChatGptBrowserWorker.prototype as unknown as {
+    insertPromptText(page: unknown, text: string, signal?: AbortSignal, segmentedRecovery?: boolean): Promise<void>;
+  }).insertPromptText;
+  await insertPromptText.call({ activeComposer: async () => composer }, {}, source, undefined, true);
+  expect(written).toEqual(parts);
+  expect(focusCount).toBe(parts.length);
+  expect(endKeys).toEqual(parts.map(() => CHATGPT_COMPOSER_DOCUMENT_END_KEY));
+
+  const controller = new AbortController();
+  let attempted = 0;
+  await expect(insertPromptText.call({
+    activeComposer: async () => ({
+      focus: async () => {},
+      press: async () => {},
+      evaluate: async () => { attempted += 1; controller.abort(); return true; },
+    }),
+  }, {}, source, controller.signal, true)).rejects.toThrow("aborted");
+  expect(attempted).toBe(1);
+});
+
+test("prompt attachment retries once for large drafts only before submission evidence", async () => {
   const attachWithRetry = (ChatGptBrowserWorker.prototype as unknown as {
-    attachPromptWithCompactionRetry(
+    attachPromptWithIntegrityRetry(
       page: unknown,
       prompt: string,
       localTools: boolean,
-      compaction: boolean,
       baseline: unknown,
       captureDiagnostic?: (checkpoint: string) => Promise<void>,
     ): Promise<void>;
-  }).attachPromptWithCompactionRetry;
+  }).attachPromptWithIntegrityRetry;
   const baseline = {
     userTurns: {},
     responseTurns: {},
   };
-  let attempts = 0;
-  let resets = 0;
-  const checkpoints: string[] = [];
+  for (const localTools of [false, true]) {
+    let attempts = 0;
+    let resets = 0;
+    const segmented: boolean[] = [];
+    const checkpoints: string[] = [];
 
-  await attachWithRetry.call({
-    attachPrompt: async () => {
-      attempts += 1;
-      if (attempts === 1) {
-        throw new ChatGptPromptAttachmentIntegrityError(
-          "ChatGPT composer did not preserve the complete prompt (expectedChars=16000, actualChars=0, commonPrefixChars=0)",
-        );
-      }
-    },
-    currentSubmissionEvidence: async () => undefined,
-    resetCompactionComposerForRetry: async () => { resets += 1; },
-  }, {}, "compact prompt", false, true, baseline, async checkpoint => { checkpoints.push(checkpoint); });
+    await attachWithRetry.call({
+      attachPrompt: async (...args: unknown[]) => {
+        attempts += 1;
+        segmented.push(args[8] === true);
+        if (attempts === 1) {
+          throw new ChatGptPromptAttachmentIntegrityError(
+            "ChatGPT composer did not preserve the complete prompt (expectedChars=260235, actualChars=260828, commonPrefixChars=191083)",
+          );
+        }
+      },
+      currentSubmissionEvidence: async () => undefined,
+      resetComposerForAttachmentRetry: async () => { resets += 1; },
+    }, {}, "large prompt", localTools, baseline, async checkpoint => { checkpoints.push(checkpoint); });
 
-  expect(attempts).toBe(2);
-  expect(resets).toBe(1);
-  expect(checkpoints).toEqual(["prompt-attachment-integrity-retry"]);
+    expect(attempts).toBe(2);
+    expect(segmented).toEqual([false, true]);
+    expect(resets).toBe(1);
+    expect(checkpoints).toEqual(["prompt-attachment-integrity-retry"]);
+  }
 
   let duplicateAttempts = 0;
   await expect(attachWithRetry.call({
@@ -1383,20 +1475,24 @@ test("compaction prompt attachment retries once only before submission evidence"
       throw new ChatGptPromptAttachmentIntegrityError("composer cleared");
     },
     currentSubmissionEvidence: async () => "user_turn",
-    resetCompactionComposerForRetry: async () => { throw new Error("must not reset"); },
-  }, {}, "compact prompt", false, true, baseline)).rejects.toThrow(
-    "ChatGPT changed while the compaction prompt was being prepared",
+    resetComposerForAttachmentRetry: async () => { throw new Error("must not reset"); },
+  }, {}, "compact prompt", false, baseline)).rejects.toThrow(
+    "ChatGPT changed while the prompt was being prepared",
   );
   expect(duplicateAttempts).toBe(1);
 
   let normalAttempts = 0;
+  let normalResets = 0;
   await expect(attachWithRetry.call({
     attachPrompt: async () => {
       normalAttempts += 1;
       throw new ChatGptPromptAttachmentIntegrityError("composer cleared");
     },
-  }, {}, "normal prompt", false, false, baseline)).rejects.toThrow("composer cleared");
-  expect(normalAttempts).toBe(1);
+    currentSubmissionEvidence: async () => undefined,
+    resetComposerForAttachmentRetry: async () => { normalResets += 1; },
+  }, {}, "normal prompt", false, baseline)).rejects.toThrow("composer cleared");
+  expect(normalAttempts).toBe(2);
+  expect(normalResets).toBe(1);
 });
 
 test("prompt insertion stops before touching the composer when its stage is already aborted", async () => {
@@ -3107,7 +3203,7 @@ for (const rejectionKind of ["http_413", "sse_input_too_large"] as const) {
         ),
         captureSubmissionBaseline: async () => ({}),
         attachPrompt: async (_page: unknown, text: string) => { message = text; },
-        attachPromptWithCompactionRetry: async (_page: unknown, text: string) => { message = text; },
+        attachPromptWithIntegrityRetry: async (_page: unknown, text: string) => { message = text; },
         attachFiles: async () => {}, waitForNewAssistantTurn: async () => ({}),
         waitForMultipartAcknowledgement: async () => ({ identity: "synthetic:stage:1" }),
         sendAttachedPrompt: async (_page: unknown, _baseline: unknown, _capture: unknown, _signal: unknown,
