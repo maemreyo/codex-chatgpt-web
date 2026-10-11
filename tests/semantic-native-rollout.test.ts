@@ -1,10 +1,12 @@
 import { afterEach, expect, test } from "bun:test";
+import { Database } from "bun:sqlite";
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { verifiedCodexSemanticUserTurns } from "../src/adapters/chatgpt-web/codex-rollout-environment";
 import { buildSemanticTier0Candidate } from "../src/adapters/chatgpt-web/semantic-projection";
 import { parseRequest } from "../src/responses/parser";
+import { extractChatGptContinuedSubagentMetadata } from "../src/adapters/chatgpt-web/environment";
 
 const threadId = "01a12020-bbe6-7d00-9be9-21d8ca34c904";
 const priorTurn = "01a12021-bbe6-7d00-9be9-21d8ca34c904";
@@ -54,8 +56,44 @@ function fixture() {
   const items = parsed._semanticProvenance!.items
     .filter(item => item.role === "user" && item.itemId)
     .map(item => ({ itemId: item.itemId!, canonicalJson: item.canonicalJson }));
-  return { codexHome, events, write, parsed, items };
+  return { codexHome, path, events, write, parsed, items };
 }
+
+test("continued child native SEM attribution requires matching session and index parent evidence", () => {
+  const { codexHome, path, events, write, parsed, items } = fixture();
+  const parentThreadId = "01a12023-bbe6-7d00-9be9-21d8ca34c904";
+  const agentName = "/root/continued_fixture";
+  write([{
+    type: "session_meta", payload: {
+      id: threadId, parent_thread_id: parentThreadId, agent_path: agentName,
+      thread_source: "subagent",
+      source: { subagent: { thread_spawn: { parent_thread_id: parentThreadId, agent_path: agentName } } },
+    },
+  }, ...events.slice(1)]);
+  const body = parsed._rawBody as { client_metadata: Record<string, string> };
+  body.client_metadata["x-codex-turn-metadata"] = JSON.stringify({
+    thread_id: threadId, turn_id: currentTurn, request_kind: "turn", agent_name: agentName,
+  });
+  const continued = extractChatGptContinuedSubagentMetadata(parsed)!;
+  expect(continued).toBeDefined();
+  const before = JSON.stringify(parsed._rawBody);
+  const database = new Database(join(codexHome, "state_5.sqlite"), { create: true });
+  try {
+    database.exec("CREATE TABLE threads (id TEXT PRIMARY KEY, rollout_path TEXT, agent_path TEXT)");
+    database.exec("CREATE TABLE thread_spawn_edges (child_thread_id TEXT PRIMARY KEY, parent_thread_id TEXT, status TEXT)");
+    database.query("INSERT INTO threads VALUES (?, ?, ?)").run(threadId, path, agentName);
+    database.query("INSERT INTO thread_spawn_edges VALUES (?, ?, ?)").run(threadId, parentThreadId, "open");
+    const owners = verifiedCodexSemanticUserTurns({ codexHome, lineage: continued, turnId: currentTurn, items });
+    expect(owners?.get("msg_original")).toBe(priorTurn);
+    expect(owners?.get("msg_current")).toBe(currentTurn);
+    expect(JSON.stringify(parsed._rawBody)).toBe(before);
+    database.query("UPDATE thread_spawn_edges SET parent_thread_id = ? WHERE child_thread_id = ?").run(priorTurn, threadId);
+    expect(() => verifiedCodexSemanticUserTurns({ codexHome, lineage: continued, turnId: currentTurn, items }))
+      .toThrow("disagree on the continued subagent parent");
+  } finally {
+    database.close();
+  }
+});
 
 test("exact native user records restore turn attribution while leaving canonical history intact", () => {
   const { codexHome, parsed, items } = fixture();

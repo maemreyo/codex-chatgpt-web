@@ -10,6 +10,7 @@ import {
   extractChatGptSteeringEnvironmentClaim,
   extractChatGptTurnIdentity,
   extractChatGptThreadSpawnLineage,
+  extractChatGptContinuedSubagentMetadata,
   extractChatGptRootThreadMetadata,
   hasCurrentChatGptEnvironmentContext,
   hasChatGptCalendarEnvironmentDelta,
@@ -176,7 +177,8 @@ export class ChatGptThreadEnvironmentStore {
       const calendarDelta = hasCurrentContext && !currentCompaction && hasChatGptCalendarEnvironmentDelta(parsed);
       if (hasCurrentContext && !currentCompaction && !historicalMessages && !steeringClaim && !calendarDelta) throw error;
       const currentClaim = currentCompaction ? extractChatGptContinuationEnvironmentClaim(parsed) : steeringClaim;
-      const rolloutIdentity = lineage ?? extractChatGptRootThreadMetadata(parsed);
+      const rolloutIdentity = lineage ?? extractChatGptContinuedSubagentMetadata(parsed)
+        ?? extractChatGptRootThreadMetadata(parsed);
       // Automatic compaction has a current turn_context; standalone compaction has only its
       // source turn_context. Either must be the latest native record, never an arbitrary ancestor.
       const compactionSourceTurnId = parsed._compactionRequest

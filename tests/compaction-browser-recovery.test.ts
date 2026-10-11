@@ -57,8 +57,9 @@ test.each([
       expect(localTools).toBe(false);
       actions.push("attach:plain");
     },
-    attachPromptWithCompactionRetry: async (_page: unknown, _text: string, localTools: boolean) => {
-      expect(localTools).toBe(tools);
+    attachPromptWithIntegrityRetry: async (_page: unknown, _text: string, localTools: boolean) => {
+      // Multipart context stages attach without tools, even when the final prompt uses them.
+      if (!(multipart && !localTools)) expect(localTools).toBe(tools);
       actions.push(localTools ? "attach:tools" : "attach:plain");
     },
     attachFiles: async () => { actions.push("files"); },
@@ -117,7 +118,7 @@ test.each([
     Object.assign(page, { locator: () => absentDialog });
     Object.assign(worker, {
       attachPrompt: (ChatGptBrowserWorker.prototype as any).attachPrompt,
-      attachPromptWithCompactionRetry: (ChatGptBrowserWorker.prototype as any).attachPromptWithCompactionRetry,
+      attachPromptWithIntegrityRetry: (ChatGptBrowserWorker.prototype as any).attachPromptWithIntegrityRetry,
       activeComposer: async () => composer,
       selectConnector: async () => { connectorSelected = true; actions.push("attach:tools"); return composer; },
       insertPromptText: async () => { expect(connectorSelected).toBeTrue(); },

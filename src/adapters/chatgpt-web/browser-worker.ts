@@ -145,6 +145,7 @@ export const CHATGPT_TOOL_CONFIRMATION_TIMEOUT_MS = 60_000;
 export const MAX_CHATGPT_CONNECTOR_TRIGGER_ATTEMPTS = 3;
 const CHATGPT_CONNECTOR_MENTION_QUERY = "@codex";
 const CHATGPT_CONNECTOR_ACTION_TIMEOUT_MS = 10_000;
+const CHATGPT_COMPOSER_RECOVERY_CHUNK_CHARS = 64_000;
 const CHATGPT_SMOKE_TEXT = "Reply with exactly: CODEX WEB GPT READY";
 const CHATGPT_SMOKE_EXPECTED = "CODEX WEB GPT READY";
 /**
@@ -775,6 +776,11 @@ export class ChatGptPromptAttachmentIntegrityError extends ChatGptWebAdapterErro
     });
     this.name = "ChatGptPromptAttachmentIntegrityError";
   }
+}
+
+/** Browser text transport uses LF; the native request and history remain untouched. */
+export function composerTransportText(prompt: string): string {
+  return prompt.replace(/\r\n?/g, "\n");
 }
 
 const chatGptRateLimitDialog = (page: Page): Locator => page.locator('[role="dialog"]')
@@ -1462,7 +1468,7 @@ interface ChatGptSubmissionObservationRecovery {
 
 type ChatGptObservationRecovery = (
   attempt: number,
-  cause: ChatGptBrowserObservationTimeoutError,
+  cause: Error,
   baseline: ChatGptSubmissionBaseline,
   abortSignal?: AbortSignal,
 ) => Promise<ChatGptSubmissionObservationRecovery>;
@@ -1786,6 +1792,31 @@ export class ChatGptTurnDomHealthTracker {
         : "ChatGPT showed no new response or tool activity within the idle timeout, without a final answer or confirmed completion. Check the ChatGPT tab before retrying.";
     }
     return undefined;
+  }
+}
+
+/** Re-observe an accepted turn before treating an ambiguous idle DOM as a failed answer. */
+export const MAX_CHATGPT_IDLE_OBSERVATION_RECOVERIES = 2;
+export const CHATGPT_IDLE_OBSERVATION_RECHECK_MS = 2_000;
+
+export class ChatGptSubmittedTurnIdleRecovery {
+  private attempts = 0;
+
+  async retry(
+    error: string | undefined,
+    state: { running: boolean; completionActionVisible: boolean; externalProgressLive: boolean },
+    observeExistingTurn: (attempt: number) => Promise<void>,
+  ): Promise<boolean> {
+    if (!error) {
+      this.attempts = 0;
+      return false;
+    }
+    // A visible completion action with an empty answer is a confirmed failure. Recovery is
+    // reserved for ambiguous renderer silence, never for a terminal UI verdict.
+    if (state.running || state.completionActionVisible || state.externalProgressLive
+      || this.attempts >= MAX_CHATGPT_IDLE_OBSERVATION_RECOVERIES) return false;
+    await observeExistingTurn(++this.attempts);
+    return true;
   }
 }
 
@@ -2363,6 +2394,23 @@ export function insertPlainTextIntoComposer(element: HTMLElement, value: string)
   return document.execCommand("insertText", false, value);
 }
 
+/** Limit individual browser editing operations after a large atomic insertion fails. */
+export function splitComposerRecoveryText(text: string): string[] {
+  const parts: string[] = [];
+  for (let start = 0; start < text.length;) {
+    let end = Math.min(start + CHATGPT_COMPOSER_RECOVERY_CHUNK_CHARS, text.length);
+    if (end < text.length) {
+      const last = text.charCodeAt(end - 1);
+      if ((last >= 0xD800 && last <= 0xDBFF) || text[end - 1] === "\r" && text[end] === "\n") {
+        end -= 1;
+      }
+    }
+    parts.push(text.slice(start, end));
+    start = end;
+  }
+  return parts;
+}
+
 export class ChatGptBrowserWorker {
   static forProvider(provider: CodexProviderConfig): ChatGptBrowserWorker {
     const config = resolveBrowserConfig(provider);
@@ -2409,6 +2457,7 @@ export class ChatGptBrowserWorker {
     expected: string,
     observed: string,
   ): boolean {
+    expected = composerTransportText(expected);
     if (expected.length !== observed.length) return false;
 
     for (let index = 0; index < expected.length; index += 1) {
@@ -2424,6 +2473,7 @@ export class ChatGptBrowserWorker {
     expected: string,
     observed: string,
   ): number {
+    expected = composerTransportText(expected);
     const length = Math.min(expected.length, observed.length);
 
     let index = 0;
@@ -3249,6 +3299,7 @@ export class ChatGptBrowserWorker {
     let observationPage = page;
     let observationBaseline = baseline;
     let recoveryAttempts = 0;
+    let missingAssistantRecoveryAttempts = 0;
     let responseDeadline = Math.min(
       deadline ?? Number.POSITIVE_INFINITY,
       Date.now() + graceMs,
@@ -3334,12 +3385,35 @@ export class ChatGptBrowserWorker {
       // The power UI can expose Stop for a long reasoning phase before mounting any assistant
       // node. Fresh generation evidence extends only DOM grace, never the caller's deadline.
       if (state.visibleStopButtonCount > 0) {
+        missingAssistantRecoveryAttempts = 0;
         responseDeadline = Math.min(deadline ?? Number.POSITIVE_INFINITY, Date.now() + graceMs);
       }
       // A delayed renderer wake can cross the grace while the assistant appears. Only a fresh
       // observation can prove it is still missing; the explicit turn deadline remains above.
       if (Date.now() >= responseDeadline
         && !chatGptExternalProgressSuppressesDomHealth(progress, Date.now())) {
+        if (missingAssistantRecoveryAttempts < MAX_CHATGPT_IDLE_OBSERVATION_RECOVERIES) {
+          missingAssistantRecoveryAttempts += 1;
+          // Recheck the already-submitted turn, including a fresh same-page launcher transport
+          // when available. Never reattach or send a second prompt during observation recovery.
+          if (missingAssistantRecoveryAttempts === MAX_CHATGPT_IDLE_OBSERVATION_RECOVERIES && recoverObservation) {
+            const recovered = await recoverObservation(
+              missingAssistantRecoveryAttempts,
+              new Error("Accepted assistant turn was not visible at the DOM grace boundary"),
+              observationBaseline,
+              signal,
+            );
+            observationPage = recovered.page;
+            observationBaseline = recovered.baseline;
+          }
+          observationBaseline.domCache.key = undefined;
+          observationBaseline.domCache.snapshot = undefined;
+          responseDeadline = Math.min(
+            deadline ?? Number.POSITIVE_INFINITY,
+            Date.now() + CHATGPT_IDLE_OBSERVATION_RECHECK_MS,
+          );
+          continue;
+        }
         throw new Error("ChatGPT accepted the message but did not expose its assistant turn in the DOM");
       }
       await this.waitForTurnDomOrExternalProgress(
@@ -3418,14 +3492,46 @@ export class ChatGptBrowserWorker {
     const composer = await this.activeComposer(page, 30_000, abortSignal);
     return composer.evaluate(element => {
       const clone = element.cloneNode(true) as HTMLElement;
+      const hasConnectorPill = clone.querySelector(
+        '[data-id^="plugin:"][data-keyword], [app-mention-path^="app://"][app-mention-display-name][contenteditable="false"]',
+      ) != null;
       clone.querySelectorAll(
         '[data-id^="plugin:"][data-keyword], [data-inline-selection-pill-cursor-target], [app-mention-path^="app://"][app-mention-display-name][contenteditable="false"]',
       )
         .forEach(part => part.remove());
-      return [...clone.childNodes]
-        .map(child => child.textContent ?? "")
-        .join("\n")
-        .trimStart();
+      // The connector path inserts one separator ahead of the prompt. Remove only that
+      // text code unit before reconstructing lines, so a separator-only text node cannot
+      // contribute an extra line. Never trim the prompt's own leading whitespace.
+      if (hasConnectorPill) {
+        const walker = clone.ownerDocument.createTreeWalker(clone, 4 /* SHOW_TEXT */);
+        const first = walker.nextNode();
+        if (first?.textContent?.startsWith(" ") || first?.textContent?.startsWith("\u00A0")) {
+          first.textContent = first.textContent!.slice(1);
+          if (!first.textContent) first.parentNode?.removeChild(first);
+        }
+      }
+      // Lexical can split a line into several inline spans, or put BRs inside a
+      // paragraph. textContent joined per child invents lines in the former case
+      // and loses them in the latter. Decode structural line breaks explicitly.
+      const blocks = new Set(["DIV", "P", "PRE", "BLOCKQUOTE", "LI", "UL", "OL", "H1", "H2", "H3", "H4", "H5", "H6"]);
+      const read = (parent: Node): string => {
+        const nodes = [...parent.childNodes];
+        if ((parent === clone || blocks.has(parent.nodeName))
+          && nodes.length === 1 && nodes[0]!.nodeName === "BR") return "";
+        const parts = nodes.map(node => ({
+          text: node.nodeType === 3 ? node.textContent ?? ""
+            : node.nodeName === "BR" ? "\n" : read(node),
+          block: blocks.has(node.nodeName),
+          br: node.nodeName === "BR",
+        })).filter(part => part.block || part.text.length > 0);
+        // Chromium uses a final BR to make the end caret visible; a real trailing
+        // newline has a further empty paragraph or an additional BR before it.
+        if ((parent === clone || blocks.has(parent.nodeName)) && parts.at(-1)?.br) parts.pop();
+        return parts.map((part, index) => (
+          index > 0 && (part.block || parts[index - 1]!.block) ? "\n" : ""
+        ) + part.text).join("");
+      };
+      return read(clone);
     }, undefined, { timeout: 20_000, signal: abortSignal });
   }
 
@@ -3779,7 +3885,9 @@ export class ChatGptBrowserWorker {
     catalogRefreshAvailable = false,
     connectorAttemptBudget?: ChatGptConnectorAttemptBudget,
     requireThink = false,
+    segmentedRecovery = false,
   ): Promise<void> {
+    prompt = composerTransportText(prompt);
     throwIfPromptAttachmentAborted(abortSignal);
     await throwIfChatGptRateLimitDialog(page);
     throwIfPromptAttachmentAborted(abortSignal);
@@ -3796,7 +3904,7 @@ export class ChatGptBrowserWorker {
         if (requireThink) {
           await setChatGptThinkMode(composer, true, captureDiagnostic, abortSignal);
         }
-        await this.insertPromptText(page, prompt, abortSignal);
+        await this.insertPromptText(page, prompt, abortSignal, segmentedRecovery);
         await this.assertPromptAttached(page, prompt, abortSignal);
         return;
       }
@@ -3832,7 +3940,7 @@ export class ChatGptBrowserWorker {
         signal: abortSignal,
         timeout: CHATGPT_CONNECTOR_ACTION_TIMEOUT_MS,
       });
-      await this.insertPromptText(page, ` ${prompt}`, abortSignal);
+      await this.insertPromptText(page, ` ${prompt}`, abortSignal, segmentedRecovery);
       await this.assertPromptAttached(page, prompt, abortSignal);
     } catch (error) {
       if (!composerMutationStarted || error instanceof ChatGptPersistentBrowserStateError) throw error;
@@ -4055,7 +4163,7 @@ export class ChatGptBrowserWorker {
     }
   }
 
-  private async resetCompactionComposerForRetry(
+  private async resetComposerForAttachmentRetry(
     page: Page,
     baseline: ChatGptSubmissionBaseline,
     abortSignal?: AbortSignal,
@@ -4064,7 +4172,7 @@ export class ChatGptBrowserWorker {
     const before = await this.currentSubmissionEvidence(page, baseline, abortSignal);
     if (before) {
       throw new ChatGptPromptAttachmentIntegrityError(
-        "ChatGPT changed while the compaction prompt was being prepared. Check the ChatGPT tab before retrying.",
+        "ChatGPT changed while the prompt was being prepared. Check the ChatGPT tab before retrying.",
         new Error(`Submission evidence appeared after prompt attachment failed: ${before}`),
       );
     }
@@ -4078,23 +4186,22 @@ export class ChatGptBrowserWorker {
     const after = await this.currentSubmissionEvidence(page, baseline, abortSignal);
     if (after) {
       throw new ChatGptPromptAttachmentIntegrityError(
-        "ChatGPT changed while the compaction prompt was being reset. Check the ChatGPT tab before retrying.",
+        "ChatGPT changed while the prompt was being reset. Check the ChatGPT tab before retrying.",
         new Error(`Submission evidence appeared while resetting the prompt: ${after}`),
       );
     }
     const observed = await this.attachedPromptText(page, abortSignal);
     if (observed.length > 0) {
       throw new ChatGptPromptAttachmentIntegrityError(
-        `ChatGPT composer could not reset cleanly for compaction retry (actualChars=${observed.length})`,
+        `ChatGPT composer could not reset cleanly for attachment retry (actualChars=${observed.length})`,
       );
     }
   }
 
-  private async attachPromptWithCompactionRetry(
+  private async attachPromptWithIntegrityRetry(
     page: Page,
     prompt: string,
     localTools: boolean,
-    compaction: boolean,
     baseline: ChatGptSubmissionBaseline,
     captureDiagnostic?: (checkpoint: string) => Promise<void>,
     abortSignal?: AbortSignal,
@@ -4102,7 +4209,10 @@ export class ChatGptBrowserWorker {
     connectorAttemptBudget?: ChatGptConnectorAttemptBudget,
     requireThink = false,
   ): Promise<void> {
-    let retryAvailable = compaction;
+    // Attachment can fail without ever clicking Send (notably on large Lexical drafts).
+    // Rebuild it once after proving that no new user turn exists; never retry submission.
+    let retryAvailable = true;
+    let segmentedRecovery = false;
     for (;;) {
       try {
         await this.attachPrompt(
@@ -4114,6 +4224,7 @@ export class ChatGptBrowserWorker {
           catalogRefreshAvailable,
           connectorAttemptBudget,
           requireThink,
+          segmentedRecovery,
         );
         return;
       } catch (error) {
@@ -4122,34 +4233,59 @@ export class ChatGptBrowserWorker {
         const evidence = await this.currentSubmissionEvidence(page, baseline, abortSignal);
         if (evidence) {
           throw new ChatGptPromptAttachmentIntegrityError(
-            "ChatGPT changed while the compaction prompt was being prepared. Check the ChatGPT tab before retrying.",
+            "ChatGPT changed while the prompt was being prepared. Check the ChatGPT tab before retrying.",
             new Error(`Prompt attachment failed before submission evidence appeared: ${evidence}`, { cause: error }),
           );
         }
-        await captureDiagnostic?.("prompt-attachment-integrity-retry");
-        await this.resetCompactionComposerForRetry(page, baseline, abortSignal);
+        await withBrowserTurnAbort(
+          captureDiagnostic?.("prompt-attachment-integrity-retry") ?? Promise.resolve(),
+          abortSignal,
+        );
+        await this.resetComposerForAttachmentRetry(page, baseline, abortSignal);
+        segmentedRecovery = true;
       }
     }
   }
 
-  private async insertPromptText(page: Page, text: string, abortSignal?: AbortSignal): Promise<void> {
+  private async insertPromptText(
+    page: Page,
+    text: string,
+    abortSignal?: AbortSignal,
+    segmentedRecovery = false,
+  ): Promise<void> {
+    text = composerTransportText(text);
     throwIfPromptAttachmentAborted(abortSignal);
-    const composer = await this.activeComposer(page, 30_000, abortSignal);
-    await composer.focus({ signal: abortSignal, timeout: CHATGPT_CONNECTOR_ACTION_TIMEOUT_MS });
     // CDP Input.insertText is interpreted as live typing by ChatGPT's Lexical plugins. On a large
     // JSON transport it can turn literal Markdown backticks into rich code nodes, remove the
     // delimiters from textContent, and leave the next insertion outside the intended block. The
     // browser's plain-text editing command updates the same focused contenteditable atomically
     // without running those Markdown shortcuts. Exact readback below remains the authority.
-    const inserted = await composer.evaluate(insertPlainTextIntoComposer, text, {
-      timeout: 20_000,
-      signal: abortSignal,
-    });
-    throwIfPromptAttachmentAborted(abortSignal);
-    if (!inserted) {
-      throw new ChatGptPromptAttachmentIntegrityError(
-        "ChatGPT composer rejected the plain-text editing command",
-      );
+    // A second attempt can use smaller plain-text edits to avoid one oversized browser edit.
+    // Recheck the entire composed prompt, never an individual chunk, before allowing Send.
+    const parts = segmentedRecovery && text.length > CHATGPT_COMPOSER_RECOVERY_CHUNK_CHARS
+      ? splitComposerRecoveryText(text)
+      : [text];
+    for (const part of parts) {
+      throwIfPromptAttachmentAborted(abortSignal);
+      const composer = await this.activeComposer(page, 30_000, abortSignal);
+      await composer.focus({ signal: abortSignal, timeout: CHATGPT_CONNECTOR_ACTION_TIMEOUT_MS });
+      if (parts.length > 1) {
+        // Lexical may replace text nodes between edits. Append every segment to the
+        // current editor end instead of trusting a restored caret inside old text.
+        await composer.press(CHATGPT_COMPOSER_DOCUMENT_END_KEY, {
+          signal: abortSignal, timeout: CHATGPT_CONNECTOR_ACTION_TIMEOUT_MS,
+        });
+      }
+      const inserted = await composer.evaluate(insertPlainTextIntoComposer, part, {
+        timeout: 20_000,
+        signal: abortSignal,
+      });
+      throwIfPromptAttachmentAborted(abortSignal);
+      if (!inserted) {
+        throw new ChatGptPromptAttachmentIntegrityError(
+          "ChatGPT composer rejected the plain-text editing command",
+        );
+      }
     }
   }
 
@@ -5233,7 +5369,7 @@ export class ChatGptBrowserWorker {
       };
       const recoverPageObservation = async (
         attempt: number,
-        cause: ChatGptBrowserObservationTimeoutError,
+        cause: Error,
         baseline: ChatGptSubmissionBaseline,
         checkpoint: "submission-page-rebound" | "assistant-page-rebound",
         abortSignal?: AbortSignal,
@@ -5385,10 +5521,11 @@ export class ChatGptBrowserWorker {
             turn.traceId,
             `multipart_stage_${index + 1}_attachment`,
             browserStageTimeouts.promptAttachment,
-            (stageSignal) => this.attachPrompt(
+            (stageSignal) => this.attachPromptWithIntegrityRetry(
               page,
               stage.text,
               false,
+              stageBaseline,
               checkpoint => diagnostics.capture(page, `multipart-${index + 1}-${checkpoint}`),
               turn.abortSignal ? AbortSignal.any([stageSignal, turn.abortSignal]) : stageSignal,
             ),
@@ -5516,11 +5653,10 @@ export class ChatGptBrowserWorker {
               const promptAbortSignal = turn.abortSignal
                 ? AbortSignal.any([stageSignal, turn.abortSignal])
                 : stageSignal;
-              return this.attachPromptWithCompactionRetry(
+              return this.attachPromptWithIntegrityRetry(
                 page,
                 finalPrompt,
                 mode.localTools,
-                turn.compaction === true,
                 submissionBaseline,
                 checkpoint => diagnostics.capture(page, checkpoint),
                 promptAbortSignal,
@@ -5661,11 +5797,41 @@ export class ChatGptBrowserWorker {
         });
       };
       const domHealthTracker = new ChatGptTurnDomHealthTracker();
+      const idleObservationRecovery = new ChatGptSubmittedTurnIdleRecovery();
       const responseDomCache: ChatGptResponseDomCache = {};
       let consecutiveObservationRebinds = 0;
       let internalObservationFaults = 0;
       let observedThisIteration = false;
       let completionFenceRevision: number | undefined;
+      const recoverAmbiguousIdle = (
+        error: string | undefined,
+        state: { running: boolean; completionActionVisible: boolean; externalProgressLive: boolean },
+      ) => idleObservationRecovery.retry(error, state, async attempt => {
+        // Both attempts inspect the already-submitted turn. The second refreshes the same leased
+        // launcher page when available; neither path touches the composer or clicks Send.
+        if (attempt === MAX_CHATGPT_IDLE_OBSERVATION_RECOVERIES && launcherObservationRecovery) {
+          await rebindLauncherPage(attempt, new Error("Submitted-turn idle DOM observation is inconclusive"), turn.abortSignal);
+          submissionBaseline = {
+            ...submissionBaseline,
+            userTurns: page.locator(CHATGPT_USER_TURN_SELECTOR),
+            responseTurns: page.locator(CHATGPT_ASSISTANT_TURN_SELECTOR),
+            domCache: {},
+          };
+          responseTurn = {
+            ...responseTurn,
+            locator: page.locator(chatGptAssistantTurnSelector(responseTurn.identity)),
+          };
+        }
+        // Revalidate ownership before reading fresh DOM. A competing user turn is terminal,
+        // and no cached answer may be mistaken for proof that this turn completed.
+        responseTurn = await withChatGptBrowserObservationTimeout(
+          this.reconcileAssistantTurnBinding(page, submissionBaseline, responseTurn, turn.abortSignal),
+        );
+        responseDomCache.key = undefined;
+        responseDomCache.snapshot = undefined;
+        console.info(`[chatgpt-web] browser turn ${turn.traceId} re-observing accepted response after ambiguous idle (${attempt}/${MAX_CHATGPT_IDLE_OBSERVATION_RECOVERIES})`);
+        await withBrowserTurnAbort(new Promise(resolveSleep => setTimeout(resolveSleep, CHATGPT_IDLE_OBSERVATION_RECHECK_MS)), turn.abortSignal);
+      });
       for (;;) {
         // The heartbeat is a consumer callback, so it stays outside the observation-fault region:
         // a defect in the caller must not be retried as though the page could not be read.
@@ -5782,6 +5948,9 @@ export class ChatGptBrowserWorker {
           // temporarily cannot expose the response subtree. DOM remains authoritative for text and
           // completion; this only prevents a live turn from being misclassified as vanished.
           domHealthTracker.suspendForProgress();
+          await recoverAmbiguousIdle(undefined, {
+            running: false, completionActionVisible: false, externalProgressLive: true,
+          });
           await new Promise(resolveSleep => setTimeout(resolveSleep, 250));
           continue;
         }
@@ -5820,6 +5989,9 @@ export class ChatGptBrowserWorker {
             externalProgressLive,
             activityText: JSON.stringify(snapshot.traceBlocks),
           });
+          if (await recoverAmbiguousIdle(domError, {
+            running, completionActionVisible: snapshot.completionActionVisible, externalProgressLive,
+          })) continue;
           if (domError) throw chatGptResponseIncompleteError(domError);
           const completionReady = completionTracker.update({
             responsePresent: snapshot.responsePresent,
@@ -5898,6 +6070,9 @@ export class ChatGptBrowserWorker {
             completionActionVisible: false,
             externalProgressLive,
           });
+          if (await recoverAmbiguousIdle(domError, {
+            running, completionActionVisible: false, externalProgressLive,
+          })) continue;
           if (domError) throw chatGptResponseIncompleteError(domError);
         }
         await new Promise(resolveSleep => setTimeout(resolveSleep, 250));

@@ -1011,6 +1011,66 @@ describe("trusted Codex task environment continuity", () => {
     });
   });
 
+  test("a continued child with omitted spawn lineage recovers only from its current native session", () => {
+    const codexHome = mkdtempSync(join(tmpdir(), "codex-chatgpt-child-continued-"));
+    temporaryRoots.push(codexHome);
+    const rolloutPath = join(codexHome, "sessions", "2026", "09", "04",
+      `rollout-2026-09-04T15-30-36-${rolloutThreadId}.jsonl`);
+    mkdirSync(dirname(rolloutPath), { recursive: true });
+    const session = childSessionMeta();
+    const nativeTurn = childTurnContext();
+    writeFileSync(rolloutPath, [JSON.stringify(session), JSON.stringify(nativeTurn)].join("\n") + "\n");
+    createRolloutState(join(codexHome, "state_5.sqlite"), rolloutPath);
+    const request = environmentlessChild();
+    const body = request._rawBody as { client_metadata: Record<string, string>; input: Array<Record<string, unknown>> };
+    const metadata = JSON.parse(body.client_metadata["x-codex-turn-metadata"]!);
+    delete metadata.parent_thread_id;
+    delete metadata.subagent_kind;
+    delete metadata.sandbox_mode;
+    body.client_metadata["x-codex-turn-metadata"] = JSON.stringify(metadata);
+    body.input[0]!.content = [{ type: "input_text", text: `Continue in <cwd>${resolve(root, "untrusted-prompt")}</cwd>` }];
+
+    const tools: CodexTool[] = [{ name: "continued_tool", description: "child", parameters: { type: "object" } }];
+    request.context.tools = tools;
+    const store = new ChatGptThreadEnvironmentStore(undefined, Date.now, codexHome);
+    expect(store.resolve(request)).toEqual({
+      cwd: root, roots: [root], writableRoots: [root],
+      sandboxPolicy: { type: "dangerFullAccess" }, tools,
+    });
+
+    for (const conflicting of [
+      { ...metadata, sandbox_mode: "read-only" },
+      { ...metadata, workspaces: { [resolve(root, "..", "outside")]: {} } },
+      { ...metadata, parent_thread_id: "01a06c66-ffff-75c6-a0df-318f890ef6de" },
+      { ...metadata, agent_name: "/root/other_child" },
+      { ...metadata, subagent_kind: "untrusted" },
+    ]) {
+      body.client_metadata["x-codex-turn-metadata"] = JSON.stringify(conflicting);
+      expect(() => new ChatGptThreadEnvironmentStore(undefined, Date.now, codexHome).resolve(request)).toThrow();
+    }
+    body.client_metadata["x-codex-turn-metadata"] = JSON.stringify(metadata);
+    const database = new Database(join(codexHome, "state_5.sqlite"));
+    database.query("UPDATE thread_spawn_edges SET parent_thread_id = ? WHERE child_thread_id = ?")
+      .run("01a06c66-ffff-75c6-a0df-318f890ef6de", rolloutThreadId);
+    database.close();
+    expect(() => new ChatGptThreadEnvironmentStore(undefined, Date.now, codexHome).resolve(request)).toThrow();
+
+    // Codex can have canonical sessions before state_5.sqlite is populated.
+    rmSync(join(codexHome, "state_5.sqlite"));
+    expect(new ChatGptThreadEnvironmentStore(undefined, Date.now, codexHome).resolve(request).cwd).toBe(root);
+    writeFileSync(rolloutPath, [JSON.stringify(session),
+      JSON.stringify(childTurnContext("01a06c66-ffff-75c6-a0df-318f890ef6de"))].join("\n") + "\n");
+    expect(() => new ChatGptThreadEnvironmentStore(undefined, Date.now, codexHome).resolve(request))
+      .toThrow("no canonical rollout for the requested current turn");
+    writeFileSync(rolloutPath, [
+      JSON.stringify({ ...session, payload: { ...(session.payload as Record<string, unknown>),
+        parent_thread_id: "01a06c66-ffff-75c6-a0df-318f890ef6de" } }),
+      JSON.stringify(nativeTurn),
+    ].join("\n") + "\n");
+    expect(() => new ChatGptThreadEnvironmentStore(undefined, Date.now, codexHome).resolve(request))
+      .toThrow("session metadata");
+  });
+
   function midnightRolloutFixture() {
     const fixture = resumedRootFixture();
     const body = fixture.request._rawBody as { input: Array<Record<string, unknown>>; client_metadata: Record<string, string> };
