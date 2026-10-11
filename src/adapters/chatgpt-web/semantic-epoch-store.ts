@@ -10,6 +10,8 @@ import {
   semanticCoveredHistoryDigest,
   semanticCoveredToolCallsExist,
   semanticHash,
+  semanticHistoryItemHash,
+  semanticResolveCoveredAnchor,
   type ChatGptArtifactLedgerV1,
 } from "../../responses/semantic-provenance";
 import { extractChatGptTurnIdentity } from "./environment";
@@ -255,14 +257,19 @@ export function validateSemanticEpochRecord(
   if (epoch.modelFamily !== options.modelFamily) throw new Error("Semantic epoch model-family mismatch");
   const provenance = parsed._semanticProvenance;
   if (!provenance) throw new Error("Semantic provenance is unavailable");
-  const anchor = provenance.items.find(item => item.ref === epoch.coveredThroughRef);
-  if (!anchor) throw new Error("Semantic epoch anchor is missing");
+  const resolved = semanticResolveCoveredAnchor(provenance, epoch.coveredThroughRef, epoch.digestPolicyVersion);
+  if (!resolved) throw new Error("Semantic epoch anchor is missing");
+  const anchor = provenance.items[resolved.index]!;
+  if (epoch.digestPolicyVersion === 1 && (anchor.type !== "message" || anchor.role !== "assistant"
+    || semanticHistoryItemHash(anchor.canonicalJson, 1) !== epoch.sourceAnswerHash)) {
+    throw new Error("Semantic epoch source answer mismatch");
+  }
   // V2 ignored the entire live tool registry. An older tool-using epoch
   // cannot retroactively prove that its executed tool schema was stable.
-  if (epoch.digestPolicyVersion === 2 && semanticCoveredToolCallsExist(provenance, epoch.coveredThroughRef)) {
+  if (epoch.digestPolicyVersion === 2 && semanticCoveredToolCallsExist(provenance, resolved.ref)) {
     throw new Error("Semantic epoch v2 tool registry is not bound; canonical fallback required");
   }
-  if (semanticCoveredHistoryDigest(provenance, epoch.coveredThroughRef, epoch.digestPolicyVersion) !== epoch.coveredHistoryDigest) {
+  if (semanticCoveredHistoryDigest(provenance, resolved.ref, epoch.digestPolicyVersion) !== epoch.coveredHistoryDigest) {
     throw new Error("Semantic epoch covered-history digest mismatch");
   }
   if (options.sourceAnswerHash !== undefined && options.sourceAnswerHash !== epoch.sourceAnswerHash) {
@@ -272,7 +279,9 @@ export function validateSemanticEpochRecord(
     throw new Error("Semantic epoch source user revision mismatch");
   }
   for (const ref of epoch.checkpoint?.pinRefs ?? []) {
-    if (!provenance.items.some(item => item.ref === ref)) throw new Error("Semantic epoch checkpoint pin is missing");
+    if (!semanticResolveCoveredAnchor(provenance, ref, epoch.digestPolicyVersion)) {
+      throw new Error("Semantic epoch checkpoint pin is missing");
+    }
   }
 }
 

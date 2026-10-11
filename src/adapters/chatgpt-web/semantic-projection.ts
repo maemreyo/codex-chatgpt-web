@@ -13,6 +13,7 @@ import {
   semanticMaskToolResult,
   semanticMessageRefs,
   semanticPinnedMessageRefs,
+  semanticResolveCoveredAnchor,
 } from "../../responses/semantic-provenance";
 import {
   chatGptTurnUserRevisionHistory,
@@ -33,6 +34,7 @@ import {
   validateSemanticEpochRecord,
   type StoredChatGptSemanticEpochV1,
 } from "./semantic-epoch-store";
+import type { SemanticAnchorDetail } from "./semantic-log";
 import {
   assertChatGptWebInputWithinLimits,
 } from "./browser-worker";
@@ -75,6 +77,24 @@ export interface SemanticProjectionMetrics {
 export interface SemanticProjectedRequest {
   parsed: CodexParsedRequest;
   metrics: Omit<SemanticProjectionMetrics, "firstMessageTokens" | "firstMessageChars" | "estimatedInputTokens" | "physicalLimit">;
+}
+
+/** Structural diagnosis only; never retain a canonical item or its content. */
+export function classifyMissingSemanticAnchor(
+  parsed: CodexParsedRequest,
+  epoch: StoredChatGptSemanticEpochV1,
+): SemanticAnchorDetail | undefined {
+  const items = parsed._semanticProvenance?.items;
+  if (!items || semanticResolveCoveredAnchor(parsed._semanticProvenance!, epoch.coveredThroughRef, epoch.digestPolicyVersion)) return undefined;
+  if (items.some(item => ["compaction", "compaction_summary", "context_compaction"].includes(item.type ?? ""))) {
+    return "compaction_boundary_present";
+  }
+  if (items.some(item => item.type === "message" && item.role === "assistant"
+    && semanticHistoryItemHash(item.canonicalJson, epoch.digestPolicyVersion) === epoch.sourceAnswerHash)) {
+    return "answer_hash_retained";
+  }
+  return items.some(item => item.turnId === epoch.sourceTurnId)
+    ? "source_turn_retained" : "source_turn_absent";
 }
 
 export interface SemanticPreflightResult {
@@ -241,8 +261,9 @@ function semanticEpochSourceHashes(
 ): { sourceAnswerHash: string; sourceUserRevisionHash: string } {
   const provenance = parsed._semanticProvenance;
   if (!provenance) throw new Error("Semantic provenance is unavailable");
-  const anchor = provenance.items.find(item => item.ref === epoch.coveredThroughRef);
-  if (!anchor) throw new Error("Semantic epoch anchor is missing");
+  const resolved = semanticResolveCoveredAnchor(provenance, epoch.coveredThroughRef, epoch.digestPolicyVersion);
+  if (!resolved) throw new Error("Semantic epoch anchor is missing");
+  const anchor = provenance.items[resolved.index]!;
   const revisionHash = sourceRevisionHash(parsed, epoch.sourceTurnId);
   if (!revisionHash) throw new Error("Semantic epoch source user revision is missing");
   return {
@@ -285,8 +306,9 @@ export function projectSemanticEpoch(
     modelFamily: parsed._compactionRequest ? epoch.modelFamily : modelFamily,
     ...hashes,
   });
-  const cut = provenance.items.findIndex(item => item.ref === epoch.coveredThroughRef);
-  if (cut < 0) throw new Error("Semantic epoch anchor is missing");
+  const resolved = semanticResolveCoveredAnchor(provenance, epoch.coveredThroughRef, epoch.digestPolicyVersion);
+  if (!resolved) throw new Error("Semantic epoch anchor is missing");
+  const cut = resolved.index;
   // A persisted v1/v2 epoch may have been written by an older rotation policy
   // which only checked that every call ID appeared somewhere in the results.
   // Verify settled pairing again before masking any historical tool evidence.

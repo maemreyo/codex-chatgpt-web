@@ -277,10 +277,10 @@ test("stale epoch anchor is quarantined once and later requests use canonical fa
   const worker = ChatGptBrowserWorker.forProvider(provider);
   const originalRun = worker.run.bind(worker);
   const prompts: string[] = [];
-  const observed: Array<{ event: string; reason?: string }> = [];
+  const observed: Array<{ event: string; reason?: string; anchorDetail?: string }> = [];
   const infoSpy = spyOn(console, "info").mockImplementation((event: unknown) => {
     if (typeof event === "string" && event.startsWith('{"event":"semantic_')) {
-      observed.push(JSON.parse(event) as { event: string; reason?: string });
+      observed.push(JSON.parse(event) as { event: string; reason?: string; anchorDetail?: string });
     }
   });
   (worker as unknown as { run: (turn: BrowserTurn) => Promise<string> }).run = async browserTurn => {
@@ -328,6 +328,8 @@ test("stale epoch anchor is quarantined once and later requests use canonical fa
     expect(prompts[3]).toContain("Third task");
     expect(observed.filter(event => event.event === "semantic_validation_failed"
       && event.reason === "anchor_missing")).toHaveLength(1);
+    expect(observed.find(event => event.event === "semantic_validation_failed"
+      && event.reason === "anchor_missing")?.anchorDetail).toBe("source_turn_retained");
     expect(observed.some(event => event.event === "semantic_fallback"
       && event.reason === "quarantined_epoch")).toBeTrue();
   } finally {

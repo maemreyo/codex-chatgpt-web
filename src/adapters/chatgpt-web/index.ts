@@ -61,6 +61,7 @@ import { SemanticMessageCeilings } from "./semantic-message-ceiling";
 import { estimateTokens } from "../../lib/token-estimate";
 import {
   buildSemanticTier0Candidate,
+  classifyMissingSemanticAnchor,
   preflightSemanticProjection,
   projectSemanticEpoch,
   type SemanticProjectionMetrics,
@@ -642,6 +643,8 @@ export function createChatGptWebAdapter(
       && !manualInteraction) {
       const active = semanticEpochStore.get(identity.threadId, true);
       let newlyQuarantinedFence: string | undefined;
+      let failedCompactionValidation: { reason: ReturnType<typeof semanticValidationReason>;
+        anchorDetail?: ReturnType<typeof classifyMissingSemanticAnchor> } | undefined;
       if (active) {
         try {
           const projected = projectSemanticEpoch(parsed, active);
@@ -658,20 +661,26 @@ export function createChatGptWebAdapter(
               newlyQuarantinedFence = semanticEpochStore.quarantineFence(identity.threadId);
             }
           }
-          emitSemanticLog({ event: "semantic_validation_failed", threadHash,
-            reason, fellBackTo: "legacy" });
+          failedCompactionValidation = {
+            reason,
+            ...(reason === "anchor_missing" ? { anchorDetail: classifyMissingSemanticAnchor(parsed, active) } : {}),
+          };
         }
       }
       try {
         const mode = resolveChatGptWebModelMode(parsed.modelId, parsed.options.reasoning, turnCapabilities);
         preflightCanonicalFallback(parsed, turnCapabilities, mode);
       } catch {
+        if (failedCompactionValidation) emitSemanticLog({ event: "semantic_validation_failed", threadHash,
+          ...failedCompactionValidation, fellBackTo: "recovery_error" });
         emitSemanticLog({ event: "semantic_fallback", threadHash, to: "recovery_error", reason: "compaction_view_unavailable" });
         throw new ChatGptWebAdapterError(
           "Canonical compaction requires a verified semantic epoch because the original history exceeds the browser's physical limit.",
           { status: 409, errorType: "invalid_request_error", code: "semantic_epoch_recovery_required", retryable: false },
         );
       }
+      if (failedCompactionValidation) emitSemanticLog({ event: "semantic_validation_failed", threadHash,
+        ...failedCompactionValidation, fellBackTo: "legacy" });
       return { parsed, threadHash, newlyQuarantinedFence };
     }
     // Preserve eligibility ordering while logging only a fixed, content-free category.
@@ -705,17 +714,23 @@ export function createChatGptWebAdapter(
     const costThreadKey = threadId;
 
     const mode = resolveChatGptWebModelMode(parsed.modelId, parsed.options.reasoning, turnCapabilities);
+    const activeAnchorDetail = (reason: ReturnType<typeof semanticValidationReason>) =>
+      reason === "anchor_missing" && active
+        ? classifyMissingSemanticAnchor(parsed, active) : undefined;
     const fallbackToLegacy = (reason: string, validationError?: unknown): SemanticRuntimeInput => {
       try {
         preflightCanonicalFallback(parsed, turnCapabilities, mode);
       } catch {
         emitSemanticLog({ event: "semantic_fallback", threadHash, to: "recovery_error", reason });
         if (validationError !== undefined) {
+          const validationReason = semanticValidationReason(validationError);
+          const anchorDetail = activeAnchorDetail(validationReason);
           emitSemanticLog({
             event: "semantic_validation_failed",
             threadHash,
-            reason: semanticValidationReason(validationError),
+            reason: validationReason,
             fellBackTo: "recovery_error",
+            ...(anchorDetail ? { anchorDetail } : {}),
           });
         }
         throw new ChatGptWebAdapterError(
@@ -724,11 +739,14 @@ export function createChatGptWebAdapter(
         );
       }
       if (validationError !== undefined) {
+        const validationReason = semanticValidationReason(validationError);
+        const anchorDetail = activeAnchorDetail(validationReason);
         emitSemanticLog({
           event: "semantic_validation_failed",
           threadHash,
-          reason: semanticValidationReason(validationError),
+          reason: validationReason,
           fellBackTo: "legacy",
+          ...(anchorDetail ? { anchorDetail } : {}),
         });
       }
       emitSemanticLog({ event: "semantic_fallback", threadHash, to: "legacy", reason });

@@ -1,14 +1,16 @@
 import { expect, test } from "bun:test";
+import { createHash } from "node:crypto";
 import { CHATGPT_WEB_MODEL_ID, resolveChatGptWebModelMode } from "../src/adapters/chatgpt-web/model";
 import { chatGptConversationKey, retainedConversationResumeRequest } from "../src/adapters/chatgpt-web/conversation-key";
 import {
   buildSemanticTier0Candidate,
+  classifyMissingSemanticAnchor,
   preflightSemanticProjection,
   projectSemanticEpoch,
 } from "../src/adapters/chatgpt-web/semantic-projection";
 import { parseRequest } from "../src/responses/parser";
 import { COMPACT_PROMPT } from "../src/responses/compaction";
-import { semanticCoveredHistoryDigest } from "../src/responses/semantic-provenance";
+import { semanticCoveredHistoryDigest, semanticHistoryItemHash } from "../src/responses/semantic-provenance";
 
 const capabilities = { localToolsEnabled: true, solAvailable: true, extraHighAvailable: true, proAvailable: true };
 
@@ -50,6 +52,124 @@ function semanticRequest(currentText = "Continue with the exact current evidence
   parsed._chatgptModelFamily = "5.6";
   return parsed;
 }
+
+// Match the original digestPolicyVersion=1 ref algorithm independently of the
+// current parser's normalized, content-addressed refs.
+function legacyV1Refs(parsed: ReturnType<typeof semanticRequest>): string[] {
+  const occurrences = new Map<string, number>();
+  return parsed._semanticProvenance!.items.map(item => {
+    const digest = createHash("sha256").update(item.canonicalJson).digest("hex");
+    const ordinal = (occurrences.get(digest) ?? 0) + 1;
+    occurrences.set(digest, ordinal);
+    return `ci1_${digest.slice(0, 24)}_${ordinal}`;
+  });
+}
+
+test("persisted v1 raw refs resolve the exact covered cut across normalized replay", () => {
+  const body = structuredClone(semanticRequest()._rawBody) as { input: Array<Record<string, any>> };
+  // V1 hashed these replay-only fields, while V3 strips them from ref identity.
+  body.input[5]!.status = "completed";
+  body.input[5]!.content[0].annotations = [];
+  const parsed = parseRequest(body);
+  parsed._chatgptModelFamily = "5.6";
+  const candidate = buildSemanticTier0Candidate(parsed, "5.6", undefined, 1234).candidate!;
+  const refs = legacyV1Refs(parsed);
+  const cut = parsed._semanticProvenance!.items.findIndex(item => item.ref === candidate.coveredThroughRef);
+  expect(cut).toBe(5);
+  expect(refs[cut]).not.toBe(candidate.coveredThroughRef);
+  const epoch = {
+    ...candidate,
+    digestPolicyVersion: 1 as const,
+    coveredThroughRef: refs[cut]!,
+    coveredHistoryDigest: semanticCoveredHistoryDigest(parsed._semanticProvenance!, candidate.coveredThroughRef, 1),
+    sourceAnswerHash: semanticHistoryItemHash(parsed._semanticProvenance!.items[cut]!.canonicalJson, 1),
+    tier: 1 as const,
+    checkpoint: {
+      version: 1 as const, objective: "Keep the verified prefix", decisions: [], ruledOut: [], unresolved: [],
+      nextActions: [], notes: "", pinRefs: [refs[0]!, refs[1]!],
+    },
+  };
+  const projected = projectSemanticEpoch(parsed, epoch);
+  expect(projected.metrics.maskedResults).toBe(1);
+  expect(projected.parsed._rawBody).toBe(parsed._rawBody);
+  expect(projected.parsed.context.messages.find(message => message.role === "toolResult"
+    && message.toolCallId === "call_current")?.content).toBe("CURRENT-TOOL-RESULT");
+  expect(projected.parsed.context.messages.some(message => message.role === "developer"
+    && message.content === "Current developer instruction remains exact.")).toBeTrue();
+  expect(classifyMissingSemanticAnchor(parsed, epoch)).toBeUndefined();
+
+  const replay = (edit: (input: Array<Record<string, any>>) => void) => {
+    const changed = structuredClone(body);
+    edit(changed.input);
+    const request = parseRequest(changed);
+    request._chatgptModelFamily = "5.6";
+    return request;
+  };
+  expect(() => projectSemanticEpoch(replay(items => { items[0]!.content = "Changed policy"; }), epoch))
+    .toThrow("digest mismatch");
+  expect(() => projectSemanticEpoch(replay(items => { items[4]!.output = "Tampered historical result"; }), epoch))
+    .toThrow("digest mismatch");
+  expect(() => projectSemanticEpoch(replay(items => { items.splice(0, 1); }), epoch))
+    .toThrow("digest mismatch");
+  // The assistant's V3 ref still matches: only the old raw identity vanished.
+  expect(() => projectSemanticEpoch(replay(items => { delete items[5]!.status; }), epoch))
+    .toThrow("anchor is missing");
+  expect(() => projectSemanticEpoch(replay(items => { items.splice(5, 1); }), epoch))
+    .toThrow("anchor is missing");
+  expect(() => projectSemanticEpoch(parsed, {
+    ...epoch, sourceAnswerHash: "0".repeat(64),
+  })).toThrow("source answer mismatch");
+  expect(() => projectSemanticEpoch(parsed, {
+    ...epoch, sourceUserRevisionHash: "0".repeat(64),
+  })).toThrow("source user revision mismatch");
+  expect(() => projectSemanticEpoch(parsed, {
+    ...epoch, checkpoint: { ...epoch.checkpoint!, pinRefs: ["ci1_missing_1"] },
+  })).toThrow("checkpoint pin is missing");
+  const unsafe = replay(items => { items.splice(5, 0, structuredClone(items[4]!)); });
+  const unsafeAnchor = unsafe._semanticProvenance!.items[6]!.ref;
+  const unsafeEpoch = {
+    ...epoch,
+    coveredHistoryDigest: semanticCoveredHistoryDigest(unsafe._semanticProvenance!, unsafeAnchor, 1),
+  };
+  expect(() => projectSemanticEpoch(unsafe, unsafeEpoch))
+    .toThrow("covered tool calls are not safely paired");
+});
+
+test("missing SEM anchors classify native compaction and source-history shapes without relaxing validation", () => {
+  const original = semanticRequest();
+  const active = buildSemanticTier0Candidate(original, "5.6", undefined, 1234).candidate!;
+  const makeReplay = (edit: (items: Array<Record<string, any>>) => void) => {
+    const body = structuredClone(original._rawBody) as { input: Array<Record<string, any>> };
+    edit(body.input);
+    const parsed = parseRequest(body);
+    parsed._chatgptModelFamily = "5.6";
+    expect(() => projectSemanticEpoch(parsed, active)).toThrow("anchor is missing");
+    return classifyMissingSemanticAnchor(parsed, active);
+  };
+
+  expect(makeReplay(items => {
+    items.splice(5, 1, { type: "compaction", encrypted_content: "unverified-compact" });
+  })).toBe("compaction_boundary_present");
+  expect(makeReplay(items => {
+    items[5]!.content = [{ type: "output_text", text: "Different final answer" }];
+  })).toBe("source_turn_retained");
+  expect(makeReplay(items => {
+    items.splice(1, 5);
+  })).toBe("source_turn_absent");
+  // A prior identical answer changes the content-addressed occurrence suffix
+  // without changing the saved answer hash. That is diagnostic evidence only:
+  // the covered prefix still differs, so recovery must remain fenced.
+  const duplicate = structuredClone(original._rawBody) as { input: Array<Record<string, any>> };
+  duplicate.input.splice(5, 0, structuredClone(duplicate.input[5]!));
+  const withDuplicate = parseRequest(duplicate);
+  withDuplicate._chatgptModelFamily = "5.6";
+  const duplicateEpoch = buildSemanticTier0Candidate(withDuplicate, "5.6", undefined, 1234).candidate!;
+  const removed = parseRequest(structuredClone(original._rawBody));
+  removed._chatgptModelFamily = "5.6";
+  expect(classifyMissingSemanticAnchor(removed, duplicateEpoch)).toBe("answer_hash_retained");
+  expect(() => projectSemanticEpoch(removed, duplicateEpoch)).toThrow("anchor is missing");
+  expect(classifyMissingSemanticAnchor(original, active)).toBeUndefined();
+});
 
 test("native Codex untagged history fails closed rather than inventing turn ownership", () => {
   const body = structuredClone(semanticRequest()._rawBody) as {

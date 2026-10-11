@@ -21,12 +21,15 @@ const SEMANTIC = {
   semantic_turn: "threadHash epoch tier canonicalTokens nextWireTokens estimatedEpochOccupancy occupancyConfidence physicalLimit",
   semantic_rotation: "threadHash fromEpoch toEpoch reason firstMessageTokens firstMessageChars fitsSingleMessage maskedResults maskedTokensEst ledgerFiles ledgerCommands windowSize",
   semantic_skip: "threadHash reason detail",
-  semantic_validation_failed: "threadHash reason fellBackTo",
+  semantic_validation_failed: "threadHash reason fellBackTo anchorDetail",
   semantic_reject: "threadHash kind mode effort estimatedMessageTokens messageChars ledgerValue class",
   semantic_fallback: "threadHash to reason",
   semantic_cost: "threadHash epoch checkpointTailRequests checkpointTailTokensEst epochRotations reseedInputTokensEst webCompactionSubmissions extraStageSubmissions maskedResults maskedTokensEst discardedTails legacyEquivalentSubmissions",
 };
 const ENUMS = {
+  anchorDetail: new Set([
+    "compaction_boundary_present", "answer_hash_retained", "source_turn_retained", "source_turn_absent",
+  ]),
   detail: new Set([
     "manual_interaction", "compaction", "model_mismatch", "model_family_missing",
     "local_tools_disabled", "trusted_environment_missing", "launcher_missing",

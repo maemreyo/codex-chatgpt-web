@@ -208,7 +208,10 @@ test("legacy 2026 archive saturated at 4,194,287 bytes retains later failures an
   fs.writeFileSync(destination, legacy);
 
   const after = [
-    semantic("semantic_validation_failed", { reason: "operational_unknown", fellBackTo: "legacy", error: "SECRET_ERROR" }),
+    semantic("semantic_validation_failed", { reason: "operational_unknown",
+      fellBackTo: "legacy", error: "SECRET_ERROR" }),
+    semantic("semantic_validation_failed", { reason: "anchor_missing", anchorDetail: "compaction_boundary_present",
+      fellBackTo: "legacy", error: "SECRET_ERROR" }),
     semantic("semantic_compaction_accepted", { prompt: "SECRET_PROMPT" }),
     JSON.stringify({
       event: "native_tool_diagnostic", stage: "handler_failed", outcome: "unclassified_error",
@@ -224,7 +227,10 @@ test("legacy 2026 archive saturated at 4,194,287 bytes retains later failures an
   assert.ok(overflow.droppedRoutine > 0);
   assert.equal(overflow.droppedActionable, 0);
   assert.ok(archived.some(item => item.event === "semantic_rotation" && item.reason === "physical_pressure"));
-  assert.ok(archived.some(item => item.event === "semantic_validation_failed" && item.reason === "operational_unknown"));
+  assert.ok(archived.some(item => item.event === "semantic_validation_failed"
+    && item.reason === "operational_unknown"));
+  assert.ok(archived.some(item => item.event === "semantic_validation_failed"
+    && item.reason === "anchor_missing" && item.anchorDetail === "compaction_boundary_present"));
   assert.ok(archived.some(item => item.event === "semantic_compaction_accepted"));
   assert.ok(archived.some(item => item.event === "native_tool_diagnostic" && item.stage === "handler_failed"));
   assert.doesNotMatch(JSON.stringify(archived), /SECRET_|PRIVATE_/);
