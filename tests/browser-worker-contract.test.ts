@@ -1332,6 +1332,24 @@ test("CR and CRLF use browser LF transport without changing the source or accept
   expect(written).toEqual(["alpha\nbeta", "alpha\nbeta"]);
 });
 
+test("markdown composer keeps real trailing BRs and removes only the connector's empty scaffold", async () => {
+  const { createDocument } = require("@mixmark-io/domino");
+  const readback = async (html: string) => {
+    const document = createDocument(`<div id="composer" data-composer-markdown="true">${html}</div>`);
+    const element = document.getElementById("composer");
+    return (ChatGptBrowserWorker.prototype as any).attachedPromptText.call({
+      activeComposer: async () => ({ evaluate: async (fn: (element: HTMLElement) => string) => fn(element) }),
+    }, {});
+  };
+  expect(await readback('<p>body<br></p>')).toBe("body\n");
+  expect(await readback('<p>body<br><br></p>')).toBe("body\n\n");
+  expect(await readback('<p><br></p>')).toBe("");
+  const pill = '<span app-mention-path="app://fixture" contenteditable="false" app-mention-display-name="Connector">Connector</span>';
+  expect(await readback(`<p>${pill} </p><p><br>body</p>`)).toBe("\nbody");
+  expect(await readback(`<p>${pill} </p><p>body</p>`)).toBe("\nbody");
+  expect(await readback('<p><br></p><p><br>body</p>')).toBe("\n\nbody");
+});
+
 test("large Markdown-rich context uses one plain-text editing command before exact verification", async () => {
   const prompt = [
     "Act as the model backend for the Codex task encoded below.",
@@ -1400,7 +1418,7 @@ test("large composer retry is segmented without splitting UTF-16 pairs or CRLF",
   expect(splitComposerRecoveryText(crlfBoundary).join("")).toBe(crlfBoundary);
   expect(splitComposerRecoveryText(crlfBoundary)[0]).toBe("q".repeat(63_999));
 
-  const written: string[] = [];
+  const written: unknown[] = [];
   let focusCount = 0;
   const endKeys: string[] = [];
   const composer = {
@@ -1412,7 +1430,7 @@ test("large composer retry is segmented without splitting UTF-16 pairs or CRLF",
     insertPromptText(page: unknown, text: string, signal?: AbortSignal, segmentedRecovery?: boolean): Promise<void>;
   }).insertPromptText;
   await insertPromptText.call({ activeComposer: async () => composer }, {}, source, undefined, true);
-  expect(written).toEqual(parts);
+  expect(written).toEqual(parts.map(text => ({ text, lineBreakRecovery: true })));
   expect(focusCount).toBe(parts.length);
   expect(endKeys).toEqual(parts.map(() => CHATGPT_COMPOSER_DOCUMENT_END_KEY));
 
@@ -2079,7 +2097,7 @@ test("connector catalog refresh stays fail-closed for absent, legacy, and exact 
 
 test("tool-capable prompts use the shared Playwright connector selection before inserting context", async () => {
   const controller = new AbortController();
-  const calls: Array<[string, string?]> = [];
+  const calls: Array<[string, unknown?]> = [];
   let selected = false;
   const selectedConnector = {
     waitFor: async (options?: { signal?: AbortSignal }) => {
@@ -2181,7 +2199,7 @@ test("tool-capable prompts use the shared Playwright connector selection before 
     ["selectedFocus"],
     ["press", CHATGPT_COMPOSER_DOCUMENT_END_KEY],
     ["selectedFocus"],
-    ["plainText", " context"],
+    ["plainText", { text: "context", connectorPrompt: true }],
     ["assertPrompt"],
   ]);
 });
