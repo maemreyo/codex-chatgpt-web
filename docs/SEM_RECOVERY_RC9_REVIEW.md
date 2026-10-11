@@ -63,6 +63,9 @@ are separate unverified dimensions.
 macOS ARM64 preview packaging (`bun run app:package`) PASS. Packaged application
 smoke (`bun run app:smoke`) PASS with `PACKAGED_LAUNCHER_SMOKE_OK darwin/arm64`.
 Built locally using ad-hoc code signing; Apple notarization was skipped.
+The packaged DMG passed `hdiutil verify`. Mounted read-only, the packaged
+`Codex Web GPT.app` and `Contents/Resources/runtime/runtime/bun` both passed
+`codesign --verify --deep --strict`. The DMG was detached afterward.
 
 - `codex-web-gpt-6.1.8-rc.9-mac-arm64.dmg` (158 MiB):
   SHA-256 `784d4396bb81749aa21d79d4ada61de7a1da1941beae54b5c388404766d971de`.
@@ -73,6 +76,8 @@ The local artifact manifest `launcher/artifacts/checksums.txt` still refers to
 RC7 and is not evidence for RC9; release automation generates and verifies a
 fresh manifest from the published assets. Multi-platform CI, publication and
 public download checksum verification require separate evidence.
+GitHub reported zero Actions runs at this checkpoint despite the CI and
+Release workflows being active. Local verification is separate from remote CI.
 
 ## Post-review corrections
 
