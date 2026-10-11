@@ -4,6 +4,14 @@ type RecordLike = Record<string, unknown>;
 
 export interface SemanticLogReport {
   events: number;
+  /** Archived SEM counts, costs and ratios describe retained observations only. */
+  archiveRetention: {
+    overflowObserved: boolean;
+    droppedRoutine: number;
+    droppedActionable: number;
+    droppedInvalid: number;
+    metricCoverage: "partial" | "observed_only";
+  };
   threads: number;
   turns: number;
   rotations: number;
@@ -26,6 +34,8 @@ export interface SemanticLogReport {
   skipsByReason: Record<string, number>;
   ineligibleDetails: Record<string, number>;
   validationFailuresByReason: Record<string, number>;
+  /** Content-free shapes of missing anchors; old events without detail count as unknown. */
+  anchorMissingDetails: Record<string, number>;
   rejectionsByClass: Record<string, number>;
   rejectionsAfterRotation: number;
   fallbacksByTarget: Record<string, number>;
@@ -58,6 +68,9 @@ const INELIGIBLE_DETAILS = new Set([
   "no_completed_turn", "missing_source_revision",
 ]);
 const VALIDATION_REASONS = new Set(["digest_mismatch", "anchor_missing", "cross_boundary", "schema", "corrupt_store", "operational_unknown"]);
+const ANCHOR_DETAILS = new Set([
+  "compaction_boundary_present", "answer_hash_retained", "source_turn_retained", "source_turn_absent",
+]);
 const REJECTION_CLASSES = new Set(["A", "B", "C", "D", "unknown"]);
 const FALLBACK_TARGETS = new Set(["legacy", "compaction_required", "recovery_error"]);
 // Only report reasons produced by this bridge. Never reflect an untrusted log
@@ -88,11 +101,11 @@ function parseJson(value: string): RecordLike | undefined {
   catch { return undefined; }
 }
 
-function semanticEventFromRecord(value: RecordLike): RecordLike | undefined {
+function reportEventFromRecord(value: RecordLike): RecordLike | undefined {
   const event = typeof value.event === "string" ? value.event : undefined;
-  if (event?.startsWith("semantic_")) {
+  if (event?.startsWith("semantic_") || event === "diagnostic_archive_overflow") {
     const detail = record(value.detail);
-    return detail ? { event, ...detail } : value;
+    return detail ? { ...detail, event } : value;
   }
   const detail = record(value.detail);
   const nestedLine = typeof detail?.line === "string"
@@ -100,7 +113,7 @@ function semanticEventFromRecord(value: RecordLike): RecordLike | undefined {
     : typeof value.line === "string" ? value.line : undefined;
   if (!nestedLine) return undefined;
   const nested = parseJson(nestedLine.trim());
-  return nested ? semanticEventFromRecord(nested) : undefined;
+  return nested ? reportEventFromRecord(nested) : undefined;
 }
 
 function increment(target: Record<string, number>, key: string): void {
@@ -115,14 +128,34 @@ export function semanticLogReport(path: string | readonly string[]): SemanticLog
   // Treat rotated, non-overlapping log segments as one ordered event stream.
   // Aggregating separate reports loses per-thread continuity and misstates ratios.
   const paths = typeof path === "string" ? [path] : [...new Set(path)];
-  const events = paths.flatMap(file => readFileSync(file, "utf8")
+  const observations = paths.flatMap(file => readFileSync(file, "utf8")
     .split(/\r?\n/)
     .filter(Boolean)
     .flatMap(line => {
       const decoded = parseJson(line);
-      const semantic = decoded ? semanticEventFromRecord(decoded) : undefined;
-      return semantic && KNOWN_EVENTS.has(String(semantic.event)) ? [semantic] : [];
+      const observation = decoded ? reportEventFromRecord(decoded) : undefined;
+      return observation && (KNOWN_EVENTS.has(String(observation.event))
+        || observation.event === "diagnostic_archive_overflow") ? [observation] : [];
     }));
+  const events = observations.filter(event => KNOWN_EVENTS.has(String(event.event)));
+  const archiveRetention: SemanticLogReport["archiveRetention"] = {
+    overflowObserved: false,
+    droppedRoutine: 0,
+    droppedActionable: 0,
+    droppedInvalid: 0,
+    metricCoverage: "observed_only",
+  };
+  for (const observation of observations) {
+    if (observation.event !== "diagnostic_archive_overflow") continue;
+    archiveRetention.overflowObserved = true;
+    archiveRetention.metricCoverage = "partial";
+    for (const key of ["droppedRoutine", "droppedActionable", "droppedInvalid"] as const) {
+      const count = observation[key];
+      if (typeof count === "number" && Number.isSafeInteger(count) && count >= 0) {
+        archiveRetention[key] += count;
+      }
+    }
+  }
 
   const threadSet = new Set<string>();
   const rotationsByThread = new Map<string, number>();
@@ -130,6 +163,7 @@ export function semanticLogReport(path: string | readonly string[]): SemanticLog
   const skipsByReason: Record<string, number> = {};
   const ineligibleDetails: Record<string, number> = {};
   const validationFailuresByReason: Record<string, number> = {};
+  const anchorMissingDetails: Record<string, number> = {};
   const rejectionsByClass: Record<string, number> = {};
   const fallbacksByTarget: Record<string, number> = {};
   const fallbacksByReason: Record<string, number> = {};
@@ -180,7 +214,9 @@ export function semanticLogReport(path: string | readonly string[]): SemanticLog
       if (reason === "ineligible") increment(ineligibleDetails, enumValue(event.detail, INELIGIBLE_DETAILS));
       if (reason === "no_fit") rotationPreflightNoFit += 1;
     } else if (type === "semantic_validation_failed") {
-      increment(validationFailuresByReason, enumValue(event.reason, VALIDATION_REASONS));
+      const reason = enumValue(event.reason, VALIDATION_REASONS);
+      increment(validationFailuresByReason, reason);
+      if (reason === "anchor_missing") increment(anchorMissingDetails, enumValue(event.anchorDetail, ANCHOR_DETAILS));
     } else if (type === "semantic_reject") {
       const rejectionClass = enumValue(event.class, REJECTION_CLASSES);
       increment(rejectionsByClass, rejectionClass);
@@ -228,6 +264,7 @@ export function semanticLogReport(path: string | readonly string[]): SemanticLog
 
   return {
     events: events.length,
+    archiveRetention,
     threads: threadSet.size,
     turns,
     rotations,
@@ -248,6 +285,7 @@ export function semanticLogReport(path: string | readonly string[]): SemanticLog
     skipsByReason,
     ineligibleDetails,
     validationFailuresByReason,
+    anchorMissingDetails,
     rejectionsByClass,
     rejectionsAfterRotation,
     fallbacksByTarget,

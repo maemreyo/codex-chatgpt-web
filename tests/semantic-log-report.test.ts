@@ -28,6 +28,10 @@ test("semantic log report reads raw and launcher-wrapped events without surfacin
       launcher(semantic({ event: "semantic_skip", threadHash: threadA, reason: "cross_boundary" })),
       launcher(semantic({ event: "semantic_validation_failed", threadHash: threadA, reason: "digest_mismatch" })),
       launcher(semantic({ event: "semantic_validation_failed", threadHash: threadA, reason: "operational_unknown" })),
+      launcher(semantic({ event: "semantic_validation_failed", threadHash: threadA, reason: "anchor_missing",
+        anchorDetail: "compaction_boundary_present", source: "SECRET TRANSCRIPT CONTENT" })),
+      launcher(semantic({ event: "semantic_validation_failed", threadHash: threadA, reason: "anchor_missing",
+        anchorDetail: "SECRET TRANSCRIPT CONTENT" })),
       launcher(semantic({ event: "semantic_compaction_accepted", threadHash: threadA, prompt: "SECRET TRANSCRIPT CONTENT" })),
       launcher(semantic({ event: "semantic_validation_failed", threadHash: threadB, reason: "SECRET TRANSCRIPT CONTENT" })),
       launcher(semantic({ event: "semantic_reject", threadHash: threadA, class: "D" })),
@@ -54,7 +58,11 @@ test("semantic log report reads raw and launcher-wrapped events without surfacin
     ].join("\n"), "utf8");
 
     const report = semanticLogReport(path);
-    expect(report.events).toBe(21);
+    expect(report.events).toBe(23);
+    expect(report.archiveRetention).toEqual({
+      overflowObserved: false, droppedRoutine: 0, droppedActionable: 0,
+      droppedInvalid: 0, metricCoverage: "observed_only",
+    });
     expect(report.threads).toBe(2);
     expect(report.turns).toBe(3);
     expect(report.rotations).toBe(1);
@@ -68,7 +76,8 @@ test("semantic log report reads raw and launcher-wrapped events without surfacin
     });
     expect(report.skipsByReason).toEqual({ ineligible: 2, no_fit: 1, cross_boundary: 1, unknown: 1 });
     expect(report.ineligibleDetails).toEqual({ missing_turn_provenance: 1, unknown: 1 });
-    expect(report.validationFailuresByReason).toEqual({ digest_mismatch: 1, operational_unknown: 1, unknown: 1 });
+    expect(report.validationFailuresByReason).toEqual({ digest_mismatch: 1, operational_unknown: 1, anchor_missing: 2, unknown: 1 });
+    expect(report.anchorMissingDetails).toEqual({ compaction_boundary_present: 1, unknown: 1 });
     expect(report.rejectionsByClass).toEqual({ D: 2, unknown: 1 });
     expect(report.rejectionsAfterRotation).toBe(2);
     expect(report.fallbacksByTarget).toEqual({ legacy: 2 });
@@ -86,6 +95,54 @@ test("semantic log report reads raw and launcher-wrapped events without surfacin
       maxTurnsPerEpoch: 2,
     });
     expect(JSON.stringify(report)).not.toContain("SECRET TRANSCRIPT CONTENT");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("archive overflow marks retained SEM costs, turns and ratios as partial", () => {
+  const dir = mkdtempSync(join(tmpdir(), "semantic-pruned-report-"));
+  const older = join(dir, "2026-10-10.jsonl");
+  const newer = join(dir, "2026-10-11.jsonl");
+  const threadHash = "aaaaaaaaaaaaaaaa";
+  const archived = (payload: Record<string, unknown>) => JSON.stringify({
+    at: "2026-10-11T12:00:00.000Z", level: "info", event: "diagnostic_observation",
+    detail: { line: JSON.stringify(payload) },
+  });
+  try {
+    // Earlier epoch-1 semantic_turn and semantic_cost events have been evicted.
+    // The report cannot recover their count or assign overflow to an event type.
+    writeFileSync(older, [
+      JSON.stringify({ event: "diagnostic_archive_overflow", droppedRoutine: 12,
+        droppedActionable: 2, droppedInvalid: 1, prompt: "PRIVATE_PROMPT" }),
+      archived({ event: "semantic_turn", threadHash, epoch: 2 }),
+    ].join("\n") + "\n");
+    writeFileSync(newer, [
+      archived({ event: "diagnostic_archive_overflow", droppedRoutine: 4,
+        droppedActionable: 1, droppedInvalid: "PRIVATE_PROMPT" }),
+      archived({ event: "semantic_rotation", threadHash, fromEpoch: 1, toEpoch: 2,
+        maskedTokensEst: 240 }),
+      archived({ event: "semantic_cost", threadHash, legacyEquivalentSubmissions: 2,
+        checkpointTailRequests: 1, checkpointTailTokensEst: 30, epochRotations: 1,
+        reseedInputTokensEst: 500, webCompactionSubmissions: 0,
+        extraStageSubmissions: 0, discardedTails: 0 }),
+    ].join("\n") + "\n");
+
+    const report = semanticLogReport([older, newer]);
+    expect(report.archiveRetention).toEqual({
+      overflowObserved: true, droppedRoutine: 16, droppedActionable: 3,
+      droppedInvalid: 1, metricCoverage: "partial",
+    });
+    expect(report.events).toBe(3); // Overflow markers are metadata, not SEM events.
+    expect(report.turns).toBe(1);
+    expect(report.rotations).toBe(1);
+    expect(report.rotationRatioPerThread).toBe(1);
+    expect(report.loggedCost).toMatchObject({ samples: 1, legacyEquivalentSubmissions: 2,
+      checkpointTailRequests: 1, additionalSubmissionsPer100Legacy: 50 });
+    expect(report.epochReuseByThread).toMatchObject([{
+      threadHash, observedEpochs: 1, semanticTurns: 1,
+    }]);
+    expect(JSON.stringify(report)).not.toContain("PRIVATE_PROMPT");
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }

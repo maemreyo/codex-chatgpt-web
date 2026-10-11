@@ -18,6 +18,8 @@ export type SemanticIneligibleDetail =
   | "no_completed_turn" | "missing_source_revision";
 
 export type SemanticValidationReason = "digest_mismatch" | "anchor_missing" | "cross_boundary" | "schema" | "corrupt_store" | "operational_unknown";
+export type SemanticAnchorDetail = "compaction_boundary_present" | "answer_hash_retained"
+  | "source_turn_retained" | "source_turn_absent";
 export type SemanticRotationReason = "initial" | "unknown_occupancy" | "model_family_change"
   | "physical_pressure" | "token_savings";
 
@@ -56,6 +58,7 @@ export type SemanticLogEvent =
       threadHash: string;
       reason: SemanticValidationReason;
       fellBackTo: "legacy" | "recovery_error";
+      anchorDetail?: SemanticAnchorDetail;
     }
   | {
       event: "semantic_reject";

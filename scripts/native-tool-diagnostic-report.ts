@@ -9,6 +9,14 @@ export interface NativeToolDiagnosticReport {
   observedCorrelations: number;
   correlationsWithCodexResult: number;
   correlationsWithReportedError: number;
+  /** Archive pruning can remove one side of a correlation; these are observed counts only. */
+  archiveRetention: {
+    overflowObserved: boolean;
+    droppedRoutine: number;
+    droppedActionable: number;
+    droppedInvalid: number;
+    correlationCoverage: "partial" | "observed_only";
+  };
   requestKinds: Record<string, number>;
   failureKinds: Record<string, number>;
   lifecycleStages: Record<string, number>;
@@ -32,6 +40,9 @@ const STAGES = new Set([
   "broker_queued", "broker_delivered_to_codex_adapter", "broker_redelivered",
   "codex_result_received", "broker_claim_with_turn", "browser_safety_text_visible",
 ]);
+const REQUEST_KINDS = new Set(["shell", "patch", "freeform", "structured"]);
+const REQUEST_STRUCTURES = new Set(["single", "multiline", "pipeline", "inline_script", "redirection"]);
+const FAILURE_KINDS = new Set(["safety_status_unknown", "openai_safety_block"]);
 
 function object(value: unknown): Json | undefined {
   return value !== null && typeof value === "object" && !Array.isArray(value) ? value as Json : undefined;
@@ -60,6 +71,13 @@ export function nativeToolDiagnosticReport(path: string): NativeToolDiagnosticRe
   const safetyTraces = new Set<string>();
   const lifecycleStages: Record<string, number> = {};
   let browserSafetyTextObservations = 0;
+  const archiveRetention = {
+    overflowObserved: false,
+    droppedRoutine: 0,
+    droppedActionable: 0,
+    droppedInvalid: 0,
+    correlationCoverage: "observed_only" as "partial" | "observed_only",
+  };
   const traceHash = (value: unknown): string | undefined => (
     typeof value === "string" && /^[A-Za-z0-9_-]{6,128}$/.test(value)
       ? createHash("sha256").update(value).digest("hex").slice(0, 12) : undefined
@@ -79,6 +97,17 @@ export function nativeToolDiagnosticReport(path: string): NativeToolDiagnosticRe
     if (!line) continue;
     const event = diagnosticRecord(line);
     if (!event) continue;
+    if (event.event === "diagnostic_archive_overflow") {
+      archiveRetention.overflowObserved = true;
+      for (const key of ["droppedRoutine", "droppedActionable", "droppedInvalid"] as const) {
+        const count = event[key];
+        if (Number.isSafeInteger(count) && typeof count === "number" && count >= 0) {
+          archiveRetention[key] += count;
+        }
+      }
+      archiveRetention.correlationCoverage = "partial";
+      continue;
+    }
     const diagnosticId = typeof event.diagnosticId === "string" && /^diag_[a-f0-9]{16}$/.test(event.diagnosticId)
       ? event.diagnosticId : undefined;
     if (event.event === "native_tool_diagnostic" && typeof event.stage === "string" && STAGES.has(event.stage)) {
@@ -95,12 +124,17 @@ export function nativeToolDiagnosticReport(path: string): NativeToolDiagnosticRe
         if (trace) entry.traceHash = trace;
         // The original MCP ingress describes the user's request; a later
         // broker request may contain generated gateway code instead.
-        if (typeof event.requestKind === "string" && (!entry.requestKind || event.stage === "mcp_ingress")) {
+        if (typeof event.requestKind === "string" && REQUEST_KINDS.has(event.requestKind)
+          && (!entry.requestKind || event.stage === "mcp_ingress")) {
           entry.requestKind = event.requestKind;
-          entry.requestStructure = typeof event.requestStructure === "string" ? event.requestStructure : undefined;
-          entry.requestChars = typeof event.requestChars === "number" ? event.requestChars : undefined;
+          entry.requestStructure = typeof event.requestStructure === "string" && REQUEST_STRUCTURES.has(event.requestStructure)
+            ? event.requestStructure : undefined;
+          entry.requestChars = typeof event.requestChars === "number" && Number.isSafeInteger(event.requestChars)
+            && event.requestChars >= 0 ? event.requestChars : undefined;
         }
-        if (typeof event.failureKind === "string") entry.failureKind = event.failureKind;
+        if (typeof event.failureKind === "string" && FAILURE_KINDS.has(event.failureKind)) {
+          entry.failureKind = event.failureKind;
+        }
       }
     } else if (event.event === "call_received" && diagnosticId) {
       observe(diagnosticId, "mcp_ingress");
@@ -125,6 +159,7 @@ export function nativeToolDiagnosticReport(path: string): NativeToolDiagnosticRe
     observedCorrelations: calls.size,
     correlationsWithCodexResult: [...calls.values()].filter(call => call.stages.includes("codex_result_received")).length,
     correlationsWithReportedError: [...calls.values()].filter(call => call.reportedError).length,
+    archiveRetention,
     requestKinds: countBy("requestKind"),
     failureKinds: countBy("failureKind"),
     lifecycleStages,

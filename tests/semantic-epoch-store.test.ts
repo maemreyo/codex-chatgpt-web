@@ -1,4 +1,5 @@
 import { expect, test } from "bun:test";
+import { createHash } from "node:crypto";
 import { mkdirSync, mkdtempSync, readFileSync, readdirSync, renameSync, rmdirSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
@@ -9,7 +10,7 @@ import {
   type StoredChatGptSemanticEpochV1,
 } from "../src/adapters/chatgpt-web/semantic-epoch-store";
 import { parseRequest } from "../src/responses/parser";
-import { semanticCoveredHistoryDigest } from "../src/responses/semantic-provenance";
+import { semanticCoveredHistoryDigest, semanticHistoryItemHash } from "../src/responses/semantic-provenance";
 import { renderSemanticArtifactLedger } from "../src/responses/semantic-provenance";
 import { ChatGptWebAdapterError } from "../src/adapters/chatgpt-web/adapter-error";
 import { encodeCompactionSummary, SUMMARY_PREFIX } from "../src/responses/compaction";
@@ -608,6 +609,7 @@ test("legacy digest policy remains verifiable without silently migrating its evi
   const request = parsed();
   const legacy = epoch(1, "turn_1", 1000, {
     digestPolicyVersion: 1,
+    sourceAnswerHash: semanticHistoryItemHash(request._semanticProvenance!.items[1]!.canonicalJson, 1),
     coveredHistoryDigest: semanticCoveredHistoryDigest(request._semanticProvenance!, request._semanticProvenance!.items[1]!.ref, 1),
   });
   expect(() => validateSemanticEpochRecord(request, legacy, { modelFamily: "5.6" })).not.toThrow();
@@ -616,6 +618,47 @@ test("legacy digest policy remains verifiable without silently migrating its evi
     coveredHistoryDigest: semanticCoveredHistoryDigest(request._semanticProvenance!, request._semanticProvenance!.items[1]!.ref, 2),
   });
   expect(() => validateSemanticEpochRecord(request, v2, { modelFamily: "5.6" })).not.toThrow();
+});
+
+test("persisted v1 raw anchor and pin refs survive restart, but stale evidence rejects", () => {
+  const { dir, path } = tempState();
+  try {
+    const body = structuredClone(parsed()._rawBody) as { input: Array<Record<string, any>> };
+    body.input[1]!.status = "completed";
+    body.input[1]!.content[0].annotations = [];
+    const request = parseRequest(body);
+    const items = request._semanticProvenance!.items;
+    const digest = (json: string) => createHash("sha256").update(json).digest("hex");
+    const legacyRef = (json: string) => `ci1_${digest(json).slice(0, 24)}_1`;
+    const legacy = epoch(1, "turn_1", 1000, {
+      digestPolicyVersion: 1,
+      sourceAnswerHash: digest(items[1]!.canonicalJson),
+      coveredThroughRef: legacyRef(items[1]!.canonicalJson),
+      coveredHistoryDigest: semanticCoveredHistoryDigest(request._semanticProvenance!, items[1]!.ref, 1),
+      tier: 1,
+      checkpoint: {
+        version: 1, objective: "v1 snapshot", decisions: [], ruledOut: [], unresolved: [],
+        nextActions: [], notes: "", pinRefs: [legacyRef(items[0]!.canonicalJson)],
+      },
+    });
+    expect(legacy.coveredThroughRef).not.toBe(items[1]!.ref);
+    const original = JSON.stringify({ version: 1, epochs: { thread_a: legacy } });
+    writeFileSync(path, original);
+    const restored = new ChatGptSemanticEpochStore(path, () => 1000).get("thread_a")!;
+    expect(restored).toEqual(legacy);
+    expect(() => validateSemanticEpochRecord(request, restored, { modelFamily: "5.6" })).not.toThrow();
+
+    const tampered = structuredClone(body);
+    tampered.input[0]!.content = "Changed historical message";
+    expect(() => validateSemanticEpochRecord(parseRequest(tampered), restored, { modelFamily: "5.6" }))
+      .toThrow("digest mismatch");
+    expect(() => validateSemanticEpochRecord(request, {
+      ...restored, checkpoint: { ...restored.checkpoint!, pinRefs: ["ci1_missing_1"] },
+    }, { modelFamily: "5.6" })).toThrow("pin is missing");
+    expect(readFileSync(path, "utf8")).toBe(original);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
 });
 
 test("contradictory persisted ledger outcomes fail closed without overwriting state", () => {

@@ -112,6 +112,32 @@ export function semanticCanonicalItemsFromBody(body: unknown): CodexSemanticCano
   });
 }
 
+/** Reconstruct the original v1 refs from raw canonical JSON and its occurrence ordinal.
+ * Newer policies normalize replay-only assistant fields before assigning refs.
+ * Keep this mapping separate from the current parser refs and never rebase a
+ * persisted anchor by source hash alone.
+ */
+export function semanticResolveCoveredAnchor(
+  provenance: CodexSemanticProvenanceV1,
+  ref: string,
+  version: 1 | 2 | 3,
+): { index: number; ref: string } | undefined {
+  if (version !== 1) {
+    const index = provenance.items.findIndex(item => item.ref === ref);
+    return index < 0 ? undefined : { index, ref: provenance.items[index]!.ref };
+  }
+  const occurrences = new Map<string, number>();
+  for (const [index, item] of provenance.items.entries()) {
+    const digest = semanticHash(item.canonicalJson);
+    const ordinal = (occurrences.get(digest) ?? 0) + 1;
+    occurrences.set(digest, ordinal);
+    if (`ci1_${digest.slice(0, 24)}_${ordinal}` === ref) {
+      return { index, ref: item.ref };
+    }
+  }
+  return undefined;
+}
+
 export function semanticCoveredHistoryDigest(
   provenance: CodexSemanticProvenanceV1,
   coveredThroughRef: string,

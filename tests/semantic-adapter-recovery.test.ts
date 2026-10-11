@@ -1,4 +1,4 @@
-import { expect, test } from "bun:test";
+import { expect, spyOn, test } from "bun:test";
 import { existsSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { ChatGptBrowserWorker, type BrowserTurn } from "../src/adapters/chatgpt-web/browser-worker";
@@ -406,7 +406,22 @@ test("S8: fresh native compact can clear a quarantine discovered during its own 
 
     const compact = request("small_compact", [...secondInput, { type: "compaction_trigger" }], true);
     const compactEvents: AdapterEvent[] = [];
-    await createChatGptWebAdapter(fixture.provider).runTurn!(compact, { headers: new Headers() }, event => compactEvents.push(event));
+    const validationLogs: Array<{ event: string; reason?: string; fellBackTo?: string }> = [];
+    const originalInfo = console.info.bind(console);
+    const logSpy = spyOn(console, "info").mockImplementation((entry: unknown, ...args: unknown[]) => {
+      if (typeof entry === "string" && entry.startsWith('{"event":"semantic_validation_failed"')) {
+        validationLogs.push(JSON.parse(entry) as { event: string; reason?: string; fellBackTo?: string });
+      }
+      originalInfo(entry, ...args);
+    });
+    try {
+      await createChatGptWebAdapter(fixture.provider).runTurn!(compact, { headers: new Headers() }, event => compactEvents.push(event));
+    } finally {
+      logSpy.mockRestore();
+    }
+    expect(validationLogs).toContainEqual(expect.objectContaining({
+      event: "semantic_validation_failed", reason: "digest_mismatch", fellBackTo: "legacy",
+    }));
     expect(compactEvents.at(-1)).toMatchObject({ type: "done" });
     const summary = compactEvents.filter((event): event is Extract<AdapterEvent, { type: "text_delta" }> =>
       event.type === "text_delta").map(event => event.text).join("");
