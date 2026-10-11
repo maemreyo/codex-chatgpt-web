@@ -3,6 +3,7 @@ import { constants, accessSync } from "node:fs";
 import { chromium, type Locator, type Page } from "playwright-core";
 import {
   ChatGptBrowserWorker,
+  CHATGPT_COMPOSER_DOCUMENT_END_KEY,
   composerTransportText,
   insertPlainTextIntoComposer,
   splitComposerRecoveryText,
@@ -154,4 +155,79 @@ test.skipIf(!chromePath)("production composer transport accepts CRLF and verifie
   } finally {
     await browser.close();
   }
+}, 30_000);
+
+test.skipIf(!chromePath)("connector insertion owns one separator and preserves the prompt's own whitespace", async () => {
+  const browser = await chromium.launch({ executablePath: chromePath, headless: true });
+  try {
+    const context = await browser.newContext({ offline: true });
+    const page = await context.newPage();
+    const composer = page.locator("#prompt-textarea");
+    const worker = Object.assign(Object.create(ChatGptBrowserWorker.prototype), { activeComposer: async () => composer });
+    for (const separator of ["", " ", "\u00A0"]) {
+      for (const prefix of ["", "  ", "\n"]) {
+        await page.setContent('<div id="prompt-textarea" contenteditable="true" style="white-space:pre-wrap"><p><span app-mention-path="app://fixture" app-mention-display-name="Connector" contenteditable="false">Connector</span></p></div>');
+        await composer.evaluate((element, separator) => element.firstChild!.appendChild(document.createTextNode(separator)), separator);
+        const text = prefix + "x".repeat(96_240 - prefix.length);
+        await composer.focus();
+        await composer.press(CHATGPT_COMPOSER_DOCUMENT_END_KEY);
+        await worker.insertPromptText(page, text, undefined, false, true);
+        const observed = await worker.attachedPromptText(page);
+        expect(observed.length).toBe(text.length);
+        expect(worker.promptTextEquivalent(text, observed)).toBeTrue();
+      }
+    }
+    await context.close();
+  } finally { await browser.close(); }
+}, 30_000);
+
+test.skipIf(!chromePath)("recovery uses another edit below 64k and preserves literal markup, Unicode and line boundaries", async () => {
+  const browser = await chromium.launch({ executablePath: chromePath, headless: true });
+  try {
+    const context = await browser.newContext({ offline: true });
+    const page = await context.newPage();
+    const composer = page.locator("#prompt-textarea");
+    const worker = Object.assign(Object.create(ChatGptBrowserWorker.prototype), { activeComposer: async () => composer });
+    const compact = "a".repeat(42_627) + "\n" + ("z".repeat(20) + "\n").repeat(592) + "z".repeat(330);
+    expect(compact.length).toBe(55_390);
+    for (const text of [compact, "\n  <script>alert('literal')</script>\t🌏\n\nlast\n", "x".repeat(63_999) + "\n\n" + "y".repeat(70_000) + "\n\n"]) {
+      await page.setContent('<div id="prompt-textarea" contenteditable="true"></div>');
+      await worker.insertPromptText(page, text, undefined, true);
+      const observed = await worker.attachedPromptText(page);
+      expect(observed.length).toBe(text.length);
+      expect(worker.promptTextEquivalent(text, observed)).toBeTrue();
+      expect(await composer.locator("script").count()).toBe(0);
+    }
+    await context.close();
+  } finally { await browser.close(); }
+}, 30_000);
+
+test.skipIf(!chromePath)("browser CRLF representation reproduces +593 and compares as complete LF transport", async () => {
+  const browser = await chromium.launch({ executablePath: chromePath, headless: true });
+  try {
+    const context = await browser.newContext({ offline: true });
+    const page = await context.newPage();
+    await page.setContent('<div id="prompt-textarea" contenteditable="true"></div>');
+    const composer = page.locator("#prompt-textarea");
+    const worker = Object.assign(Object.create(ChatGptBrowserWorker.prototype), { activeComposer: async () => composer });
+    const prompt = "a".repeat(42_627) + "\n" + ("z".repeat(20) + "\n").repeat(592) + "z".repeat(330);
+    const browserText = prompt.replace(/\n/g, "\r\n");
+    // The real ChatGPT editor retains CRs at the end of its paragraph text.
+    // Plain contenteditable Chromium normalizes them, so reproduce that observed
+    // structural representation directly, without changing the production reader.
+    await composer.evaluate((element, text) => {
+      text.split("\n").forEach(line => {
+        const paragraph = document.createElement("p");
+        paragraph.textContent = line;
+        element.append(paragraph);
+      });
+    }, browserText);
+    const observed = await worker.attachedPromptText(page);
+    expect(observed.length).toBe(55_983);
+    expect(observed.slice(0, 42_627)).toBe(prompt.slice(0, 42_627));
+    expect(worker.promptTextEquivalent(prompt, observed)).toBeTrue();
+    expect(worker.promptTextEquivalent(prompt, observed.replace(/\r\n/g, ""))).toBeFalse();
+    await worker.assertPromptAttached(page, prompt);
+    await context.close();
+  } finally { await browser.close(); }
 }, 30_000);

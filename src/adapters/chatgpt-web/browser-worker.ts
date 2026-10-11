@@ -2130,6 +2130,11 @@ class ChatGptBrowserDiagnostics {
                 tag: element.tagName.toLowerCase(),
                 contentEditable: (element as HTMLElement).isContentEditable,
                 focused: element === document.activeElement,
+                markdownEditor: element.hasAttribute("data-composer-markdown"),
+                lineBreaks: element.querySelectorAll("br").length,
+                paragraphs: element.querySelectorAll("p, div, pre").length,
+                carriageReturns: ((element.textContent ?? "").match(/\r/g) ?? []).length,
+                lineFeeds: ((element.textContent ?? "").match(/\n/g) ?? []).length,
               })),
               // When recognition fails, retain structure of the unmatched controls,
               // never their values, labels, HTML or other conversation contents.
@@ -2369,7 +2374,13 @@ export function chatGptPromptFilePayloads(
  * exactly where the user put it; only a missing or foreign one is replaced, and always with a
  * position inside this composer, so an insert can never land in another element.
  */
-export function insertPlainTextIntoComposer(element: HTMLElement, value: string): boolean {
+export type ChatGptComposerInsertion = {
+  text: string;
+  connectorPrompt?: boolean;
+  lineBreakRecovery?: boolean;
+};
+
+export function insertPlainTextIntoComposer(element: HTMLElement, value: string | ChatGptComposerInsertion): boolean {
   if (document.activeElement !== element) element.focus();
   if (document.activeElement !== element) return false;
   const selection = window.getSelection();
@@ -2391,7 +2402,33 @@ export function insertPlainTextIntoComposer(element: HTMLElement, value: string)
   ) {
     return false;
   }
-  return document.execCommand("insertText", false, value);
+  let text = typeof value === "string" ? value : value.text;
+  if (typeof value !== "string" && value.connectorPrompt) {
+    const clone = element.cloneNode(true) as HTMLElement;
+    const pills = clone.querySelectorAll(
+      '[data-id^="plugin:"][data-keyword], [app-mention-path^="app://"][app-mention-display-name][contenteditable="false"]',
+    );
+    if (pills.length !== 1) return false;
+    pills.forEach(pill => pill.remove());
+    clone.querySelectorAll('[data-inline-selection-pill-cursor-target]').forEach(node => node.remove());
+    const separator = clone.textContent ?? "";
+    // New ChatGPT editors supply this space themselves. Older editors do not.
+    // Own exactly one separator without trimming any whitespace from the prompt.
+    if (separator === "") text = ` ${text}`;
+    else if (separator !== " " && separator !== "\u00A0") return false;
+  }
+  if (typeof value !== "string" && value.lineBreakRecovery) {
+    // A different browser edit after a failed atomic insertion: only text nodes
+    // and explicit line breaks, never HTML parsed from the user's prompt.
+    const plain = document.createElement("span");
+    plain.style.whiteSpace = "pre-wrap";
+    text.split("\n").forEach((line, index) => {
+      if (index > 0) plain.append(document.createElement("br"));
+      plain.append(document.createTextNode(line));
+    });
+    return document.execCommand("insertHTML", false, plain.outerHTML);
+  }
+  return document.execCommand("insertText", false, text);
 }
 
 /** Limit individual browser editing operations after a large atomic insertion fails. */
@@ -2458,6 +2495,7 @@ export class ChatGptBrowserWorker {
     observed: string,
   ): boolean {
     expected = composerTransportText(expected);
+    observed = composerTransportText(observed);
     if (expected.length !== observed.length) return false;
 
     for (let index = 0; index < expected.length; index += 1) {
@@ -2474,6 +2512,7 @@ export class ChatGptBrowserWorker {
     observed: string,
   ): number {
     expected = composerTransportText(expected);
+    observed = composerTransportText(observed);
     const length = Math.min(expected.length, observed.length);
 
     let index = 0;
@@ -3492,6 +3531,10 @@ export class ChatGptBrowserWorker {
     const composer = await this.activeComposer(page, 30_000, abortSignal);
     return composer.evaluate(element => {
       const clone = element.cloneNode(true) as HTMLElement;
+      const markdownEditor = element.hasAttribute("data-composer-markdown");
+      const connectorBlock = clone.querySelector(
+        '[data-id^="plugin:"][data-keyword], [app-mention-path^="app://"][app-mention-display-name][contenteditable="false"]',
+      )?.closest("p, div");
       const hasConnectorPill = clone.querySelector(
         '[data-id^="plugin:"][data-keyword], [app-mention-path^="app://"][app-mention-display-name][contenteditable="false"]',
       ) != null;
@@ -3504,10 +3547,18 @@ export class ChatGptBrowserWorker {
       // contribute an extra line. Never trim the prompt's own leading whitespace.
       if (hasConnectorPill) {
         const walker = clone.ownerDocument.createTreeWalker(clone, 4 /* SHOW_TEXT */);
-        const first = walker.nextNode();
+        let first = walker.nextNode();
+        while (first && !first.textContent) first = walker.nextNode();
         if (first?.textContent?.startsWith(" ") || first?.textContent?.startsWith("\u00A0")) {
           first.textContent = first.textContent!.slice(1);
           if (!first.textContent) first.parentNode?.removeChild(first);
+        }
+        // A leading line break can leave the mention in its own empty block,
+        // followed by the actual prompt's BR. The mention's block boundary is
+        // UI scaffolding, not a second newline in the prompt.
+        if (connectorBlock && connectorBlock !== clone && !connectorBlock.hasChildNodes()
+          && connectorBlock.nextElementSibling?.firstChild?.nodeName === "BR") {
+          connectorBlock.remove();
         }
       }
       // Lexical can split a line into several inline spans, or put BRs inside a
@@ -3526,7 +3577,9 @@ export class ChatGptBrowserWorker {
         })).filter(part => part.block || part.text.length > 0);
         // Chromium uses a final BR to make the end caret visible; a real trailing
         // newline has a further empty paragraph or an additional BR before it.
-        if ((parent === clone || blocks.has(parent.nodeName)) && parts.at(-1)?.br) parts.pop();
+        // The markdown composer retains meaningful final BRs; unlike the older
+        // contenteditable, it does not append a caret BR after inserted text.
+        if (!markdownEditor && (parent === clone || blocks.has(parent.nodeName)) && parts.at(-1)?.br) parts.pop();
         return parts.map((part, index) => (
           index > 0 && (part.block || parts[index - 1]!.block) ? "\n" : ""
         ) + part.text).join("");
@@ -3940,11 +3993,14 @@ export class ChatGptBrowserWorker {
         signal: abortSignal,
         timeout: CHATGPT_CONNECTOR_ACTION_TIMEOUT_MS,
       });
-      await this.insertPromptText(page, ` ${prompt}`, abortSignal, segmentedRecovery);
+      await this.insertPromptText(page, prompt, abortSignal, segmentedRecovery, true);
       await this.assertPromptAttached(page, prompt, abortSignal);
     } catch (error) {
       if (!composerMutationStarted || error instanceof ChatGptPersistentBrowserStateError) throw error;
       try {
+        if (error instanceof ChatGptPromptAttachmentIntegrityError) {
+          await (captureDiagnostic?.("prompt-attachment-integrity-mismatch") ?? Promise.resolve()).catch(() => {});
+        }
         await this.clearChatGptComposerState(page);
       } catch (cleanupError) {
         throw new ChatGptPersistentBrowserStateError(
@@ -4252,6 +4308,7 @@ export class ChatGptBrowserWorker {
     text: string,
     abortSignal?: AbortSignal,
     segmentedRecovery = false,
+    connectorPrompt = false,
   ): Promise<void> {
     text = composerTransportText(text);
     throwIfPromptAttachmentAborted(abortSignal);
@@ -4260,12 +4317,13 @@ export class ChatGptBrowserWorker {
     // delimiters from textContent, and leave the next insertion outside the intended block. The
     // browser's plain-text editing command updates the same focused contenteditable atomically
     // without running those Markdown shortcuts. Exact readback below remains the authority.
-    // A second attempt can use smaller plain-text edits to avoid one oversized browser edit.
+    // A second attempt uses escaped text nodes with explicit BRs, even below the
+    // chunk limit; repeating the same atomic edit cannot repair a deterministic failure.
     // Recheck the entire composed prompt, never an individual chunk, before allowing Send.
     const parts = segmentedRecovery && text.length > CHATGPT_COMPOSER_RECOVERY_CHUNK_CHARS
       ? splitComposerRecoveryText(text)
       : [text];
-    for (const part of parts) {
+    for (const [index, part] of parts.entries()) {
       throwIfPromptAttachmentAborted(abortSignal);
       const composer = await this.activeComposer(page, 30_000, abortSignal);
       await composer.focus({ signal: abortSignal, timeout: CHATGPT_CONNECTOR_ACTION_TIMEOUT_MS });
@@ -4276,7 +4334,11 @@ export class ChatGptBrowserWorker {
           signal: abortSignal, timeout: CHATGPT_CONNECTOR_ACTION_TIMEOUT_MS,
         });
       }
-      const inserted = await composer.evaluate(insertPlainTextIntoComposer, part, {
+      const value: string | ChatGptComposerInsertion = segmentedRecovery || connectorPrompt
+        ? { text: part, ...(connectorPrompt && index === 0 ? { connectorPrompt: true } : {}),
+          ...(segmentedRecovery ? { lineBreakRecovery: true } : {}) }
+        : part;
+      const inserted = await composer.evaluate(insertPlainTextIntoComposer, value, {
         timeout: 20_000,
         signal: abortSignal,
       });
