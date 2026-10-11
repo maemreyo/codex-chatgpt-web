@@ -172,6 +172,60 @@ test("a quarantined epoch reopens only after a completed compaction is replayed 
   }
 });
 
+test("healthy epoch compact survives restart and retires its anchor only on exact native replay", () => {
+  const { dir, path } = tempState();
+  try {
+    const store = new ChatGptSemanticEpochStore(path, () => 1002);
+    store.commit(epoch(1, "turn_1", 1000), { verifiedAuthority: true });
+    const fence = store.compactionFence("thread_a");
+    const summary = "Verified replacement of healthy native history";
+    const compact = (value: string) => [{ type: "compaction", encrypted_content: encodeCompactionSummary(value) }];
+    expect(store.rememberCompletedCompaction("thread_a", fence, summary)).toBeTrue();
+    expect(store.get("thread_a")?.semanticEpoch).toBe(1);
+    expect(store.isQuarantined("thread_a")).toBeFalse();
+    const restarted = new ChatGptSemanticEpochStore(path, () => 1002);
+    expect(restarted.acceptCompletedCompaction("thread_a", [{ type: "message", role: "user", content: summary }])).toBeFalse();
+    expect(restarted.acceptCompletedCompaction("thread_a", [...compact(summary), ...compact("unrelated latest compact")])).toBeFalse();
+    expect(restarted.get("thread_a")).toBeDefined();
+    expect(restarted.acceptCompletedCompaction("thread_a", compact(summary))).toBeTrue();
+    expect(restarted.get("thread_a")).toBeUndefined();
+    expect(restarted.isQuarantined("thread_a")).toBeFalse();
+    expect(restarted.acceptCompletedCompaction("thread_a", compact(summary))).toBeFalse();
+    expect(restarted.commit(epoch(1, "post_compact", 1002), { verifiedAuthority: true }).committed).toBeTrue();
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("healthy compaction completion CAS rejects stale writers and preserves a successor epoch", () => {
+  const store = new ChatGptSemanticEpochStore(undefined, () => 1002);
+  store.commit(epoch(1, "turn_1", 1000), { verifiedAuthority: true });
+  const firstFence = store.compactionFence("thread_a");
+  expect(store.rememberCompletedCompaction("thread_a", firstFence, "first compact")).toBeTrue();
+  expect(store.rememberCompletedCompaction("thread_a", firstFence, "first compact")).toBeTrue();
+  expect(store.rememberCompletedCompaction("thread_a", firstFence, "stale different compact")).toBeFalse();
+  const successorFence = store.compactionFence("thread_a");
+  expect(successorFence).not.toBe(firstFence);
+  expect(store.rememberCompletedCompaction("thread_a", successorFence, "successor compact")).toBeTrue();
+  expect(store.rememberCompletedCompaction("thread_a", firstFence, "first compact")).toBeFalse();
+  expect(store.acceptCompletedCompaction("thread_a", [{ type: "compaction", encrypted_content: encodeCompactionSummary("first compact") }])).toBeFalse();
+  store.commit(epoch(2, "turn_2", 1002), { expectedSemanticEpoch: 1 });
+  expect(store.rememberCompletedCompaction("thread_a", successorFence, "successor compact")).toBeFalse();
+  expect(store.acceptCompletedCompaction("thread_a", [{ type: "compaction", encrypted_content: encodeCompactionSummary("successor compact") }])).toBeFalse();
+  expect(store.get("thread_a")?.semanticEpoch).toBe(2);
+});
+
+test("healthy compact receipt follows the exact epoch into quarantine without authorizing an unrelated summary", () => {
+  const store = new ChatGptSemanticEpochStore(undefined, () => 1002);
+  store.commit(epoch(1, "turn_1", 1000), { verifiedAuthority: true });
+  expect(store.rememberCompletedCompaction("thread_a", store.compactionFence("thread_a"), "verified compact")).toBeTrue();
+  expect(store.quarantineIfCurrent("thread_a", store.get("thread_a")!, "anchor_missing")).toBeTrue();
+  expect(store.acceptCompletedCompaction("thread_a", [{ type: "compaction", encrypted_content: encodeCompactionSummary("unrelated") }])).toBeFalse();
+  expect(store.isQuarantined("thread_a")).toBeTrue();
+  expect(store.acceptCompletedCompaction("thread_a", [{ type: "compaction", encrypted_content: encodeCompactionSummary("verified compact") }])).toBeTrue();
+  expect(store.isQuarantined("thread_a")).toBeFalse();
+});
+
 test("stale or failed compaction cannot clear a newer quarantine", () => {
   const { dir, path } = tempState();
   try {

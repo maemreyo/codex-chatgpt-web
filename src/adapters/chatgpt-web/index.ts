@@ -31,7 +31,7 @@ import { compiledChatGptWebMessages } from "./input-tokens";
 import { skillFileTokens } from "./skill-attachments";
 import { createChatGptStructuredOutputValidator } from "./output-validation";
 import { chatGptWebTurnRetryPolicy } from "./retry-policy";
-import { TurnBroker, type BrokerToolRequest, type BrokerToolResult, type TurnBrokerOwner } from "./turn-broker";
+import { MAX_OVERSIZED_RESULT_CHARS, MAX_OVERSIZED_TURN_CHARS, TurnBroker, type BrokerToolRequest, type BrokerToolResult, type TurnBrokerOwner } from "./turn-broker";
 import { ChatGptTextFeed, ChatGptTraceFeed, chatGptCompactionSourceExecutionKey, chatGptInstructionLineage, chatGptThreadOwnershipKey, chatGptTurnExecutionKey, chatGptTurnRetryKey, chatGptTurnRoundKey, chatGptTurnSessions, type ChatGptBrowserOutcome, type ChatGptTraceEvent, type ChatGptTurnRuntime, type ChatGptTurnSession } from "./turn-execution";
 import { estimateChatGptWebInputTokens, estimateChatGptWebUsage, resolveBiggerContextMultipartParts } from "./usage";
 import { ChatGptThreadEnvironmentStore } from "./thread-environment";
@@ -292,6 +292,58 @@ function brokerResult(message: CodexToolResultMessage): BrokerToolResult {
     ...(structured !== undefined ? { structuredContent: structured } : {}),
     ...(message.isError ? { isError: true } : {}),
   };
+}
+
+/** Only the browser-facing result is replaced; Codex's original canonical request is untouched. */
+function canReferenceOversizedResults(
+  messages: readonly CodexToolResultMessage[],
+  occupancy: NonNullable<ChatGptTurnRuntime["semanticOccupancy"]>,
+  retainedSizes?: ReadonlyMap<string, number>,
+): boolean {
+  let referenceChars = retainedSizes ? [...retainedSizes.values()].reduce((a, b) => a + b, 0) : 0;
+  for (const message of messages) {
+    // Reject an unretainable output before running an expensive token estimate
+    // over many megabytes. The broker cannot hold this result in any case.
+    if (typeof message.content === "string" && message.content.length > MAX_OVERSIZED_RESULT_CHARS) return false;
+    if (occupancy.canFitAtomicResults([{ content: message.content }])) continue;
+    const canonical = JSON.stringify(message.content);
+    if (canonical === undefined || canonical.length > MAX_OVERSIZED_RESULT_CHARS) return false;
+    const reserved = retainedSizes?.get(message.toolCallId);
+    if (reserved !== undefined && reserved !== canonical.length) return false;
+    if (reserved === undefined) referenceChars += canonical.length;
+  }
+  return referenceChars <= MAX_OVERSIZED_TURN_CHARS;
+}
+
+function oversizedResultReservations(
+  messages: readonly CodexToolResultMessage[],
+  occupancy: NonNullable<ChatGptTurnRuntime["semanticOccupancy"]> | undefined,
+): Array<{ callId: string; canonical: string }> {
+  if (!occupancy) return [];
+  return messages.filter(message => !occupancy.canFitAtomicResults([{ content: message.content }]))
+    .map(message => ({ callId: message.toolCallId, canonical: JSON.stringify(message.content) }));
+}
+
+async function browserFacingResult(
+  broker: TurnBrokerOwner,
+  token: string,
+  message: CodexToolResultMessage,
+  occupancy: NonNullable<ChatGptTurnRuntime["semanticOccupancy"]> | undefined,
+): Promise<{ result: BrokerToolResult; visibleContent: unknown }> {
+  if (!occupancy || occupancy.canFitAtomicResults([{ content: message.content }])) {
+    return { result: brokerResult(message), visibleContent: message.content };
+  }
+  const canonical = JSON.stringify(message.content);
+  if (canonical === undefined || canonical.length > MAX_OVERSIZED_RESULT_CHARS) {
+    throw new Error("oversized canonical result cannot be retained for bounded reading");
+  }
+  const reference = await broker.storeOversizedResult(token, message.toolCallId, canonical);
+  const placeholder = `[Codex result stored in this turn's read-only broker. reference=${reference} chars=${canonical.length}.`
+    + " Use codex_result_chunk with the current turn_token, reference, offset=0, length<=8192 to inspect exact JSON-encoded canonical content in order."
+    + " Each reply includes nextOffset and sha256. The native Codex history already contains the complete original result."
+    + " Do not repeat the original tool to retrieve this result.]";
+  return { result: { content: [{ type: "text", text: placeholder }], ...(message.isError ? { isError: true } : {}) },
+    visibleContent: placeholder };
 }
 
 function emitToolBatch(requests: BrokerToolRequest[], usage: CodexUsage, emit: (event: AdapterEvent) => void): void {
@@ -641,11 +693,12 @@ export function createChatGptWebAdapter(
     const modelFamily = parsed._chatgptModelFamily;
     if (!threadId || !modelFamily) throw new Error("Semantic memory eligibility lost required native identity");
     // Native compact v2 is a durable history transition only once Codex
-    // actually replays this daemon's completed compaction item. Until then,
-    // a quarantined projection must stay disabled across process restarts.
-    if (semanticEpochStore.isQuarantined(threadId)) {
-      const input = (parsed._rawBody as { input?: unknown } | undefined)?.input;
-      semanticEpochStore.acceptCompletedCompaction(threadId, input);
+    // actually replays this daemon's completed compaction item.
+    const input = (parsed._rawBody as { input?: unknown } | undefined)?.input;
+    // Native compaction replaces healthy history too. Retire its old anchor before
+    // projection validation, only after the exact completed summary is replayed.
+    if (semanticEpochStore.acceptCompletedCompaction(threadId, input)) {
+      emitSemanticLog({ event: "semantic_compaction_accepted", threadHash });
     }
     // Budget identity follows canonical native thread identity, not mutable
     // launcher/browser settings. Runtime lease ownership stays namespaced.
@@ -984,9 +1037,11 @@ export function createChatGptWebAdapter(
     // Guard tool results even on the first native turn and on canonical fallback.
     // A retained epochless browser tab may predate this process; only the lease
     // callback can establish whether its physical occupancy is actually known.
-    const guardCanonical = experimentalSemanticMemory === true && !manualRequest
-      && !parsed._compactionRequest && parsed.modelId === CHATGPT_WEB_MODEL_ID
-      && mode.localTools;
+    // Oversized native tool results can break a regular ChatGPT Desktop turn as
+    // well. Keep the per-result read reference available without requiring the
+    // optional semantic-history projection to be enabled.
+    const guardCanonical = !manualRequest && !parsed._compactionRequest
+      && parsed.modelId === CHATGPT_WEB_MODEL_ID && mode.localTools;
     const physicalLimit = semantic.metrics?.physicalLimit ?? (
       "effort" in mode ? resolveChatGptWebPhysicalContextLimits(
         CHATGPT_WEB_MODEL_ID, mode.effort,
@@ -1012,7 +1067,7 @@ export function createChatGptWebAdapter(
       ? (reused: boolean): void => {
         if (reused) {
           // A retained browser tab is only safe with a verified live ledger.
-          if (semanticOccupancy.confidence !== "known" || !semanticOccupancy.value) {
+          if (semantic.epoch && (semanticOccupancy.confidence !== "known" || !semanticOccupancy.value)) {
             throw new Error("SEM retained browser lease has no verified occupancy");
           }
           return;
@@ -1558,7 +1613,10 @@ export function createChatGptWebAdapter(
       const pressure = source.runtime.semanticOccupancy?.batchPressureReason(results.map(result => ({
         callId: result.toolCallId, content: result.content,
       })));
-      if (pressure !== "atomic_result_oversize") return;
+      if (pressure !== "atomic_result_oversize"
+        || (source.runtime.semanticOccupancy && canReferenceOversizedResults(
+          results, source.runtime.semanticOccupancy, source.runtime.oversizedResultSizes,
+        ))) return;
       return {
         type: "error", status: 400, errorType: "invalid_request_error", retryable: false,
         code: "semantic_atomic_result_too_large",
@@ -1669,7 +1727,7 @@ export function createChatGptWebAdapter(
             let quarantineFence: string | undefined;
             if (experimentalSemanticMemory && compactionNativeIdentity.threadId) {
               try {
-                quarantineFence = semanticEpochStore.quarantineFence(compactionNativeIdentity.threadId);
+                quarantineFence = semanticEpochStore.compactionFence(compactionNativeIdentity.threadId);
               } catch (error) {
                 // The active source may still be capable of an exact retained
                 // handoff when the on-disk epoch file is corrupt. The compact
@@ -1748,7 +1806,7 @@ export function createChatGptWebAdapter(
                     // A fresh compact may itself discover invalid epoch evidence.
                     // Bind its completed output only to the quarantine created
                     // synchronously by this same verified validation attempt.
-                    quarantineFence ??= semanticCompaction.newlyQuarantinedFence;
+                    quarantineFence = semanticCompaction.newlyQuarantinedFence ?? quarantineFence;
                     reserveWebCompaction(parsed, `${compactionExecutionKey}:fresh:${freshCompactionTraceId}`);
                     const fallbackRuntime = startRuntime(
                       parsed,
@@ -1858,6 +1916,7 @@ export function createChatGptWebAdapter(
                         handoffTraceId,
                         operationSignal,
                         handoffTimeoutMs,
+                        settlement.oversizedEvidence,
                       );
                     } else {
                       if (source.isActive()) {
@@ -1960,10 +2019,23 @@ export function createChatGptWebAdapter(
             }
             if (experimentalSemanticMemory
               && parsed._canonicalCompactionProtocol === "v2"
-              && compactionNativeIdentity.threadId) {
-              semanticEpochStore.rememberCompletedCompaction(
+              && compactionNativeIdentity.threadId && quarantineFence) {
+              const remembered = semanticEpochStore.rememberCompletedCompaction(
                 compactionNativeIdentity.threadId, quarantineFence, summary,
               );
+              if (!remembered) {
+                // ChatGPT finished, but a concurrent epoch transition made this
+                // receipt stale. Native Codex must not accept an untracked compact.
+                emit({
+                  type: "error",
+                  message: "Native compaction completed, but its semantic recovery receipt could not be retained. Retry the compaction from canonical history.",
+                  status: 409,
+                  errorType: "invalid_request_error",
+                  code: "semantic_compaction_receipt_stale",
+                  retryable: false,
+                });
+                return;
+              }
             }
             emit({ type: "text_delta", text: summary, phase: "final_answer" });
             emitBrowserCompletion(
@@ -2111,7 +2183,8 @@ export function createChatGptWebAdapter(
                 const batchPressure = occupancy?.batchPressureReason(results.map(message => ({
                   callId: message.toolCallId, content: message.content,
                 })));
-                if (occupancy && batchPressure === "atomic_result_oversize") {
+                if (occupancy && batchPressure === "atomic_result_oversize"
+                  && !canReferenceOversizedResults(results, occupancy, session.runtime.oversizedResultSizes)) {
                   if (session.runtime.semanticThreadHash) emitSemanticLog({
                     event: "semantic_fallback",
                     threadHash: session.runtime.semanticThreadHash,
@@ -2128,9 +2201,18 @@ export function createChatGptWebAdapter(
                   // Deliver the unchanged batch once; the actual browser outcome owns failure.
                   console.warn(`[chatgpt-web] semantic_pressure_advisory ${JSON.stringify({ reason: batchPressure })}`);
                 }
+                // The broker must reserve all references against the cumulative
+                // turn budget before any result is acknowledged to the browser.
+                const reservations = oversizedResultReservations(results, occupancy);
+                if (reservations.length > 0) {
+                  await broker.reserveOversizedResults(turnToken, reservations);
+                  const sizes = session.runtime.oversizedResultSizes ??= new Map<string, number>();
+                  for (const entry of reservations) sizes.set(entry.callId, entry.canonical.length);
+                }
                 for (const message of results) {
-                  await broker.completeTool(turnToken, message.toolCallId, brokerResult(message));
-                  occupancy?.recordToolResult(message.toolCallId, message.content);
+                  const delivered = await browserFacingResult(broker, turnToken, message, occupancy);
+                  await broker.completeTool(turnToken, message.toolCallId, delivered.result);
+                  occupancy?.recordToolResult(message.toolCallId, delivered.visibleContent);
                   session.runtime.externalProgress.recordToolResult();
                   session.markResultDelivered(message.toolCallId);
                 }

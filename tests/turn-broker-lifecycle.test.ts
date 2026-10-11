@@ -1,11 +1,108 @@
 import { expect, test } from "bun:test";
 import { ChatGptTextFeed, ChatGptTraceFeed, ChatGptTurnSessions } from "../src/adapters/chatgpt-web/turn-execution";
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, rmSync, statSync } from "node:fs";
-import { createServer, type Socket } from "node:net";
+import { createConnection, createServer, type Socket } from "node:net";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
-import { callTurnBroker, TurnBroker } from "../src/adapters/chatgpt-web/turn-broker";
+import { callTurnBroker, RemoteTurnBroker, TurnBroker } from "../src/adapters/chatgpt-web/turn-broker";
 import { defaultBrokerEndpoint, isWindowsPipeEndpoint } from "../src/config";
+
+test("broker disconnect: oversized result stays readable after transport reconnect without tool replay", async () => {
+  const root = mkdtempSync(join(tmpdir(), "cgw-broker-overflow-"));
+  const broker = TurnBroker.forSocket(join(root, "broker.sock"));
+  try {
+    const token = await broker.register({ cwd: root, roots: [root], writableRoots: [root],
+      sandboxPolicy: { type: "dangerFullAccess" }, tools: [] });
+    expect(await callTurnBroker(broker.socketPath, { method: "owner_status" }))
+      .toMatchObject({ protocolVersion: 7 });
+    const remote = new RemoteTurnBroker(broker.socketPath);
+    await remote.assertCompatible();
+    const { bindingId } = await callTurnBroker<{ bindingId: string }>(broker.socketPath, { method: "claim", token });
+    const invocation = callTurnBroker<{ content: unknown[] }>(broker.socketPath, {
+      method: "invoke", bindingId, wireName: "exec_command", arguments: { cmd: "fixture" },
+    }, null);
+    // Observe a failed invocation even when an assertion later throws and retires the broker.
+    void invocation.catch(() => {});
+    const [first] = await broker.nextToolBatch(token);
+    const [reconnected] = await broker.nextToolBatch(token);
+    expect(reconnected!.callId).toBe(first!.callId);
+    const canonical = JSON.stringify("exact canonical tool output ".repeat(35_000));
+    const reference = await callTurnBroker<{ reference: string }>(broker.socketPath, {
+      method: "owner_store_oversized_result", token, callId: first!.callId, canonical,
+    }).catch(error => { throw new Error(`store overflow failed: ${String(error)}`); });
+    expect(reference.reference).toBe(first!.callId);
+    const accepted = { content: [{ type: "text", text: `reference=${reference.reference}` }] };
+    broker.completeTool(token, first!.callId, accepted);
+    expect((await invocation).content).toEqual(accepted.content);
+    // The owner may have consumed the result before its completion ACK was lost.
+    await remote.completeTool(token, first!.callId, accepted);
+    await expect(callTurnBroker(broker.socketPath, {
+      method: "owner_complete", token, callId: first!.callId, toolResult: accepted,
+    })).resolves.toEqual({ completed: true });
+    await expect(callTurnBroker(broker.socketPath, {
+      method: "owner_complete", token, callId: first!.callId,
+      toolResult: { content: [{ type: "text", text: "conflicting retry" }] },
+    })).rejects.toThrow("completed result differs");
+    const chunk = await callTurnBroker<{ text: string; nextOffset: number; sha256: string }>(broker.socketPath, {
+      method: "read_oversized_result", bindingId, reference: reference.reference, offset: 0, length: 2048,
+    });
+    expect(chunk.text).toBe(canonical.slice(0, 2048));
+    expect(chunk.nextOffset).toBe(2048);
+    expect(chunk.sha256).toHaveLength(64);
+    // Reserving separate batches must share one turn cap, and failed storage
+    // cannot affect previously committed entries or partially commit a batch.
+    const largeCanonical = "x".repeat(7_800_000);
+    for (let index = 0; index < 3; index += 1) {
+      const pending = callTurnBroker<{ content: unknown[] }>(broker.socketPath, {
+        method: "invoke", bindingId, wireName: "exec_command", arguments: { cmd: `fixture-${index}` },
+      }, null);
+      void pending.catch(() => {});
+      const [next] = await broker.nextToolBatch(token);
+      if (index < 2) {
+        await remote.reserveOversizedResults(token, [{ callId: next!.callId, canonical: largeCanonical }]);
+      } else {
+        await expect(remote.reserveOversizedResults(token, [
+          { callId: next!.callId, canonical: largeCanonical },
+        ]))
+          .rejects.toThrow("turn storage cap exceeded");
+        await expect(callTurnBroker(broker.socketPath, {
+          method: "read_oversized_result", bindingId, reference: next!.callId, offset: 0, length: 1,
+        })).rejects.toThrow("unavailable for this turn");
+      }
+      broker.completeTool(token, next!.callId, { content: [{ type: "text", text: "fixture settled" }] });
+      await pending;
+    }
+    const otherToken = await broker.register({ cwd: root, roots: [root], writableRoots: [root],
+      sandboxPolicy: { type: "dangerFullAccess" }, tools: [] });
+    const other = await callTurnBroker<{ bindingId: string }>(broker.socketPath, {
+      method: "claim", token: otherToken,
+    });
+    await expect(callTurnBroker(broker.socketPath, {
+      method: "read_oversized_result", bindingId: other.bindingId,
+      reference: reference.reference, offset: 0, length: 128,
+    })).rejects.toThrow("unavailable for this turn");
+    broker.revoke(otherToken);
+    broker.revoke(token);
+    await expect(callTurnBroker(broker.socketPath, {
+      method: "read_oversized_result", bindingId, reference: reference.reference, offset: 0, length: 10,
+    })).rejects.toThrow();
+    // An incomplete client frame must not prevent runtime shutdown.
+    const dangling = createConnection(broker.socketPath);
+    await new Promise<void>((resolve, reject) => {
+      dangling.once("connect", resolve);
+      dangling.once("error", reject);
+    });
+    const disconnected = new Promise<void>(resolve => dangling.once("close", () => resolve()));
+    dangling.write('{"id":"partial"');
+    await Bun.sleep(10); // Allow the server to accept the deliberately incomplete frame.
+    await broker.close();
+    await disconnected;
+    expect(dangling.destroyed).toBeTrue();
+  } finally {
+    await broker.close();
+    rmSync(root, { recursive: true, force: true });
+  }
+});
 
 test.skipIf(process.platform === "win32")("closing a rejected broker leaves the live socket reachable", async () => {
   const root = mkdtempSync(join(tmpdir(), "cgw-owner-"));

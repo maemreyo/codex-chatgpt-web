@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test";
-import { ChatGptMarkdownBuffer, chatGptHtmlToMarkdown } from "../src/adapters/chatgpt-web/markdown";
+import { ChatGptMarkdownBuffer, ChatGptMarkdownConsistencyError, chatGptHtmlToMarkdown } from "../src/adapters/chatgpt-web/markdown";
 
 test("atomic summaries accept a revised draft while ordinary streamed answers still reject changes", () => {
   const first = { key: "a", tag: "p", html: "<p>Earlier summary.</p>", text: "Earlier summary.", streamable: true };
@@ -216,4 +216,130 @@ test("repeated report headings can first appear after an earlier copy was commit
     buffer.observe([report[0]!, report[0]!], count + 1);
     expect(() => buffer.finish()).toThrow("changed a completed text block");
   }
+});
+
+test("virtualized prefix permits a remounted pending tail when the tag changes but Markdown is identical", () => {
+  const buffer = new ChatGptMarkdownBuffer(undefined, 0);
+  const block = (key: string, tag: string, text: string, streamable: boolean) => ({
+    key, tag, text, html: `<${tag}>${text}</${tag}>`, streamable,
+  });
+  const first = block("initial:first", "p", "Sent already.", true);
+  const pending = block("initial:pending", "p", "Stable pending.", false);
+  expect(buffer.observe([first, pending], 0)).toBe("Sent already.");
+
+  const remounted = block("final:pending", "div", "Stable pending.", true);
+  const tail = block("final:tail", "p", "New final detail.", false);
+  expect(buffer.observe([remounted, tail], 1)).toBe("\n\nStable pending.");
+  expect(buffer.currentSnapshotIsConsistent()).toBeTrue();
+  expect(buffer.finish()).toEqual({
+    markdown: "Sent already.\n\nStable pending.\n\nNew final detail.",
+    delta: "\n\nNew final detail.",
+  });
+});
+
+test("virtualized prefix aligns a uniquely remounted committed tail without delivering it twice", () => {
+  const buffer = new ChatGptMarkdownBuffer(undefined, 0);
+  const first = { key: "old:0", tag: "p", text: "Already committed.",
+    html: "<p>Already committed.</p>", streamable: true };
+  expect(buffer.observe([first], 0)).toBe("Already committed.");
+  const remounted = { ...first, key: "new:0", tag: "div", html: "<div>Already committed.</div>" };
+  const tail = { key: "new:1", tag: "p", text: "Added later.",
+    html: "<p>Added later.</p>", streamable: false };
+  expect(buffer.observe([remounted, tail], 1)).toBe("");
+  expect(buffer.currentSnapshotIsConsistent()).toBeTrue();
+  expect(buffer.finish()).toEqual({
+    markdown: "Already committed.\n\nAdded later.", delta: "\n\nAdded later.",
+  });
+});
+
+test("remounted tails reject rewritten committed text, changed destinations and ambiguous anchors", () => {
+  const base = { key: "old:0", tag: "p", text: "Anchor",
+    html: "<p>Anchor</p>", streamable: true };
+  for (const changed of [
+    { key: "new:0", tag: "div", text: "Rewritten", html: "<div>Rewritten</div>", streamable: true },
+    { key: "new:0", tag: "div", text: "Anchor", html: "<div><strong>Anchor</strong></div>", streamable: true },
+  ]) {
+    const buffer = new ChatGptMarkdownBuffer(undefined, 0);
+    buffer.observe([base], 0);
+    expect(buffer.observe([changed], 1)).toBe("");
+    expect(buffer.currentSnapshotIsConsistent()).toBeFalse();
+    expect(() => buffer.finish()).toThrow();
+  }
+  const links = new ChatGptMarkdownBuffer(undefined, 0);
+  const linked = { ...base, html: '<p><a href="https://example.com/a">Anchor</a></p>',
+    linkTargets: ["https://example.com/a"] };
+  links.observe([linked], 0);
+  links.observe([{ ...linked, key: "remounted", tag: "div",
+    html: '<div><a href="https://example.com/b">Anchor</a></div>',
+    linkTargets: ["https://example.com/b"] }], 1);
+  expect(() => links.finish()).toThrow();
+
+  const ambiguous = new ChatGptMarkdownBuffer(undefined, 0);
+  const first = { ...base, text: "Repeated", html: "<p>Repeated</p>" };
+  ambiguous.observe([first, { ...first, key: "old:1" }], 0);
+  ambiguous.observe([{ ...first, key: "remounted", tag: "div", html: "<div>Repeated</div>" }], 1);
+  expect(() => ambiguous.finish()).toThrow();
+
+  const collided = new ChatGptMarkdownBuffer(undefined, 0);
+  collided.observe([first, { ...first, key: "pending-copy", streamable: false }], 0);
+  collided.observe([{ ...first, key: "different-wrapper", tag: "div",
+    html: "<div>Repeated</div>" }], 1);
+  expect(() => collided.finish()).toThrow("ambiguous committed and pending remount anchors");
+});
+
+test("remount inference stays within the recent ledger and rejects a wholly unanchored final tail", () => {
+  const block = (index: number, tag = "p") => ({
+    key: `${index}:${tag}`, tag, text: `Unique ${index}`,
+    html: `<${tag}>Unique ${index}</${tag}>`, streamable: true,
+  });
+  const buffer = new ChatGptMarkdownBuffer(undefined, 0);
+  buffer.observe(Array.from({ length: 70 }, (_, index) => block(index)), 0);
+  buffer.observe([block(0, "div")], 1);
+  expect(buffer.currentSnapshotIsConsistent()).toBeFalse();
+  expect(() => buffer.finish()).toThrow("could not be aligned");
+
+  const noAnchor = new ChatGptMarkdownBuffer(undefined, 0);
+  noAnchor.observe([block(0)], 0);
+  noAnchor.observe([block(71)], 1);
+  expect(() => noAnchor.finish()).toThrow("could not be aligned");
+});
+
+test("a source-ranged remount must preserve the exact rendered committed block", () => {
+  const buffer = new ChatGptMarkdownBuffer(undefined, 0);
+  const original = { key: "0:p", tag: "p", text: "Same visible text",
+    html: "<p>Same visible text</p>", sourceStart: 0, sourceEnd: 17, streamable: true };
+  buffer.observe([original], 0);
+  buffer.observe([{ ...original, key: "0:div", tag: "div",
+    html: "<div><strong>Same visible text</strong></div>" }], 1);
+  expect(() => buffer.finish()).toThrow("changed a completed text block");
+});
+
+test("source-start remount rejects a changed source end even when delivered text and Markdown match", () => {
+  for (const end of [4, 12, undefined]) {
+    const buffer = new ChatGptMarkdownBuffer(undefined, 0);
+    const original = { key: "old:0", tag: "p", text: "Stable", html: "<p>Stable</p>",
+      sourceStart: 0, sourceEnd: 6, streamable: true };
+    expect(buffer.observe([original], 0)).toBe("Stable");
+    const remounted = { ...original, key: "new:0", tag: "div", html: "<div>Stable</div>", sourceEnd: end };
+    expect(buffer.observe([remounted], 1)).toBe("");
+    expect(buffer.currentSnapshotIsConsistent()).toBeFalse();
+    try {
+      buffer.finish();
+      throw new Error("Expected a source-range consistency error");
+    } catch (error) {
+      expect(error).toBeInstanceOf(ChatGptMarkdownConsistencyError);
+      expect((error as ChatGptMarkdownConsistencyError).diagnostic).toMatchObject({
+        reason: "source_range_overlap", committedStart: 0, committedEnd: 6,
+        observedStart: 0, observedEnd: end, observedTextChars: 6, committedTextChars: 6,
+      });
+    }
+  }
+
+  const buffer = new ChatGptMarkdownBuffer(undefined, 0);
+  const original = { key: "old", tag: "p", html: "<p>Stable</p>", text: "Stable",
+    sourceStart: 0, sourceEnd: 6, streamable: true };
+  expect(buffer.observe([original], 0)).toBe("Stable");
+  expect(buffer.observe([{ ...original, key: "new", tag: "div", html: "<div>Stable</div>" }], 1)).toBe("");
+  expect(buffer.currentSnapshotIsConsistent()).toBeTrue();
+  expect(buffer.finish()).toEqual({ markdown: "Stable", delta: "" });
 });

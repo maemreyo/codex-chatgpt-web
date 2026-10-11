@@ -7,6 +7,7 @@ export interface SemanticLogReport {
   threads: number;
   turns: number;
   rotations: number;
+  compactionsAccepted: number;
   rotationsPerThread: Array<{ threadHash: string; rotations: number }>;
   rotationRatioPerThread: number;
   maskedTokensSaved: number;
@@ -45,7 +46,7 @@ export interface SemanticLogReport {
 
 const KNOWN_EVENTS = new Set([
   "semantic_turn", "semantic_rotation", "semantic_skip", "semantic_validation_failed",
-  "semantic_reject", "semantic_fallback", "semantic_cost",
+  "semantic_reject", "semantic_fallback", "semantic_cost", "semantic_compaction_accepted",
 ]);
 const SKIP_REASONS = new Set([
   "ineligible", "no_fit", "cooldown", "cap_hit", "outstanding_tools", "cross_boundary", "unknown_occupancy", "low_pressure",
@@ -56,7 +57,7 @@ const INELIGIBLE_DETAILS = new Set([
   "fresh_conversation", "thread_missing", "missing_turn_provenance",
   "no_completed_turn", "missing_source_revision",
 ]);
-const VALIDATION_REASONS = new Set(["digest_mismatch", "anchor_missing", "cross_boundary", "schema", "corrupt_store"]);
+const VALIDATION_REASONS = new Set(["digest_mismatch", "anchor_missing", "cross_boundary", "schema", "corrupt_store", "operational_unknown"]);
 const REJECTION_CLASSES = new Set(["A", "B", "C", "D", "unknown"]);
 const FALLBACK_TARGETS = new Set(["legacy", "compaction_required", "recovery_error"]);
 // Only report reasons produced by this bridge. Never reflect an untrusted log
@@ -136,6 +137,7 @@ export function semanticLogReport(path: string | readonly string[]): SemanticLog
   const retainedRejectionsByThread = new Map<string, number>();
   let turns = 0;
   let rotations = 0;
+  let compactionsAccepted = 0;
   let maskedTokensSaved = 0;
   let rejectionsAfterRotation = 0;
   let retainedRejections = 0;
@@ -163,6 +165,8 @@ export function semanticLogReport(path: string | readonly string[]): SemanticLog
         epochTurnCounts.set(threadHash, epochs);
       }
       epochs.set(event.epoch, (epochs.get(event.epoch) ?? 0) + 1);
+    } else if (type === "semantic_compaction_accepted" && threadHash) {
+      compactionsAccepted += 1;
     } else if (type === "semantic_rotation" && threadHash) {
       rotations += 1;
       rotatedThreads.add(threadHash);
@@ -227,6 +231,7 @@ export function semanticLogReport(path: string | readonly string[]): SemanticLog
     threads: threadSet.size,
     turns,
     rotations,
+    compactionsAccepted,
     rotationsPerThread,
     rotationRatioPerThread: threadSet.size > 0 ? rotations / threadSet.size : 0,
     maskedTokensSaved,

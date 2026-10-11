@@ -10,11 +10,43 @@ unchanged pending tool-result batch normally. They do not require canonical
 compaction and do not emit `chatgpt_active_turn_compaction_required`. This policy
 supersedes the earlier strict S6 pressure-boundary requirements below.
 
-An individual result exceeding the entire physical working set still fails before
-delivery. No results are truncated, no tools are re-executed, and reconnect replay
-remains idempotent. Explicit canonical compaction and real browser rejection
-handling remain available. A physical browser rejection is still possible; an
-occupancy estimate alone no longer stops work.
+If an individual result is larger than the browser's physical working set,
+the active tool broker now retains its exact JSON-encoded canonical content in
+memory, scoped to that one turn, and delivers a short reference to ChatGPT.
+This output guard also runs on the ordinary automatic ChatGPT Desktop route
+when SEM history projection is disabled. It does not require enabling SEM.
+The read-only `codex_result_chunk` MCP operation retrieves up to 8,192 characters
+per call, requiring the same turn binding and a matching reference/offset.
+The full result in the native Codex request remains unchanged. No tools are
+re-executed, reconnect replay remains idempotent, and all references expire
+when the turn's broker capability retires. No raw outputs are saved to logs
+or long-lived diagnostic files.
+
+Broker-held references are limited to 8,000,000 characters per result and
+24,000,000 characters per turn. Results beyond this bound still produce the
+typed capacity error rather than silently losing content or failing after a
+partial batch. Explicit canonical compaction and browser rejection handling
+remain available. A physical browser rejection is still possible.
+
+Native `codex_exec` and `codex_write_stdin` now request at most 4,096 output tokens
+by default when the advertised native tool supports `max_output_tokens` (and for
+the Codex exec gateway). An explicit caller-selected limit is respected; an older
+native tool without the parameter remains unchanged. This bounds routine command
+output at the native execution boundary without rewriting the canonical result
+after it is returned. For large investigations, write output to a workspace file
+and read bounded ranges, without re-running commands that may have side effects.
+Other tools and explicitly large outputs can still exceed the bounded
+broker-reference capacity. Treat those errors as actionable capacity limits;
+do not replay a previously executed tool or silently drop evidence.
+
+Desktop MCP invocations retain the bounded 90-second deadline below the
+documented 120-second tunnel response limit. Long command sessions should
+return a native session handle and use bounded polling; an elapsed MCP timeout
+retires the turn binding rather than re-executing an ambiguous native effect.
+Explicit shorter owner leases still apply. Broker shutdown terminates
+incomplete socket requests and waits for in-flight socket startup before exit;
+a failed startup can be retried after the obstruction is removed.
+The updated MCP tool schema requires launcher/connector protocol v6 alignment.
 
 ## Bigger Context compatibility
 
@@ -99,7 +131,8 @@ adapter; browser execution and authenticated live model sessions remain separate
 
 1. Canonical Responses history is never destructively rewritten by semantic projection.
 2. Current native turn input remains exact.
-3. Open tool batches and their results remain exact and are delivered from canonical history.
+3. Open tool batches and their results remain exact in canonical history. Oversized browser-facing
+   results may use a turn-bound, lossless read reference while native history stays unchanged.
 4. Environment, user-revision, subagent-lineage, and reasoning-envelope checks continue to read
    canonical wire provenance.
 5. Browser physical limits remain measured transport limits even after Codex logical limits diverge.
@@ -139,7 +172,8 @@ keep every physical browser request within the measured limit.
 ## Acceptance gates
 
 - Existing default-path tests remain unchanged and green.
-- Active tool results are byte-for-byte canonical at delivery.
+- Active native tool results remain byte-for-byte canonical; referenced browser results must be
+  readable in bounded ranges and must never execute the original tool again.
 - User revision/environment/subagent provenance tests pass under projected history.
 - Restart/replay and `previous_response_id` recovery remain deterministic.
 - A large synthetic task can retain roughly 220-240k canonical tokens while projected browser input

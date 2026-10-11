@@ -142,6 +142,8 @@ export class ChatGptTextFeed {
 interface ChatGptTurnRuntimeBase {
   /** Shared process-local physical-pressure estimate for one retained semantic epoch. */
   semanticOccupancy?: import("./semantic-occupancy").SemanticEpochOccupancy;
+  /** Content-free per-call reservation sizes, maintained across native tool rounds. */
+  oversizedResultSizes?: Map<string, number>;
   semanticThreadHash?: string;
   browser: Promise<string>;
   /** Physical helper/Playwright settlement, including the launcher end/release acknowledgement. */

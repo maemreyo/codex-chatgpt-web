@@ -3141,6 +3141,48 @@ test("failed and aborted browser turns release their tab slots", async () => {
   }
 });
 
+test("failed-turn Stop is limited to its owned tab and cannot retire a replacement", async () => {
+  let finishStop;
+  let stopped = 0;
+  let siblingStopped = 0;
+  const contents = {
+    isDestroyed: () => false,
+    executeJavaScript: async () => {
+      stopped += 1;
+      return new Promise(resolve => { finishStop = resolve; });
+    },
+    setBackgroundThrottling() {},
+  };
+  const tab = {
+    id: "failed-owner", traceId: "failed-trace", helperPid: 123,
+    status: "running", view: { webContents: contents },
+  };
+  const sibling = {
+    id: "active-sibling", traceId: "active-trace", helperPid: 456,
+    status: "running", view: { webContents: {
+      isDestroyed: () => false,
+      executeJavaScript: () => { siblingStopped += 1; },
+    } },
+  };
+  const turnTabs = new Map([[tab.id, tab], [sibling.id, sibling]]);
+  const fixture = Object.assign(Object.create(BrowserHost.prototype), {
+    turnTabs, closedTurnOwners: new Map(), userCancelledTurnOwners: new Map(),
+    logger: { info() {}, warn() {} },
+  });
+  const completing = fixture.endTurn(tab.traceId, tab.helperPid, "failed", true);
+  assert.equal(stopped, 1);
+  assert.equal(siblingStopped, 0);
+  // A later owner may reuse the tab ID while Chromium resolves Stop.
+  const replacement = { ...tab, traceId: "replacement-trace", helperPid: 789 };
+  turnTabs.set(tab.id, replacement);
+  finishStop("clicked");
+  await completing;
+  assert.equal(turnTabs.get(tab.id), replacement);
+  assert.equal(turnTabs.get(sibling.id), sibling);
+  assert.equal(replacement.status, "running");
+  assert.equal(siblingStopped, 0);
+});
+
 function manualTurnFixture() {
   const clipboardWrites = [];
   const fixture = Object.assign(Object.create(BrowserHost.prototype), {

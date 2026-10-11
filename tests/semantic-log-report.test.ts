@@ -27,6 +27,8 @@ test("semantic log report reads raw and launcher-wrapped events without surfacin
       launcher(semantic({ event: "semantic_skip", threadHash: threadA, reason: "no_fit" })),
       launcher(semantic({ event: "semantic_skip", threadHash: threadA, reason: "cross_boundary" })),
       launcher(semantic({ event: "semantic_validation_failed", threadHash: threadA, reason: "digest_mismatch" })),
+      launcher(semantic({ event: "semantic_validation_failed", threadHash: threadA, reason: "operational_unknown" })),
+      launcher(semantic({ event: "semantic_compaction_accepted", threadHash: threadA, prompt: "SECRET TRANSCRIPT CONTENT" })),
       launcher(semantic({ event: "semantic_validation_failed", threadHash: threadB, reason: "SECRET TRANSCRIPT CONTENT" })),
       launcher(semantic({ event: "semantic_reject", threadHash: threadA, class: "D" })),
       launcher(semantic({ event: "semantic_reject", threadHash: threadA, class: "D" })),
@@ -52,10 +54,11 @@ test("semantic log report reads raw and launcher-wrapped events without surfacin
     ].join("\n"), "utf8");
 
     const report = semanticLogReport(path);
-    expect(report.events).toBe(19);
+    expect(report.events).toBe(21);
     expect(report.threads).toBe(2);
     expect(report.turns).toBe(3);
     expect(report.rotations).toBe(1);
+    expect(report.compactionsAccepted).toBe(1);
     expect(report.maskedTokensSaved).toBe(900);
     expect(report.loggedCost).toEqual({
       samples: 2, legacyEquivalentSubmissions: 3, checkpointTailRequests: 1,
@@ -65,7 +68,7 @@ test("semantic log report reads raw and launcher-wrapped events without surfacin
     });
     expect(report.skipsByReason).toEqual({ ineligible: 2, no_fit: 1, cross_boundary: 1, unknown: 1 });
     expect(report.ineligibleDetails).toEqual({ missing_turn_provenance: 1, unknown: 1 });
-    expect(report.validationFailuresByReason).toEqual({ digest_mismatch: 1, unknown: 1 });
+    expect(report.validationFailuresByReason).toEqual({ digest_mismatch: 1, operational_unknown: 1, unknown: 1 });
     expect(report.rejectionsByClass).toEqual({ D: 2, unknown: 1 });
     expect(report.rejectionsAfterRotation).toBe(2);
     expect(report.fallbacksByTarget).toEqual({ legacy: 2 });

@@ -1,12 +1,10 @@
-import { createHash, randomBytes } from "node:crypto";
+import { randomBytes } from "node:crypto";
 import type { Transport } from "@modelcontextprotocol/sdk/shared/transport.js";
 
-// Per-process salt prevents sequential MCP protocol IDs from being linkable
-// across launcher sessions. Neither the ID nor the MCP arguments enter logs.
-const diagnosticSalt = randomBytes(16);
-
-export function mcpDiagnosticId(requestId: string | number): string {
-  return `diag_${createHash("sha256").update(diagnosticSalt).update(typeof requestId === "number" ? `n:${requestId}` : `s:${requestId}`).digest("hex").slice(0, 16)}`;
+// New opaque identity for each invocation; JSON-RPC IDs can be reused sequentially.
+// Neither the protocol ID nor request arguments enter the diagnostic stream.
+export function mcpDiagnosticId(): string {
+  return `diag_${randomBytes(8).toString("hex")}`;
 }
 
 /** Fixed-schema lifecycle diagnostics. Never pass raw tool args, replies or error messages. */
@@ -105,9 +103,13 @@ export function observeMcpToolCalls(
   transport: Transport,
   knownTools: ReadonlySet<string>,
   write: (event: Record<string, unknown>) => void = event => console.error(`[chatgpt-web-mcp] transport=${JSON.stringify(event)}`),
+  invocationIds: Map<string | number, string> = new Map(),
 ): Transport {
   let sequence = 0;
-  const pending = new Map<string | number, { call: number; tool: string; started: number } | null>();
+  const pending = new Map<string | number, {
+    call: number; diagnosticId: string; tool: string; started: number;
+    outstanding: number; ambiguous: boolean;
+  }>();
   const emit = (event: Record<string, unknown>) => {
     // Logging is observational: a broken sink cannot change the invocation or its result.
     try { write({ pid: process.pid, ...event }); } catch { /* Preserve transport semantics. */ }
@@ -124,16 +126,23 @@ export function observeMcpToolCalls(
         wireName: tool === "codex_exec" ? "exec_command" : tool,
         freeform: false, arguments: args,
       });
-      if (pending.has(message.id)) {
+      const previous = pending.get(message.id);
+      if (previous) {
         // An ambiguous protocol ID cannot safely correlate either reply.
-        pending.set(message.id, null);
+        previous.ambiguous = true;
+        previous.outstanding += 1;
+        invocationIds.delete(message.id);
         emit({ event: "uncorrelated_call", reason: "duplicate_id", tool });
       } else if (pending.size >= 1_024) {
         emit({ event: "uncorrelated_call", reason: "tracking_limit", tool });
       } else {
-        const call = { call: ++sequence, tool, started: performance.now() };
+        const call = {
+          call: ++sequence, diagnosticId: mcpDiagnosticId(), tool, started: performance.now(),
+          outstanding: 1, ambiguous: false,
+        };
         pending.set(message.id, call);
-        emit({ event: "call_received", call: call.call, diagnosticId: mcpDiagnosticId(message.id), tool, ...shape });
+        invocationIds.set(message.id, call.diagnosticId);
+        emit({ event: "call_received", call: call.call, diagnosticId: call.diagnosticId, tool, ...shape });
       }
     }
     receive?.(message, extra);
@@ -144,26 +153,33 @@ export function observeMcpToolCalls(
     const call = id !== undefined && id !== null && !("method" in message) ? pending.get(id) : undefined;
     try {
       await send(message, options);
-      if (call) {
+      if (call && !call.ambiguous) {
         const result = "result" in message ? message.result : undefined;
         emit({
-          event: "reply_sent", call: call.call, diagnosticId: mcpDiagnosticId(id!), tool: call.tool,
+          event: "reply_sent", call: call.call, diagnosticId: call.diagnosticId, tool: call.tool,
           elapsed_ms: Math.round(performance.now() - call.started),
           outcome: "error" in message ? "protocol_error" : "result",
           ...("result" in message ? { is_error: result?.isError === true } : {}),
         });
       }
     } catch (error) {
-      if (call) emit({ event: "reply_send_failed", call: call.call, diagnosticId: mcpDiagnosticId(id!), tool: call.tool });
+      if (call && !call.ambiguous) emit({ event: "reply_send_failed", call: call.call, diagnosticId: call.diagnosticId, tool: call.tool });
       throw error;
     } finally {
-      if (call && id !== undefined && id !== null) pending.delete(id);
+      if (call && id !== undefined && id !== null) {
+        call.outstanding -= 1;
+        if (call.outstanding === 0 && pending.get(id) === call) {
+          pending.delete(id);
+          invocationIds.delete(id);
+        }
+      }
     }
   };
   const close = transport.onclose;
   transport.onclose = () => {
     if (pending.size) emit({ event: "transport_closed", tracked_calls: pending.size });
     pending.clear();
+    invocationIds.clear();
     close?.();
   };
   return transport;
