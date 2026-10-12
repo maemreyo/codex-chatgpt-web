@@ -1,7 +1,8 @@
+import { readComposerDom, summarizeComposerMismatch, composerTextProfile, compareComposerText, type ComposerDomSnapshot, type ComposerInsertionJournal } from "./composer-diagnostics";
 import { randomUUID } from "node:crypto";
 import { emitNativeToolDiagnostic } from "./mcp-observation";
 import { chatGptSafetyStatusTextVisible } from "./safety-status-observation";
-import { chmodSync, existsSync, mkdirSync, readdirSync, rmSync, statSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, readdirSync, readFileSync, rmSync, statSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { skillFileTokens, validateSkillFiles } from "./skill-attachments";
 import { detectChatGptLimitsPlan, readChatGptUsageAccount, readChatGptUsageModel, supportsChatGptUsageTracking, type ChatGptUsageModel } from "./limits";
@@ -766,6 +767,7 @@ export async function ensureChatGptPersonalizedConnectorAccess(
 }
 
 export class ChatGptPromptAttachmentIntegrityError extends ChatGptWebAdapterError {
+  attachmentDiagnostic?: ReturnType<typeof summarizeComposerMismatch>;
   constructor(message: string, cause?: unknown) {
     super(message, {
       status: 502,
@@ -1996,6 +1998,7 @@ export function sanitizeChatGptBrowserDiagnosticState(value: unknown): unknown {
 }
 
 const CHATGPT_BROWSER_DIAGNOSTIC_TRACE_LIMIT = 10;
+const CHATGPT_BROWSER_FAILED_DIAGNOSTIC_TRACE_LIMIT = 20;
 
 export function browserDiagnosticCheckpoint(value: string): string {
   const safe = value.replace(/[^A-Za-z0-9_-]+/g, "-").replace(/^-+|-+$/g, "").slice(0, 80);
@@ -2007,20 +2010,41 @@ function privateDirectory(path: string): void {
   try { chmodSync(path, 0o700); } catch { /* Windows ACLs are managed by the installer. */ }
 }
 
-function pruneBrowserDiagnostics(root: string): void {
+export function pruneBrowserDiagnostics(root: string): void {
   const traces = readdirSync(root, { withFileTypes: true })
     .filter(entry => entry.isDirectory() && /^[A-Za-z0-9_-]{6,128}$/.test(entry.name))
     .map(entry => {
       const path = join(root, entry.name);
-      return { path, modifiedAt: statSync(path).mtimeMs };
+      let active = false;
+      try {
+        const marker = join(path, "active.json");
+        if (statSync(marker).size <= 1024) {
+          const { pid, startedAt } = JSON.parse(readFileSync(marker, "utf8"));
+          if (Number.isInteger(pid) && pid > 0 && typeof startedAt === "number"
+            && Date.now() - startedAt < 24 * 60 * 60 * 1000) {
+            try { process.kill(pid, 0); active = true; }
+            catch (error) { active = (error as NodeJS.ErrnoException).code === "EPERM"; }
+          }
+        }
+      } catch { /* Missing or stale markers are ordinary settled traces. */ }
+      // General turn failures are recorded as numbered checkpoints. Preserve
+      // them alongside specialized integrity failures for later diagnosis.
+      const failed = existsSync(join(path, "attachment-failure.json"))
+        || existsSync(join(path, "markdown-failure.json"))
+        || readdirSync(path).some(name => /^\d+-turn-failed\.json$/.test(name));
+      return { path, active, modifiedAt: statSync(path).mtimeMs, failed };
     })
     .sort((left, right) => right.modifiedAt - left.modifiedAt);
-  for (const trace of traces.slice(CHATGPT_BROWSER_DIAGNOSTIC_TRACE_LIMIT)) {
+  const discarded = [
+    ...traces.filter(trace => !trace.active && !trace.failed).slice(CHATGPT_BROWSER_DIAGNOSTIC_TRACE_LIMIT),
+    ...traces.filter(trace => !trace.active && trace.failed).slice(CHATGPT_BROWSER_FAILED_DIAGNOSTIC_TRACE_LIMIT),
+  ];
+  for (const trace of discarded) {
     rmSync(trace.path, { recursive: true, force: true });
   }
 }
 
-class ChatGptBrowserDiagnostics {
+export class ChatGptBrowserDiagnostics {
   private readonly directory: string;
   private sequence = 0;
   private initialized = false;
@@ -2036,17 +2060,58 @@ class ChatGptBrowserDiagnostics {
     this.directory = join(this.root, `${traceId}-${randomUUID().slice(0, 8)}`);
   }
 
+  recordMarkdownFailure(evidence: {
+    stage: "observe" | "finish";
+    reason: string;
+    ledger: ReturnType<ChatGptMarkdownBuffer["diagnosticStats"]>;
+    observedBlocks: number;
+    observedRangedBlocks: number;
+    observedTextChars: number;
+    visibleTextChars: number;
+    completionActionVisible: boolean;
+  }): void {
+    // Only fixed labels, counts and booleans are supplied by the caller; no
+    // response bodies, HTML, DOM keys, links, prompt fragments or hashes.
+    try {
+      if (!this.initialized) return;
+      privateDirectory(this.directory);
+      const report = { schemaVersion: 1, traceId: this.traceId, capturedAt: new Date().toISOString(), ...evidence };
+      atomicWriteFile(join(this.directory, "markdown-failure.json"), `${JSON.stringify(report)}\n`);
+      console.warn(`[chatgpt-web] markdown_failure_evidence ${JSON.stringify(report)}`);
+    } catch (error) {
+      console.warn(`[chatgpt-web] markdown failure diagnostic write failed trace=${this.traceId}: ${error instanceof Error ? error.name : "unknown"}`);
+    }
+  }
+
   async capture(page: Page, checkpoint: string, error?: unknown): Promise<void> {
     try {
       if (!this.initialized) {
         privateDirectory(this.root);
         privateDirectory(this.directory);
+        atomicWriteFile(join(this.directory, "active.json"), `${JSON.stringify({ pid: process.pid, startedAt: Date.now() })}\n`);
         pruneBrowserDiagnostics(this.root);
         this.initialized = true;
       }
+      // Another live turn can prune this directory. Always recreate before writing.
+      privateDirectory(this.directory);
+      const attachmentDiagnostic = error instanceof ChatGptPromptAttachmentIntegrityError
+        ? error.attachmentDiagnostic ?? { schemaVersion: 1, observationFailed: true } : undefined;
+      if (attachmentDiagnostic) {
+        const safe = sanitizeChatGptBrowserDiagnosticState(attachmentDiagnostic);
+        atomicWriteFile(join(this.directory, "attachment-failure.json"), `${JSON.stringify({
+          schemaVersion: 1, traceId: this.traceId, checkpoint: browserDiagnosticCheckpoint(checkpoint),
+          capturedAt: new Date().toISOString(), attachmentDiagnostic: safe,
+        })}\n`);
+        console.info(`[chatgpt-web] composer_attachment_diagnostic ${JSON.stringify({
+          traceId: this.traceId, checkpoint: browserDiagnosticCheckpoint(checkpoint), attachmentDiagnostic: safe,
+        })}`);
+      }
       const sequence = String(++this.sequence).padStart(2, "0");
       const stem = `${sequence}-${browserDiagnosticCheckpoint(checkpoint)}`;
-      const includeScreenshot = process.env.CODEX_CHATGPT_WEB_BROWSER_DIAGNOSTICS === "1";
+      // Integrity evidence is content-free even when general screenshot debugging is enabled.
+      const includeScreenshot = process.env.CODEX_CHATGPT_WEB_BROWSER_DIAGNOSTICS === "1"
+        && !attachmentDiagnostic && !checkpoint.includes("prompt-attachment-integrity")
+        && !(error instanceof ChatGptWebAdapterError && error.code === "browser_stream_inconsistent");
       const [screenshotResult, stateResult] = await Promise.allSettled([
         includeScreenshot
           ? page.screenshot({ animations: "disabled", caret: "hide", timeout: 5_000, type: "png" })
@@ -2239,6 +2304,7 @@ class ChatGptBrowserDiagnostics {
         capturedAt,
         traceId: this.traceId,
         checkpoint,
+        ...(attachmentDiagnostic ? { attachmentDiagnostic: sanitizeChatGptBrowserDiagnosticState(attachmentDiagnostic) } : {}),
         ...(error !== undefined ? {
           error: redactChatGptUiDiagnostic(error instanceof Error ? error.message : String(error)),
         } : {}),
@@ -2261,6 +2327,14 @@ class ChatGptBrowserDiagnostics {
         + ` ${captureError instanceof Error ? captureError.message : String(captureError)}`,
       );
     }
+  }
+
+  settle(): void {
+    if (!this.initialized) return;
+    try {
+      rmSync(join(this.directory, "active.json"), { force: true });
+      pruneBrowserDiagnostics(this.root);
+    } catch { /* Diagnostic cleanup must not affect turn completion. */ }
   }
 }
 
@@ -2378,13 +2452,20 @@ export type ChatGptComposerInsertion = {
   text: string;
   connectorPrompt?: boolean;
   lineBreakRecovery?: boolean;
+  captureInsertion?: boolean;
 };
 
-export function insertPlainTextIntoComposer(element: HTMLElement, value: string | ChatGptComposerInsertion): boolean {
+interface ComposerInsertionCapture { applied: boolean; beforeText: string; immediateText: string; }
+
+export function insertPlainTextIntoComposer(element: HTMLElement, value: string | ChatGptComposerInsertion): boolean | ComposerInsertionCapture {
+  const capture = typeof value !== "string" && value.captureInsertion === true;
+  const beforeText = capture ? element.textContent ?? "" : "";
+  const finish = (applied: boolean): boolean | ComposerInsertionCapture => capture
+    ? { applied, beforeText, immediateText: element.textContent ?? "" } : applied;
   if (document.activeElement !== element) element.focus();
-  if (document.activeElement !== element) return false;
+  if (document.activeElement !== element) return finish(false);
   const selection = window.getSelection();
-  if (!selection) return false;
+  if (!selection) return finish(false);
   const alreadyPlaced = selection.isCollapsed
     && selection.anchorNode !== null
     && element.contains(selection.anchorNode);
@@ -2400,7 +2481,7 @@ export function insertPlainTextIntoComposer(element: HTMLElement, value: string 
     || !selection.anchorNode
     || !element.contains(selection.anchorNode)
   ) {
-    return false;
+    return finish(false);
   }
   let text = typeof value === "string" ? value : value.text;
   if (typeof value !== "string" && value.connectorPrompt) {
@@ -2408,14 +2489,14 @@ export function insertPlainTextIntoComposer(element: HTMLElement, value: string 
     const pills = clone.querySelectorAll(
       '[data-id^="plugin:"][data-keyword], [app-mention-path^="app://"][app-mention-display-name][contenteditable="false"]',
     );
-    if (pills.length !== 1) return false;
+    if (pills.length !== 1) return finish(false);
     pills.forEach(pill => pill.remove());
     clone.querySelectorAll('[data-inline-selection-pill-cursor-target]').forEach(node => node.remove());
     const separator = clone.textContent ?? "";
     // New ChatGPT editors supply this space themselves. Older editors do not.
     // Own exactly one separator without trimming any whitespace from the prompt.
     if (separator === "") text = ` ${text}`;
-    else if (separator !== " " && separator !== "\u00A0") return false;
+    else if (separator !== " " && separator !== "\u00A0") return finish(false);
   }
   if (typeof value !== "string" && value.lineBreakRecovery) {
     // A different browser edit after a failed atomic insertion: only text nodes
@@ -2426,9 +2507,9 @@ export function insertPlainTextIntoComposer(element: HTMLElement, value: string 
       if (index > 0) plain.append(document.createElement("br"));
       plain.append(document.createTextNode(line));
     });
-    return document.execCommand("insertHTML", false, plain.outerHTML);
+    return finish(document.execCommand("insertHTML", false, plain.outerHTML));
   }
-  return document.execCommand("insertText", false, text);
+  return finish(document.execCommand("insertText", false, text));
 }
 
 /** Limit individual browser editing operations after a large atomic insertion fails. */
@@ -3529,63 +3610,9 @@ export class ChatGptBrowserWorker {
 
   private async attachedPromptText(page: Page, abortSignal?: AbortSignal): Promise<string> {
     const composer = await this.activeComposer(page, 30_000, abortSignal);
-    return composer.evaluate(element => {
-      const clone = element.cloneNode(true) as HTMLElement;
-      const markdownEditor = element.hasAttribute("data-composer-markdown");
-      const connectorBlock = clone.querySelector(
-        '[data-id^="plugin:"][data-keyword], [app-mention-path^="app://"][app-mention-display-name][contenteditable="false"]',
-      )?.closest("p, div");
-      const hasConnectorPill = clone.querySelector(
-        '[data-id^="plugin:"][data-keyword], [app-mention-path^="app://"][app-mention-display-name][contenteditable="false"]',
-      ) != null;
-      clone.querySelectorAll(
-        '[data-id^="plugin:"][data-keyword], [data-inline-selection-pill-cursor-target], [app-mention-path^="app://"][app-mention-display-name][contenteditable="false"]',
-      )
-        .forEach(part => part.remove());
-      // The connector path inserts one separator ahead of the prompt. Remove only that
-      // text code unit before reconstructing lines, so a separator-only text node cannot
-      // contribute an extra line. Never trim the prompt's own leading whitespace.
-      if (hasConnectorPill) {
-        const walker = clone.ownerDocument.createTreeWalker(clone, 4 /* SHOW_TEXT */);
-        let first = walker.nextNode();
-        while (first && !first.textContent) first = walker.nextNode();
-        if (first?.textContent?.startsWith(" ") || first?.textContent?.startsWith("\u00A0")) {
-          first.textContent = first.textContent!.slice(1);
-          if (!first.textContent) first.parentNode?.removeChild(first);
-        }
-        // A leading line break can leave the mention in its own empty block,
-        // followed by the actual prompt's BR. The mention's block boundary is
-        // UI scaffolding, not a second newline in the prompt.
-        if (connectorBlock && connectorBlock !== clone && !connectorBlock.hasChildNodes()
-          && connectorBlock.nextElementSibling?.firstChild?.nodeName === "BR") {
-          connectorBlock.remove();
-        }
-      }
-      // Lexical can split a line into several inline spans, or put BRs inside a
-      // paragraph. textContent joined per child invents lines in the former case
-      // and loses them in the latter. Decode structural line breaks explicitly.
-      const blocks = new Set(["DIV", "P", "PRE", "BLOCKQUOTE", "LI", "UL", "OL", "H1", "H2", "H3", "H4", "H5", "H6"]);
-      const read = (parent: Node): string => {
-        const nodes = [...parent.childNodes];
-        if ((parent === clone || blocks.has(parent.nodeName))
-          && nodes.length === 1 && nodes[0]!.nodeName === "BR") return "";
-        const parts = nodes.map(node => ({
-          text: node.nodeType === 3 ? node.textContent ?? ""
-            : node.nodeName === "BR" ? "\n" : read(node),
-          block: blocks.has(node.nodeName),
-          br: node.nodeName === "BR",
-        })).filter(part => part.block || part.text.length > 0);
-        // Chromium uses a final BR to make the end caret visible; a real trailing
-        // newline has a further empty paragraph or an additional BR before it.
-        // The markdown composer retains meaningful final BRs; unlike the older
-        // contenteditable, it does not append a caret BR after inserted text.
-        if (!markdownEditor && (parent === clone || blocks.has(parent.nodeName)) && parts.at(-1)?.br) parts.pop();
-        return parts.map((part, index) => (
-          index > 0 && (part.block || parts[index - 1]!.block) ? "\n" : ""
-        ) + part.text).join("");
-      };
-      return read(clone);
-    }, undefined, { timeout: 20_000, signal: abortSignal });
+    return await composer.evaluate(readComposerDom, false, {
+      timeout: 20_000, signal: abortSignal,
+    }) as string;
   }
 
   private async assertPromptAttached(
@@ -3933,7 +3960,7 @@ export class ChatGptBrowserWorker {
     page: Page,
     prompt: string,
     localTools: boolean,
-    captureDiagnostic?: (checkpoint: string) => Promise<void>,
+    captureDiagnostic?: (checkpoint: string, error?: unknown) => Promise<void>,
     abortSignal?: AbortSignal,
     catalogRefreshAvailable = false,
     connectorAttemptBudget?: ChatGptConnectorAttemptBudget,
@@ -3945,6 +3972,7 @@ export class ChatGptBrowserWorker {
     await throwIfChatGptRateLimitDialog(page);
     throwIfPromptAttachmentAborted(abortSignal);
     let composerMutationStarted = false;
+    const journal: ComposerInsertionJournal = { edits: [] };
     try {
       if (!localTools) {
         const composer = await this.activeComposer(page, 30_000, abortSignal);
@@ -3957,7 +3985,7 @@ export class ChatGptBrowserWorker {
         if (requireThink) {
           await setChatGptThinkMode(composer, true, captureDiagnostic, abortSignal);
         }
-        await this.insertPromptText(page, prompt, abortSignal, segmentedRecovery);
+        await this.insertPromptText(page, prompt, abortSignal, segmentedRecovery, false, journal);
         await this.assertPromptAttached(page, prompt, abortSignal);
         return;
       }
@@ -3993,13 +4021,21 @@ export class ChatGptBrowserWorker {
         signal: abortSignal,
         timeout: CHATGPT_CONNECTOR_ACTION_TIMEOUT_MS,
       });
-      await this.insertPromptText(page, prompt, abortSignal, segmentedRecovery, true);
+      await this.insertPromptText(page, prompt, abortSignal, segmentedRecovery, true, journal);
       await this.assertPromptAttached(page, prompt, abortSignal);
     } catch (error) {
       if (!composerMutationStarted || error instanceof ChatGptPersistentBrowserStateError) throw error;
       try {
         if (error instanceof ChatGptPromptAttachmentIntegrityError) {
-          await (captureDiagnostic?.("prompt-attachment-integrity-mismatch") ?? Promise.resolve()).catch(() => {});
+          // Gather evidence before clearing the draft; diagnostics must not prevent cleanup.
+          try {
+            const composer = await this.activeComposer(page, 5_000);
+            const snapshot = await composer.evaluate(readComposerDom, true, { timeout: 5_000 }) as ComposerDomSnapshot;
+            error.attachmentDiagnostic = summarizeComposerMismatch(prompt, snapshot, journal);
+          } catch {
+            // Observation failure remains separate from the original attachment failure.
+          }
+          await (captureDiagnostic?.("prompt-attachment-integrity-mismatch", error) ?? Promise.resolve()).catch(() => {});
         }
         await this.clearChatGptComposerState(page);
       } catch (cleanupError) {
@@ -4259,7 +4295,7 @@ export class ChatGptBrowserWorker {
     prompt: string,
     localTools: boolean,
     baseline: ChatGptSubmissionBaseline,
-    captureDiagnostic?: (checkpoint: string) => Promise<void>,
+    captureDiagnostic?: (checkpoint: string, error?: unknown) => Promise<void>,
     abortSignal?: AbortSignal,
     catalogRefreshAvailable = false,
     connectorAttemptBudget?: ChatGptConnectorAttemptBudget,
@@ -4309,6 +4345,7 @@ export class ChatGptBrowserWorker {
     abortSignal?: AbortSignal,
     segmentedRecovery = false,
     connectorPrompt = false,
+    journal?: ComposerInsertionJournal,
   ): Promise<void> {
     text = composerTransportText(text);
     throwIfPromptAttachmentAborted(abortSignal);
@@ -4323,6 +4360,7 @@ export class ChatGptBrowserWorker {
     const parts = segmentedRecovery && text.length > CHATGPT_COMPOSER_RECOVERY_CHUNK_CHARS
       ? splitComposerRecoveryText(text)
       : [text];
+    let insertedChars = 0;
     for (const [index, part] of parts.entries()) {
       throwIfPromptAttachmentAborted(abortSignal);
       const composer = await this.activeComposer(page, 30_000, abortSignal);
@@ -4334,16 +4372,32 @@ export class ChatGptBrowserWorker {
           signal: abortSignal, timeout: CHATGPT_CONNECTOR_ACTION_TIMEOUT_MS,
         });
       }
-      const value: string | ChatGptComposerInsertion = segmentedRecovery || connectorPrompt
+      const value: string | ChatGptComposerInsertion = segmentedRecovery || connectorPrompt || journal
         ? { text: part, ...(connectorPrompt && index === 0 ? { connectorPrompt: true } : {}),
-          ...(segmentedRecovery ? { lineBreakRecovery: true } : {}) }
+          ...(segmentedRecovery ? { lineBreakRecovery: true } : {}),
+          ...(journal ? { captureInsertion: true } : {}) }
         : part;
       const inserted = await composer.evaluate(insertPlainTextIntoComposer, value, {
         timeout: 20_000,
         signal: abortSignal,
       });
       throwIfPromptAttachmentAborted(abortSignal);
-      if (!inserted) {
+      insertedChars += part.length;
+      const applied = typeof inserted === "boolean" ? inserted : inserted.applied;
+      if (journal && typeof inserted !== "boolean") {
+        // Keep at most the first and last edit. Raw text stays in this attachment's memory only.
+        const edit = {
+          index, total: parts.length, insertedChars: part.length, applied,
+          usesExplicitLineBreaks: segmentedRecovery,
+          beforeProfile: composerTextProfile(inserted.beforeText),
+          immediateProfile: composerTextProfile(inserted.immediateText),
+          expectedPrefixWithoutLF: compareComposerText(text.slice(0, insertedChars).replace(/\n/g, ""), inserted.immediateText),
+        };
+        if (journal.edits.length < 2) journal.edits.push(edit);
+        else journal.edits[1] = edit;
+        journal.lastImmediateRawText = inserted.immediateText;
+      }
+      if (!applied) {
         throw new ChatGptPromptAttachmentIntegrityError(
           "ChatGPT composer rejected the plain-text editing command",
         );
@@ -4378,6 +4432,8 @@ export class ChatGptBrowserWorker {
     } catch (error) {
       await diagnostics.capture(page, "connector-verification-failed", error);
       throw error;
+    } finally {
+      diagnostics.settle();
     }
   }
 
@@ -5491,7 +5547,7 @@ export class ChatGptBrowserWorker {
           browserStageTimeouts.temporaryChatPreparation,
           () => this.prepareChatSurface(
             page,
-            checkpoint => diagnostics.capture(page, checkpoint),
+            (checkpoint: string, error?: unknown) => diagnostics.capture(page, checkpoint, error),
             this.config.useSavedChats,
             turn.abortSignal,
           ),
@@ -5506,7 +5562,7 @@ export class ChatGptBrowserWorker {
           turn.modelId,
           stagingMode.effort,
           browserCapabilities,
-          checkpoint => diagnostics.capture(page, checkpoint),
+          (checkpoint: string, error?: unknown) => diagnostics.capture(page, checkpoint, error),
           trackUsage,
           stagingFamily,
           firstModelReadinessWaitMs,
@@ -5588,7 +5644,7 @@ export class ChatGptBrowserWorker {
               stage.text,
               false,
               stageBaseline,
-              checkpoint => diagnostics.capture(page, `multipart-${index + 1}-${checkpoint}`),
+              (checkpoint: string, error?: unknown) => diagnostics.capture(page, `multipart-${index + 1}-${checkpoint}`, error),
               turn.abortSignal ? AbortSignal.any([stageSignal, turn.abortSignal]) : stageSignal,
             ),
             chatGptSuspensionClock,
@@ -5603,7 +5659,7 @@ export class ChatGptBrowserWorker {
             (stageSignal) => this.sendAttachedPrompt(
               page,
               stageBaseline,
-              checkpoint => diagnostics.capture(page, `multipart-${index + 1}-${checkpoint}`),
+              (checkpoint: string, error?: unknown) => diagnostics.capture(page, `multipart-${index + 1}-${checkpoint}`, error),
               turn.abortSignal ? AbortSignal.any([stageSignal, turn.abortSignal]) : stageSignal,
               undefined,
               { onSubmitted: async () => {
@@ -5720,7 +5776,7 @@ export class ChatGptBrowserWorker {
                 finalPrompt,
                 mode.localTools,
                 submissionBaseline,
-                checkpoint => diagnostics.capture(page, checkpoint),
+                (checkpoint: string, error?: unknown) => diagnostics.capture(page, checkpoint, error),
                 promptAbortSignal,
                 catalogRefreshAvailable,
                 connectorAttemptBudget,
@@ -5743,7 +5799,7 @@ export class ChatGptBrowserWorker {
               await page.reload({ waitUntil: "domcontentloaded", timeout: 60_000 });
               await this.prepareChatSurface(
                 page,
-                checkpoint => diagnostics.capture(page, checkpoint),
+                (checkpoint: string, error?: unknown) => diagnostics.capture(page, checkpoint, error),
                 this.config.useSavedChats,
                 turn.abortSignal,
               );
@@ -5752,7 +5808,7 @@ export class ChatGptBrowserWorker {
                 turn.modelId,
                 turn.reasoning,
                 turn.capabilities,
-                checkpoint => diagnostics.capture(page, checkpoint),
+                (checkpoint: string, error?: unknown) => diagnostics.capture(page, checkpoint, error),
                 trackUsage,
                 turn.modelFamily,
               );
@@ -5778,7 +5834,7 @@ export class ChatGptBrowserWorker {
         (stageSignal) => this.sendAttachedPrompt(
           page,
           submissionBaseline,
-          checkpoint => diagnostics.capture(page, checkpoint),
+          (checkpoint: string, error?: unknown) => diagnostics.capture(page, checkpoint, error),
           turn.abortSignal ? AbortSignal.any([stageSignal, turn.abortSignal]) : stageSignal,
           turn.externalProgress,
           { ...turn, onSubmitted: () => {
@@ -5836,7 +5892,7 @@ export class ChatGptBrowserWorker {
       let observedSafetyStatusText = false;
       const sentAt = Date.now();
       const visibleTrace = new ChatGptVisibleTraceTracker();
-      const markdownBuffer = new ChatGptMarkdownBuffer(undefined, undefined, turn.compaction ? "complete" : "stream");
+      const markdownBuffer = new ChatGptMarkdownBuffer(undefined, undefined, turn.compaction ? "complete" : "verified");
       const checkpointStream = turn.captureLunaCheckpoint
         ? new ChatGptLunaCheckpointStream()
         : undefined;
@@ -5844,8 +5900,24 @@ export class ChatGptBrowserWorker {
         const visible = checkpointStream ? checkpointStream.push(delta) : delta;
         if (visible) turn.onTextDelta(visible);
       };
-      const throwMarkdownConsistencyError = (error: unknown): never => {
+      const throwMarkdownConsistencyError = (
+        error: unknown,
+        stage: "observe" | "finish",
+        segments: ChatGptMarkdownSegment[],
+        visibleTextChars: number,
+        completionActionVisible: boolean,
+      ): never => {
         if (!(error instanceof ChatGptMarkdownConsistencyError)) throw error;
+        diagnostics.recordMarkdownFailure({
+          stage,
+          reason: error.diagnostic?.reason ?? "unclassified",
+          ledger: markdownBuffer.diagnosticStats(),
+          observedBlocks: segments.length,
+          observedRangedBlocks: segments.filter(segment => segment.sourceStart !== undefined && segment.sourceEnd !== undefined).length,
+          observedTextChars: segments.reduce((sum, segment) => sum + segment.text.length, 0),
+          visibleTextChars,
+          completionActionVisible,
+        });
         if (error.diagnostic) {
           console.error(
             `[chatgpt-web] browser turn ${turn.traceId} Markdown conflict: ${JSON.stringify(error.diagnostic)}`,
@@ -6035,7 +6107,8 @@ export class ChatGptBrowserWorker {
             try {
               return markdownBuffer.observe(snapshot.markdownSegments);
             } catch (error) {
-              return throwMarkdownConsistencyError(error);
+              return throwMarkdownConsistencyError(error, "observe", snapshot.markdownSegments,
+                snapshot.visibleText.length, snapshot.completionActionVisible);
             }
           })();
           for (const trace of visibleTrace.observe(snapshot.traceBlocks, snapshot.completionActionVisible)) {
@@ -6096,7 +6169,8 @@ export class ChatGptBrowserWorker {
               try {
                 return markdownBuffer.finish();
               } catch (error) {
-                return throwMarkdownConsistencyError(error);
+                return throwMarkdownConsistencyError(error, "finish", snapshot.markdownSegments,
+                  snapshot.visibleText.length, snapshot.completionActionVisible);
               }
             })();
             if (!final.markdown && snapshot.visibleText) {
@@ -6200,6 +6274,7 @@ export class ChatGptBrowserWorker {
       }
       throw error;
     } finally {
+      diagnostics.settle();
       submissionRejection.dispose();
       await Promise.all(usageWrites);
       prepared.release();

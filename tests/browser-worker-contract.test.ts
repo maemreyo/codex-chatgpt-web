@@ -1384,7 +1384,7 @@ test("large Markdown-rich context uses one plain-text editing command before exa
   }, dialogPage("").page, prompt, false);
 
   expect(calls[0]).toEqual(["fill", ""]);
-  expect(calls.filter(call => call[0] === "evaluate")).toEqual([["evaluate", prompt]]);
+  expect(calls.filter(call => call[0] === "evaluate")).toEqual([["evaluate", { text: prompt, captureInsertion: true }]]);
   expect(calls.filter(call => call[0] === "evaluateOptions")).toEqual([
     ["evaluateOptions", { timeout: 20_000 }],
   ]);
@@ -2199,7 +2199,7 @@ test("tool-capable prompts use the shared Playwright connector selection before 
     ["selectedFocus"],
     ["press", CHATGPT_COMPOSER_DOCUMENT_END_KEY],
     ["selectedFocus"],
-    ["plainText", { text: "context", connectorPrompt: true }],
+    ["plainText", { text: "context", connectorPrompt: true, captureInsertion: true }],
     ["assertPrompt"],
   ]);
 });
