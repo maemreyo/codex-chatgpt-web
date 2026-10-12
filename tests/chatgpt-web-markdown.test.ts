@@ -17,6 +17,49 @@ test("atomic summaries accept a revised draft while ordinary streamed answers st
   expect(() => answer.finish()).toThrow("completed text block");
 });
 
+test("verified streaming defers DOM-only blocks through final remount and revision", () => {
+  const buffer = new ChatGptMarkdownBuffer(undefined, 0, "verified");
+  const first = { key: "dom:original", tag: "p", html: "<p>Draft answer.</p>",
+    text: "Draft answer.", streamable: true };
+  const tail = { key: "dom:tail", tag: "p", html: "<p>Second block.</p>",
+    text: "Second block.", streamable: false };
+  expect(buffer.observe([first, tail], 0)).toBe("");
+  const final = { key: "dom:remounted", tag: "div", html: "<div>Final answer.</div>",
+    text: "Final answer.", streamable: true };
+  expect(buffer.observe([final, tail], 1)).toBe("");
+  expect(buffer.currentSnapshotIsConsistent()).toBeTrue();
+  expect(buffer.finish()).toEqual({
+    markdown: "Final answer.\n\nSecond block.",
+    delta: "Final answer.\n\nSecond block.",
+  });
+});
+
+test("verified streaming still delivers source-ranged blocks and rejects rewritten commits", () => {
+  const buffer = new ChatGptMarkdownBuffer(undefined, 0, "verified");
+  const first = { key: "dom:first", tag: "p", html: '<p data-start="0" data-end="6">First.</p>',
+    text: "First.", sourceStart: 0, sourceEnd: 6, streamable: true };
+  const tail = { key: "dom:tail", tag: "p", html: '<p data-start="7" data-end="12">Next.</p>',
+    text: "Next.", sourceStart: 7, sourceEnd: 12, streamable: false };
+  expect(buffer.observe([first, tail], 0)).toBe("First.");
+  expect(buffer.finish()).toEqual({ markdown: "First.\n\nNext.", delta: "\n\nNext." });
+  buffer.observe([{ ...first, key: "dom:new-first", text: "Other.",
+    html: '<p data-start="0" data-end="6">Other.</p>' }], 1);
+  expect(() => buffer.finish()).toThrow("changed a completed text block");
+});
+
+test("Markdown diagnostics expose structure and counts without private answer data", () => {
+  const buffer = new ChatGptMarkdownBuffer(undefined, 0, "verified");
+  const secret = "private-secret-answer";
+  buffer.observe([
+    { key: "sensitive-dom-key", tag: "p", html: `<p>${secret}</p>`, text: secret, streamable: true },
+    { key: "other-dom-key", tag: "p", html: "<p>pending</p>", text: "pending", streamable: false },
+  ], 0);
+  const evidence = buffer.diagnosticStats();
+  expect(evidence).toMatchObject({ mode: "verified", committedBlocks: 0, pendingBlocks: 2,
+    pendingRangedBlocks: 0, emittedMarkdownChars: 0 });
+  expect(JSON.stringify(evidence)).not.toMatch(/private-secret|sensitive-dom-key|<p>/);
+});
+
 function katex(source: string, display = false): string {
   const escaped = source.replaceAll("&", "&amp;").replaceAll("<", "&lt;").replaceAll(">", "&gt;");
   const math = '<span class="katex"><span class="katex-mathml"><math><semantics>'
@@ -302,6 +345,16 @@ test("remount inference stays within the recent ledger and rejects a wholly unan
   noAnchor.observe([block(0)], 0);
   noAnchor.observe([block(71)], 1);
   expect(() => noAnchor.finish()).toThrow("could not be aligned");
+  try {
+    noAnchor.finish();
+  } catch (error) {
+    const detail = (error as ChatGptMarkdownConsistencyError).diagnostic;
+    expect(detail).toMatchObject({
+      reason: "unanchored_tail", observedIndex: 0, committedIndex: 0,
+      committedCount: 1, observedCount: 1,
+    });
+    expect(JSON.stringify(detail)).not.toContain("Unique");
+  }
 });
 
 test("a source-ranged remount must preserve the exact rendered committed block", () => {

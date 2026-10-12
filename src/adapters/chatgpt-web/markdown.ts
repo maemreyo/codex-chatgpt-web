@@ -216,7 +216,7 @@ interface CommittedChatGptMarkdownSegment {
 
 export class ChatGptMarkdownConsistencyError extends Error {
   constructor(message: string, readonly diagnostic?: {
-    reason: "text_changed" | "link_target_changed" | "block_order_changed" | "source_range_overlap";
+    reason: "text_changed" | "link_target_changed" | "block_order_changed" | "source_range_overlap" | "unanchored_tail";
     observedStart?: number;
     observedEnd?: number;
     committedStart?: number;
@@ -227,6 +227,8 @@ export class ChatGptMarkdownConsistencyError extends Error {
     committedTag?: string;
     observedIndex: number;
     committedIndex: number;
+    committedCount?: number;
+    observedCount?: number;
   }) {
     super(message);
     this.name = "ChatGptMarkdownConsistencyError";
@@ -254,7 +256,7 @@ export class ChatGptMarkdownBuffer {
   constructor(
     private readonly transform: (markdown: string) => string = markdown => markdown,
     private readonly stabilityMs = 750,
-    private readonly delivery: "stream" | "complete" = "stream",
+    private readonly delivery: "stream" | "complete" | "verified" = "stream",
   ) {
     if (!Number.isFinite(stabilityMs) || stabilityMs < 0) {
       throw new Error("ChatGPT Markdown stability window must be a non-negative finite number");
@@ -308,6 +310,12 @@ export class ChatGptMarkdownBuffer {
       const candidate = this.candidates.get(candidateId);
       if (!candidate?.streamable || candidate.streamableAt === undefined) break;
       if (now - Math.max(candidate.changedAt, candidate.streamableAt) < this.stabilityMs) break;
+      // DOM-only keys are ephemeral across ChatGPT's final React remounts. If a
+      // block has no source range, keep it revisable until completion: once a
+      // delta reaches Codex we cannot retract it or realign an unanchored tail.
+      // Ranged blocks retain incremental delivery and their existing guards.
+      if (this.delivery === "verified"
+        && (candidate.sourceStart === undefined || candidate.sourceEnd === undefined)) break;
       const committed = this.commit(candidate);
       delta += committed.delta;
       this.rememberCommit(candidate, committed.markdown);
@@ -333,6 +341,30 @@ export class ChatGptMarkdownBuffer {
 
   currentSnapshotIsConsistent(): boolean {
     return this.consistencyError === undefined;
+  }
+
+  // Content-free counters for diagnosing a failed stream reconciliation. Never
+  // expose committed text, Markdown, DOM keys, URLs or input source itself.
+  diagnosticStats(): {
+    mode: "stream" | "complete" | "verified";
+    committedBlocks: number;
+    committedRangedBlocks: number;
+    committedTextChars: number;
+    pendingBlocks: number;
+    pendingRangedBlocks: number;
+    pendingTextChars: number;
+    emittedMarkdownChars: number;
+  } {
+    return {
+      mode: this.delivery,
+      committedBlocks: this.committed.length,
+      committedRangedBlocks: this.committed.filter(segment => segment.sourceStart !== undefined && segment.sourceEnd !== undefined).length,
+      committedTextChars: this.committed.reduce((sum, segment) => sum + segment.text.length, 0),
+      pendingBlocks: this.latest.length,
+      pendingRangedBlocks: this.latest.filter(segment => segment.sourceStart !== undefined && segment.sourceEnd !== undefined).length,
+      pendingTextChars: this.latest.reduce((sum, segment) => sum + segment.text.length, 0),
+      emittedMarkdownChars: this.markdown.length,
+    };
   }
 
   private reconcile(
@@ -407,8 +439,24 @@ export class ChatGptMarkdownBuffer {
       // A known, undelivered paragraph also anchors new content after a virtualized
       // committed tail. Earlier committed blocks are still checked above for edits/reordering.
       if (!followsVisibleCommittedTail && !sawPending && !this.matchesLatestPending(segment)) {
+        const lastCommitted = this.committed.at(-1)!;
         return new ChatGptMarkdownConsistencyError(
           "ChatGPT final DOM could not be aligned with text already streamed to Codex",
+          {
+            reason: "unanchored_tail",
+            observedStart: segment.sourceStart,
+            observedEnd: segment.sourceEnd,
+            committedStart: lastCommitted.sourceStart,
+            committedEnd: lastCommitted.sourceEnd,
+            observedTextChars: segment.text.length,
+            committedTextChars: lastCommitted.text.length,
+            observedTag: segment.tag,
+            committedTag: lastCommitted.tag,
+            observedIndex,
+            committedIndex: this.committed.length - 1,
+            committedCount: this.committed.length,
+            observedCount: segments.length,
+          },
         );
       }
       sawPending = true;
