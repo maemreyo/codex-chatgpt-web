@@ -528,3 +528,57 @@ authenticated native-tool E2E remains **WAIVED / NOT_RUN**. Actual browser
 size boundaries, model quality, billed-token savings, production operation and
 release acceptance are **NOT VERIFIED**. Keep
 `experimentalSemanticLogicalWindow=false`.
+
+
+## Post-merge installed RC4: live text-only acceptance (2026-10-10)
+
+Source: merged PR #11 (`a2b957e`), with the runtime code tree matching
+`5805167`. The installed macOS ARM64 application's runtime manifest SHA-256
+was `b686677226fd8b8513e1cd7d893ce00e7a43a7697f1f39300f4e7e432ec21e77`,
+identical to the post-merge packaged candidate. `/healthz` reported
+`6.1.8-rc.4`, healthy, with active browser/HTTP turns. Configuration inspection
+confirmed SEM and Bigger Context enabled and `experimentalSemanticLogicalWindow=false`.
+The launcher was not restarted for this check.
+
+A bounded, authenticated **text-only** native Codex smoke ran three serial turns
+on one new thread using `chatgpt-web/gpt-6-sol`, High effort. Each turn exited
+zero and completed; the initial acknowledgement and both later exact-marker
+recalls were verified. No native tools were requested or executed.
+Content-free events recorded after the smoke began at 2026-10-09 17:58:42 UTC:
+
+| Native turn | Scoped SEM events | Acceptance |
+| --- | --- | --- |
+| 1 | `semantic_skip: ineligible/no_completed_turn` | Correct initial reply, PASS. |
+| 2 | `semantic_rotation: initial`, epoch 1; `semantic_turn` and `semantic_cost` | Correct recall, initial rotation PASS. |
+| 3 | `semantic_skip: cooldown`, `semantic_turn` epoch 1, `semantic_cost` | Correct recall; retained epoch reuse PASS, `epochRotations=0`, `reseedInputTokensEst=0`. |
+
+The new checkpoint was persisted with digest policy **v3**. There were two cost
+samples, one logical rotation, two SEM turns and no recorded browser rejection,
+validation failure or fallback in the scoped thread. The initial rotation's
+estimated reseed input was 22,246 tokens; later retained reuse recorded zero
+reseed tokens. `maskedTokensEst=0` for this small text-only workload. These
+figures are diagnostic estimates, **not measured billing or proven savings**.
+
+Historical-epoch correlation in the installed runtime's available log segments
+since the launcher started at 2026-10-09 17:35:50 UTC found nine
+`anchor_missing` validations across three distinct threads, with seven
+`active_epoch_validation_failed` canonical fallbacks. All three affected thread
+hashes matched persisted epochs with digest policy **v1**, each saved before
+this installation. In total, 12 persisted epochs predated installation, all
+policy v1. This establishes the affected checkpoint identities, but does not
+establish the cause of their missing canonical anchors. The conservative
+fallback kept the original canonical input; no epoch files were modified.
+
+Additional targeted **offline** post-install checks: `bun test
+ tests/browser-session-cap.test.ts tests/launcher-helper-client.test.ts
+ tests/semantic-log-report.test.ts`: **14 PASS / 0 FAIL** on pinned Bun 1.4.0;
+`node --test launcher/tests/browser-host.test.cjs
+ launcher/tests/renderer-wiring.test.cjs`: **149 PASS / 0 FAIL**.
+Git worktree was clean before documenting this evidence.
+
+**Still NOT_RUN / unverified:** direct live effective-capacity snapshot and
+8-session capacity gate, authenticated fresh-lease/restart reseeding and model
+switching, high-pressure and multipart acceptance on this installed build,
+representative answer-quality and real billed-token comparison. Authenticated
+native-**tool** E2E remains **WAIVED / NOT_RUN** by owner choice; this text-only
+smoke does not replace it. No deployment/restart/release was performed here.
