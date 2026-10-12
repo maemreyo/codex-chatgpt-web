@@ -155,8 +155,9 @@ test("S8 fake legacy vs Tier 0 SEM: bounded added work, real cost events and rot
     expect(cost.samples).toBe(NATIVE_TURNS - 1);
     expect(cost.legacyEquivalentSubmissions + 1).toBe(legacy.browserSubmissions);
     expect(cost.epochRotations).toBe(report.rotations);
-    expect(cost.epochRotations).toBe(3); // turns 2, 4, 6, with one intervening reuse
-    expect(report.skipsByReason.cooldown).toBe(2);
+    expect(cost.epochRotations).toBe(1); // low occupancy preserves the first epoch
+    expect(report.skipsByReason.cooldown).toBe(1);
+    expect(report.skipsByReason.low_pressure).toBe(3);
     expect(new Set(sem.epochs).size).toBe(1 + cost.epochRotations);
     expect(cost.reseedInputTokensEst).toBeGreaterThan(0);
     expect(cost.checkpointTailRequests).toBe(0); // V1 Tier 0 has no private tail

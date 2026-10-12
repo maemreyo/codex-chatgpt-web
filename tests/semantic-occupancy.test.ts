@@ -48,6 +48,23 @@ test("unknown restart occupancy and observed size rejection fail closed", () => 
   expect(known.confidence).toBe("unknown");
 });
 
+test("a verified fresh launcher lease resets rejected or unknown browser occupancy", () => {
+  const rejected = new SemanticEpochOccupancy(90_000, true, "chatgpt-web-sol");
+  rejected.record("prior", 20_000);
+  rejected.markRejected();
+  expect(rejected.canDeliverBatch([{ callId: "pending", content: "small" }])).toBeFalse();
+  rejected.resetForVerifiedFreshLease();
+  expect(rejected.confidence).toBe("known");
+  expect(rejected.value).toBe(0);
+  expect(rejected.canDeliverBatch([{ callId: "pending", content: "small" }])).toBeTrue();
+
+  const lost = new SemanticEpochOccupancy(90_000, false, "chatgpt-web-sol");
+  expect(lost.confidence).toBe("unknown");
+  lost.resetForVerifiedFreshLease();
+  expect(lost.confidence).toBe("known");
+  expect(lost.value).toBe(0);
+});
+
 test("ledger is shared for one retained epoch key but recreated for a new epoch", () => {
   const key = `semantic-reseed-${process.pid}-${Date.now()}`;
   const first = semanticEpochOccupancies.forConversation(key, true, 90_000, "chatgpt-web-sol");
@@ -57,6 +74,21 @@ test("ledger is shared for one retained epoch key but recreated for a new epoch"
   expect(replacement).not.toBe(first);
   expect(replacement.value).toBe(0);
   expect(semanticEpochOccupancies.forConversation(`${key}:old-restart`, false, 90_000, "chatgpt-web-sol").confidence).toBe("unknown");
+});
+
+test("evicted occupancy never becomes a falsely fresh retained browser tab", () => {
+  const prefix = `semantic-eviction-${process.pid}-${Date.now()}`;
+  const oldestKey = `${prefix}:old`;
+  const oldest = semanticEpochOccupancies.forConversation(oldestKey, true, 90_000, "chatgpt-web-sol");
+  oldest.record("accepted", 10_000);
+  for (let index = 0; index < 520; index += 1) {
+    semanticEpochOccupancies.forConversation(`${prefix}:${index}`, true, 90_000, "chatgpt-web-sol");
+  }
+  const recalled = semanticEpochOccupancies.forConversation(oldestKey, true, 90_000, "chatgpt-web-sol");
+  expect(recalled).not.toBe(oldest);
+  expect(recalled.confidence).toBe("unknown");
+  expect(recalled.value).toBeNull();
+  expect(recalled.canDeliverBatch([{ callId: "pending", content: "tiny" }])).toBeFalse();
 });
 
 test("pressure replay leaves the full batch intact until canonical compaction settles each call once", async () => {

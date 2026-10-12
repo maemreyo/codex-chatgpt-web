@@ -52,8 +52,10 @@ import {
 import { ChatGptSemanticEpochStore, type StoredChatGptSemanticEpochV1 } from "./semantic-epoch-store";
 import { SemanticCostCaps, SEMANTIC_ROTATIONS_PER_HOUR, SEMANTIC_WEB_COMPACTIONS_PER_HOUR } from "./semantic-cost-caps";
 import { semanticEpochOccupancies } from "./semantic-occupancy";
+import { decideSemanticEpochRotation } from "./semantic-rotation-policy";
 import { SemanticMessageCeilings } from "./semantic-message-ceiling";
 import { estimateTokens } from "../../lib/token-estimate";
+import { estimateCompiledChatGptWebMessageTokens } from "./input-tokens";
 import {
   buildSemanticTier0Candidate,
   preflightSemanticProjection,
@@ -64,7 +66,13 @@ import {
   emitSemanticLog,
   semanticThreadHash,
   semanticValidationReason,
+  type SemanticRotationReason,
 } from "./semantic-log";
+
+// The occupancy ledger is process-local. After a restart, the old retained
+// browser chat cannot safely inherit an empty ledger, so each process must use
+// a fresh semantic conversation key and resend the verified projection.
+const SEMANTIC_BROWSER_PROCESS_NONCE = randomBytes(16).toString("hex");
 
 function brokerSocketPath(provider: CodexProviderConfig): string {
   const configured = provider.chatgptWeb?.brokerSocketPath?.trim();
@@ -437,6 +445,10 @@ export function createChatGptWebAdapter(
       ? resolve(expandUserPath(provider.chatgptWeb.semanticCheckpointStatePath))
       : undefined,
   );
+  const semanticConversationOptions = (epoch: StoredChatGptSemanticEpochV1) => ({
+    semanticEpoch: epoch.semanticEpoch,
+    semanticEpochIdentity: `${epoch.updatedAt}:${epoch.coveredHistoryDigest}:${SEMANTIC_BROWSER_PROCESS_NONCE}`,
+  });
   const semanticStateDirectory = provider.chatgptWeb?.semanticCheckpointStatePath
     ? dirname(resolve(expandUserPath(provider.chatgptWeb.semanticCheckpointStatePath)))
     : join(getConfigDir(), "runtime");
@@ -472,6 +484,29 @@ export function createChatGptWebAdapter(
     const result = preflightSemanticProjection(value, capabilities, mode, experimentalSkillAttachments === true);
     semanticCeilings?.assertWithin("sol", mode.effort, accountTier, result.metrics.firstMessageTokens);
     return result;
+  };
+  const preflightCanonicalFallback = (
+    value: CodexParsedRequest, capabilities: ChatGptWebCapabilities, mode: ChatGptWebModelMode,
+  ): void => {
+    if (!experimentalBiggerContext) {
+      semanticPreflight(value, capabilities, mode);
+      return;
+    }
+    const parts = resolveBiggerContextMultipartParts(value, capabilities, experimentalSkillAttachments === true);
+    if (parts === undefined) {
+      semanticPreflight(value, capabilities, mode);
+      return;
+    }
+    // The browser worker validates every physical stage and the final commit
+    // before sending. A fallback may use multipart, but must never discard
+    // canonical compaction evidence or claim a semantic retained epoch.
+    const compiled = compileChatGptWebPrompt(
+      value, capabilities, mode.localTools ? "[retired turn handle]" : undefined,
+      { experimentalMultipartParts: parts, experimentalSkillAttachments: experimentalSkillAttachments === true },
+    );
+    if (!compiled.multipart || (value._compactionRequest && compiled.trimmedCompactionMessages)) {
+      throw new Error("Canonical Bigger Context fallback cannot discard compaction evidence");
+    }
   };
   const currentUsageInput = (parsed: CodexParsedRequest): CodexParsedRequest => (
     parsed.modelId === CHATGPT_WEB_LUNA_MODEL_ID && !parsed._compactionRequest
@@ -514,7 +549,7 @@ export function createChatGptWebAdapter(
     const identity = extractChatGptTurnIdentity(parsed);
     const threadHash = identity.threadId ? semanticThreadHash(identity.threadId) : "missing";
     if (parsed._compactionRequest && identity.threadId && parsed._chatgptModelFamily
-      && !manualInteraction && !experimentalBiggerContext) {
+      && !manualInteraction) {
       const active = semanticEpochStore.get(identity.threadId, true);
       if (active) {
         try {
@@ -532,7 +567,7 @@ export function createChatGptWebAdapter(
       }
       try {
         const mode = resolveChatGptWebModelMode(parsed.modelId, parsed.options.reasoning, turnCapabilities);
-        semanticPreflight(parsed, turnCapabilities, mode);
+        preflightCanonicalFallback(parsed, turnCapabilities, mode);
       } catch {
         emitSemanticLog({ event: "semantic_fallback", threadHash, to: "recovery_error", reason: "compaction_view_unavailable" });
         throw new ChatGptWebAdapterError(
@@ -550,7 +585,6 @@ export function createChatGptWebAdapter(
       || !environment
       || !retainedLauncherDescriptor
       || freshConversationPerTurn
-      || experimentalBiggerContext === true
       || !identity.threadId;
     if (ineligible) {
       emitSemanticLog({ event: "semantic_skip", threadHash, reason: "ineligible" });
@@ -566,7 +600,7 @@ export function createChatGptWebAdapter(
     const mode = resolveChatGptWebModelMode(parsed.modelId, parsed.options.reasoning, turnCapabilities);
     const fallbackToLegacy = (reason: string, validationError?: unknown): SemanticRuntimeInput => {
       try {
-        semanticPreflight(parsed, turnCapabilities, mode);
+        preflightCanonicalFallback(parsed, turnCapabilities, mode);
       } catch {
         emitSemanticLog({ event: "semantic_fallback", threadHash, to: "recovery_error", reason });
         if (validationError !== undefined) {
@@ -633,7 +667,27 @@ export function createChatGptWebAdapter(
     }
     if (active && activeProjected && (sameActiveSource || !candidate || reuseForCooldown)) {
       const continuation = retainedConversationResumeRequest(activeProjected.parsed) ?? activeProjected.parsed;
-      const preflight = semanticPreflight(continuation, turnCapabilities, mode);
+      let preflight: ReturnType<typeof preflightSemanticProjection> | undefined;
+      let failedReason: string | undefined;
+      try {
+        preflight = semanticPreflight(continuation, turnCapabilities, mode);
+        const key = chatGptConversationKey(parsed, executionNamespace, semanticConversationOptions(active));
+        const occupancy = key && semanticEpochOccupancies.forConversation(
+          key, true, preflight.metrics.physicalLimit, parsed.modelId,
+        );
+        if (!occupancy || occupancy.confidence !== "known" || occupancy.value === null) {
+          failedReason = "retained_occupancy_unavailable";
+        } else {
+          // A newly issued process-scoped key has no retained browser tab yet:
+          // its first send uses the entire projection, not the shorter resume.
+          if (occupancy.value === 0) preflight = semanticPreflight(activeProjected.parsed, turnCapabilities, mode);
+          if (occupancy.value + preflight.metrics.firstMessageTokens + 12_288
+            >= preflight.metrics.physicalLimit) failedReason = "retained_epoch_no_fit";
+        }
+      } catch {
+        failedReason = "retained_epoch_preflight_failed";
+      }
+      if (failedReason || !preflight) return fallbackToLegacy(failedReason ?? "retained_epoch_preflight_failed");
       return {
         parsed: activeProjected.parsed,
         epoch: active,
@@ -651,6 +705,42 @@ export function createChatGptWebAdapter(
       return { parsed, threadHash };
     }
 
+    const candidateProjection = projectSemanticEpoch(parsed, candidate);
+    let rotationReason: SemanticRotationReason = !active ? "initial"
+      : active.modelFamily !== candidate.modelFamily ? "model_family_change" : "unknown_occupancy";
+    if (active && activeProjected && active.modelFamily === candidate.modelFamily) {
+      // A cooldown alone is insufficient reason to consume another rotation.
+      // Use the projected continuation and real process-local retained-chat
+      // occupancy. Missing/restarted occupancy conservatively calls for reseed.
+      try {
+        const continuation = retainedConversationResumeRequest(activeProjected.parsed) ?? activeProjected.parsed;
+        const preflight = semanticPreflight(continuation, turnCapabilities, mode);
+        const key = chatGptConversationKey(parsed, executionNamespace, {
+          ...semanticConversationOptions(active),
+        });
+        const occupancy = key && semanticEpochOccupancies.forConversation(
+          key, true, preflight.metrics.physicalLimit, parsed.modelId,
+        );
+        const decision = occupancy && decideSemanticEpochRotation({
+          occupancyConfidence: occupancy.confidence,
+          occupancyTokens: occupancy.value,
+          nextMessageTokens: preflight.metrics.firstMessageTokens,
+          physicalLimit: preflight.metrics.physicalLimit,
+          incrementalSavingsTokens: Math.max(0, candidateProjection.metrics.maskedTokensEst
+            - activeProjected.metrics.maskedTokensEst),
+        });
+        if (decision === "reuse") {
+          emitSemanticLog({ event: "semantic_skip", threadHash, reason: "low_pressure" });
+          return { parsed: activeProjected.parsed, epoch: active, threadHash,
+            metrics: { ...activeProjected.metrics, ...preflight.metrics } };
+        }
+        if (decision) rotationReason = decision;
+      } catch {
+        // Reuse preflight failed: try a new physically bounded epoch.
+        rotationReason = "physical_pressure";
+      }
+    }
+
     const rotationId = `${candidate.semanticEpoch}:${candidate.coveredHistoryDigest}:${candidate.modelFamily}`;
     if (!semanticCostCaps!.canRotate(costThreadKey, rotationId)) {
       emitSemanticLog({ event: "semantic_skip", threadHash, reason: "cap_hit" });
@@ -661,11 +751,10 @@ export function createChatGptWebAdapter(
           const continuation = retainedConversationResumeRequest(activeProjected.parsed) ?? activeProjected.parsed;
           const preflight = semanticPreflight(continuation, turnCapabilities, mode);
           const conversationKey = chatGptConversationKey(parsed, executionNamespace, {
-            semanticEpoch: active.semanticEpoch,
-            semanticEpochIdentity: `${active.updatedAt}:${active.coveredHistoryDigest}`,
+            ...semanticConversationOptions(active),
           });
           const occupancy = conversationKey && semanticEpochOccupancies.forConversation(
-            conversationKey, false, preflight.metrics.physicalLimit, parsed.modelId,
+            conversationKey, true, preflight.metrics.physicalLimit, parsed.modelId,
           );
           // A cap-hit reuse still extends a retained browser conversation. A
           // fitting single message alone does not prove remaining physical room.
@@ -683,7 +772,7 @@ export function createChatGptWebAdapter(
       return fallbackToLegacy("rotation_cap_hit");
     }
 
-    const projected = projectSemanticEpoch(parsed, candidate);
+    const projected = candidateProjection;
     let preflight: ReturnType<typeof preflightSemanticProjection>;
     try {
       preflight = semanticPreflight(projected.parsed, turnCapabilities, mode);
@@ -701,9 +790,6 @@ export function createChatGptWebAdapter(
       expectedSemanticEpoch: active?.semanticEpoch,
       verifiedAuthority: true,
     });
-    const rotationReason = active && active.modelFamily !== candidate.modelFamily
-      ? "model_family_change" as const
-      : "unknown_occupancy" as const;
     if (committed.committed) {
       emitSemanticLog({
         event: "semantic_rotation",
@@ -767,15 +853,12 @@ export function createChatGptWebAdapter(
       && mode.localTools
       && retainedLauncherDescriptor
       ? chatGptConversationKey(checkpointInput.parsed, executionNamespace, {
-        ...(semantic.epoch ? {
-          semanticEpoch: semantic.epoch.semanticEpoch,
-          semanticEpochIdentity: `${semantic.epoch.updatedAt}:${semantic.epoch.coveredHistoryDigest}`,
-        } : {}),
+        ...(semantic.epoch ? semanticConversationOptions(semantic.epoch) : {}),
       })
       : undefined;
     const semanticOccupancy = semantic.epoch && semantic.metrics && conversationKey
       ? semanticEpochOccupancies.forConversation(
-        conversationKey, semantic.rotated === true, semantic.metrics.physicalLimit, parsed.modelId,
+        conversationKey, true, semantic.metrics.physicalLimit, parsed.modelId,
       )
       : undefined;
     const resumeInput = conversationKey
@@ -789,7 +872,10 @@ export function createChatGptWebAdapter(
       : undefined;
     const compileOptionsFor = (input: CodexParsedRequest) => {
       if (manualRequest) return {};
-      const experimentalMultipartParts = experimentalBiggerContext
+      // SEM epochs use an inline physical submission: multipart acknowledgements
+      // consume additional browser context that the epoch occupancy ledger does
+      // not currently observe. Canonical legacy fallback retains Bigger Context.
+      const experimentalMultipartParts = experimentalBiggerContext && !semantic.epoch
         ? resolveBiggerContextMultipartParts(input, turnCapabilities, experimentalSkillAttachments)
         : undefined;
       return {
@@ -885,6 +971,7 @@ export function createChatGptWebAdapter(
       );
     };
     const submission: NonNullable<ChatGptTurnRuntime["submission"]> = { phase: "prepared" };
+    let preparedBrowserMessageTokens: number | undefined;
     const onSemanticSizeRejection = semantic.threadHash
       ? (observation: ChatGptSubmissionRejectionObservation): void => {
         semanticOccupancy?.markRejected();
@@ -921,7 +1008,8 @@ export function createChatGptWebAdapter(
       onSubmitted: () => {
         if (!parsed._compactionRequest) submission.phase = "accepted";
         if (semanticOccupancy && semantic.metrics) {
-          semanticOccupancy.record(`submit:${traceId}`, semantic.metrics.firstMessageTokens);
+          semanticOccupancy.record(`submit:${traceId}`,
+            preparedBrowserMessageTokens ?? semantic.metrics.firstMessageTokens);
         }
         hooks.onCompactionProgress?.();
       },
@@ -1152,6 +1240,7 @@ export function createChatGptWebAdapter(
           turnToken,
           compileOptionsFor(input),
         );
+        preparedBrowserMessageTokens = estimateCompiledChatGptWebMessageTokens(compiled, parsed.modelId);
         // Publish only after preparation succeeds: otherwise its failure revokes the token
         // before the response observer uses it and masks the cause as an expired capability.
         observeCapabilityRetirement(turnToken, externalProgress);
@@ -1174,6 +1263,22 @@ export function createChatGptWebAdapter(
       capabilities: turnCapabilities,
       prepare: () => prepareWith(browserInput),
       ...(resumeInput ? { prepareResume: () => prepareWith(resumeInput) } : {}),
+      ...(semanticOccupancy ? { onPreparedSelected: (reused: boolean) => {
+        if (reused) {
+          // A retained lease without matching process-local occupancy is not
+          // evidence that another browser submission can safely fit.
+          if (semanticOccupancy.confidence !== "known" || !semanticOccupancy.value) {
+            throw new Error("SEM retained browser lease has no verified occupancy");
+          }
+          return;
+        }
+        // The launcher may have restarted while the bridge stayed alive.
+        // Its fresh lease selects prepare(), which submits the FULL projected
+        // epoch. Validate that size before sending and retire old tab pressure.
+        semanticPreflight(browserInput, turnCapabilities,
+          resolveChatGptWebModelMode(parsed.modelId, parsed.options.reasoning, turnCapabilities));
+        semanticOccupancy.resetForVerifiedFreshLease();
+      } } : {}),
       ...(retainConversation ? { retainConversation: true, conversationKey } : {}),
       ...(onSemanticSizeRejection ? { onSizeRejection: onSemanticSizeRejection } : {}),
       abortSignal: browserAbort.signal,

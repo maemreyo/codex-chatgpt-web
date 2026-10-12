@@ -10,6 +10,7 @@ import {
 } from "../src/adapters/chatgpt-web/semantic-epoch-store";
 import { parseRequest } from "../src/responses/parser";
 import { semanticCoveredHistoryDigest } from "../src/responses/semantic-provenance";
+import { renderSemanticArtifactLedger } from "../src/responses/semantic-provenance";
 import { ChatGptWebAdapterError } from "../src/adapters/chatgpt-web/adapter-error";
 
 function parsed(threadId = "thread_a") {
@@ -100,6 +101,48 @@ test("invalid JSON is preserved only on independently verified recovery", () => 
     expect(verified.get("thread_a", true)).toBeUndefined();
     expect(readdirSync(dir).filter(name => name.startsWith("semantic-epochs.json.corrupt-"))).toHaveLength(1);
     expect(() => readFileSync(path, "utf8")).toThrow();
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("persisted legacy ledgers remain readable without claiming success from failed=false", () => {
+  const { dir, path } = tempState();
+  try {
+    const legacy = epoch(1, "turn_1", 1000, {
+      artifactLedger: {
+        filesTouched: [],
+        commands: [{ commandDigest: "abc", failed: false, ref: "ci1_old_1" }],
+        testOutcomes: [{ failed: false, ref: "ci1_old_1" }],
+      },
+    });
+    const source = JSON.stringify({ version: 1, epochs: { thread_a: legacy } });
+    writeFileSync(path, source, "utf8");
+    const restored = new ChatGptSemanticEpochStore(path, () => 1000).get("thread_a")!;
+    expect(restored.artifactLedger.commands[0]?.status).toBeUndefined();
+    expect(restored.artifactLedger.testOutcomes[0]?.status).toBeUndefined();
+    expect(renderSemanticArtifactLedger(restored.artifactLedger)).toContain("legacy rows without status as unverified");
+    expect(readFileSync(path, "utf8")).toBe(source);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("contradictory persisted ledger outcomes fail closed without overwriting state", () => {
+  const { dir, path } = tempState();
+  try {
+    const invalid = epoch(1, "turn_1", 1000, {
+      artifactLedger: {
+        filesTouched: [],
+        commands: [{ commandDigest: "abc", failed: true, status: "success", ref: "ci1_old_1" }],
+        testOutcomes: [],
+      },
+    });
+    const source = JSON.stringify({ version: 1, epochs: { thread_a: invalid } });
+    writeFileSync(path, source, "utf8");
+    expect(() => new ChatGptSemanticEpochStore(path, () => 1000).get("thread_a"))
+      .toThrow("semantic epoch file");
+    expect(readFileSync(path, "utf8")).toBe(source);
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }

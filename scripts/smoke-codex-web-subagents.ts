@@ -147,6 +147,13 @@ function compactOutput(value: string): string {
   return value.length <= 8_000 ? value : value.slice(-8_000);
 }
 
+function hasAcceptanceMarker(value: unknown, marker: string, version: string): boolean {
+  if (typeof value !== "string") return false;
+  // Web model replies sometimes Markdown-escape the underscores in acceptance markers.
+  const normalized = value.replaceAll("\\_", "_");
+  return normalized.includes(marker) && normalized.includes(version);
+}
+
 try {
   const processHandle = Bun.spawn([
     codex,
@@ -220,10 +227,11 @@ try {
   }
 
   const rootCompletion = object(rootSession?.completion?.payload);
-  const finalMessage = typeof rootCompletion?.last_agent_message === "string"
-    ? rootCompletion.last_agent_message
-    : "";
-  if (!finalMessage.includes("LIVE_WEB_SUBAGENT_OK") || !finalMessage.includes(expectedVersion)) {
+  const childCompletion = object(childSession?.completion?.payload);
+  if (!hasAcceptanceMarker(childCompletion?.last_agent_message, "CHILD_RESULT", expectedVersion)) {
+    failures.push(`child did not return the acceptance marker for version ${expectedVersion}`);
+  }
+  if (!hasAcceptanceMarker(rootCompletion?.last_agent_message, "LIVE_WEB_SUBAGENT_OK", expectedVersion)) {
     failures.push(`root did not return the acceptance marker for version ${expectedVersion}`);
   }
 

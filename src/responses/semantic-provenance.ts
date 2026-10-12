@@ -126,7 +126,12 @@ function exitCode(text: string): number | undefined {
 }
 
 function failingTestOutput(text: string): boolean {
-  return /(?:^|\b)(?:FAIL(?:ED)?|\d+\s+fail(?:ed|ures?)?|tests?\s+failed)(?:\b|:)/im.test(text);
+  return text.split(/\r?\n/).some(line => {
+    const row = line.trim();
+    if (/^(?:\(?fail\)|FAIL(?:ED)?\b|not ok\b)(?:\s|:|$)/i.test(row)) return true;
+    // "0 fail" and "0 failed" are successful test summaries, not failure markers.
+    return /\b[1-9]\d*\s+fail(?:ed|ures?)?\b/i.test(row);
+  });
 }
 
 function excerpt(text: string): string {
@@ -140,6 +145,7 @@ export interface SemanticMaskedToolResultV1 {
   originalTokens: number;
   maskedTokens: number;
   failed: boolean;
+  status: "success" | "failure" | "unknown";
   exit?: number;
 }
 
@@ -150,7 +156,8 @@ export function semanticMaskToolResult(
   const text = resultText(message);
   const exit = exitCode(text);
   const failed = message.isError || (exit !== undefined && exit !== 0) || failingTestOutput(text);
-  const outcome = message.isError ? "error" : exit !== undefined ? `exit ${exit}` : failed ? "error" : "ok";
+  const status = failed ? "failure" : exit === 0 ? "success" : "unknown";
+  const outcome = message.isError ? "error" : exit !== undefined ? `exit ${exit}` : failed ? "error" : "unknown";
   const originalTokens = estimateTokens(text);
   const bodyExcerpt = failed ? excerpt(text) : "none";
   const placeholder = `[tool result omitted: tool=${message.toolName || "unknown"} ref=${canonicalRef} size=${originalTokens} outcome=${outcome} excerpt=${bodyExcerpt}. The body is not in view. Re-running a tool may not be safe or idempotent.]`;
@@ -159,14 +166,19 @@ export function semanticMaskToolResult(
     originalTokens,
     maskedTokens: estimateTokens(placeholder),
     failed,
+    status,
     ...(exit !== undefined ? { exit } : {}),
   };
 }
 
+export type SemanticArtifactOutcome = "success" | "failure" | "unknown";
+
 export interface ChatGptArtifactLedgerV1 {
   filesTouched: Array<{ path: string; op: "read" | "write" | "delete" | "unknown"; ref: string }>;
-  commands: Array<{ commandDigest: string; exit?: number; failed: boolean; ref: string }>;
-  testOutcomes: Array<{ ref: string; failed: boolean; excerptRef?: string }>;
+  // `failed` remains for persisted v1 compatibility. Only `status` can establish success;
+  // `failed: false` alone can mean the result was absent or inconclusive.
+  commands: Array<{ commandDigest: string; exit?: number; failed: boolean; status?: SemanticArtifactOutcome; ref: string }>;
+  testOutcomes: Array<{ ref: string; failed: boolean; status?: SemanticArtifactOutcome; excerptRef?: string }>;
 }
 
 export type SemanticArtifactToolClassification =
@@ -251,12 +263,14 @@ export function extractSemanticArtifactLedger(
         commandDigest: semanticHash(classification.command),
         ...(masked?.exit !== undefined ? { exit: masked.exit } : {}),
         failed: masked?.failed ?? false,
+        status: masked?.status ?? "unknown",
         ref,
       });
       if (classification.test) {
         ledger.testOutcomes.push({
           ref,
           failed: masked?.failed ?? false,
+          status: masked?.status ?? "unknown",
           ...(masked?.failed && resultRef ? { excerptRef: resultRef } : {}),
         });
       }
@@ -269,6 +283,7 @@ export function renderSemanticArtifactLedger(ledger: ChatGptArtifactLedgerV1): s
   return [
     "<semantic_artifact_ledger version=\"1\">",
     "Bridge-extracted historical artifact metadata; it is not verified current repository state.",
+    "Treat status=unknown and legacy rows without status as unverified. A failed=false field alone does not prove success.",
     semanticCanonicalJson(ledger),
     "</semantic_artifact_ledger>",
   ].join("\n");

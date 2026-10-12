@@ -31,6 +31,11 @@ import {
 import { assertChatGptWebInputWithinLimits } from "./browser-worker";
 
 const SEMANTIC_ESTIMATE_TURN_TOKEN = "turn_00000000000000000000000000000000";
+// Preserve a bounded exact window of recent, small, settled tool results.
+// Tool evidence remains lower-trust than developer/skill instructions.
+const MAX_EXACT_EVIDENCE_RESULTS = 2;
+const MAX_EXACT_EVIDENCE_RESULT_TOKENS = 384;
+const MAX_EXACT_EVIDENCE_TOTAL_TOKENS = 640;
 
 type RotationSkipReason =
   | "no_completed_turn"
@@ -48,7 +53,7 @@ export interface SemanticProjectionMetrics {
   maskedTokensEst: number;
   ledgerFiles: number;
   ledgerCommands: number;
-  windowSize: 0;
+  windowSize: number;
   firstMessageTokens: number;
   firstMessageChars: number;
   estimatedInputTokens: number;
@@ -233,6 +238,24 @@ export function projectSemanticEpoch(
   if (cut < 0) throw new Error("Semantic epoch anchor is missing");
 
   const pinRefs = new Set(semanticPinnedMessageRefs(parsed));
+  // Re-derive from the verified canonical prefix so that existing persisted
+  // epochs and restart/replay use the same exact evidence window.
+  const exactEvidenceIndices = new Set<number>();
+  let evidenceTokens = 0;
+  for (let index = parsed.context.messages.length - 1; index >= 0; index -= 1) {
+    if (exactEvidenceIndices.size >= MAX_EXACT_EVIDENCE_RESULTS) break;
+    const message = parsed.context.messages[index]!;
+    if (message.role !== "toolResult") continue;
+    const refs = semanticMessageRefs(parsed, index);
+    if (refs.length !== 1) continue;
+    const resultRef = isMaskableCoveredResult(parsed, index, cut);
+    if (!resultRef) continue;
+    const tokens = semanticMaskToolResult(message, resultRef).originalTokens;
+    if (tokens > MAX_EXACT_EVIDENCE_RESULT_TOKENS
+      || evidenceTokens + tokens > MAX_EXACT_EVIDENCE_TOTAL_TOKENS) continue;
+    exactEvidenceIndices.add(index);
+    evidenceTokens += tokens;
+  }
   const seenPinnedRefs = new Set<string>();
   const coveredMessages: CodexMessage[] = [];
   const suffixMessages: CodexMessage[] = [];
@@ -262,7 +285,7 @@ export function projectSemanticEpoch(
     }
     if (message.role === "toolResult") {
       const resultRef = isMaskableCoveredResult(parsed, messageIndex, cut);
-      if (resultRef) {
+      if (resultRef && !exactEvidenceIndices.has(messageIndex)) {
         const masked = semanticMaskToolResult(message as CodexToolResultMessage, resultRef);
         coveredMessages.push(masked.message);
         maskedResults += 1;
@@ -297,7 +320,7 @@ export function projectSemanticEpoch(
       maskedTokensEst,
       ledgerFiles: epoch.artifactLedger.filesTouched.length,
       ledgerCommands: epoch.artifactLedger.commands.length,
-      windowSize: 0,
+      windowSize: exactEvidenceIndices.size,
     },
   };
 }

@@ -23,9 +23,11 @@ export interface SemanticLogReport {
     additionalSubmissionsPer100Legacy: number | null;
   };
   skipsByReason: Record<string, number>;
+  validationFailuresByReason: Record<string, number>;
   rejectionsByClass: Record<string, number>;
   rejectionsAfterRotation: number;
   fallbacksByTarget: Record<string, number>;
+  fallbacksByReason: Record<string, number>;
   retainedRejectionSignals: {
     total: number;
     repeatedByThread: Array<{ threadHash: string; rejections: number }>;
@@ -45,10 +47,20 @@ const KNOWN_EVENTS = new Set([
   "semantic_reject", "semantic_fallback", "semantic_cost",
 ]);
 const SKIP_REASONS = new Set([
-  "ineligible", "no_fit", "cooldown", "cap_hit", "outstanding_tools", "unknown_occupancy",
+  "ineligible", "no_fit", "cooldown", "cap_hit", "outstanding_tools", "unknown_occupancy", "low_pressure",
 ]);
+const VALIDATION_REASONS = new Set(["digest_mismatch", "anchor_missing", "schema", "corrupt_store"]);
 const REJECTION_CLASSES = new Set(["A", "B", "C", "D", "unknown"]);
 const FALLBACK_TARGETS = new Set(["legacy", "compaction_required", "recovery_error"]);
+// Only report reasons produced by this bridge. Never reflect an untrusted log
+// string, which could contain a prompt or private model output.
+const FALLBACK_REASONS = new Set([
+  "web_compaction_cap_hit", "compaction_view_unavailable",
+  "active_epoch_validation_failed", "retained_epoch_preflight_failed",
+  "rotation_cap_hit_epoch_no_fit", "rotation_cap_hit",
+  "rotation_first_message_no_fit", "rotation_cap_changed_before_commit",
+  "unknown_occupancy", "physical_pressure",
+]);
 const THREAD_HASH = /^[a-f0-9]{16}$/;
 const COST_KEYS = [
   "legacyEquivalentSubmissions", "checkpointTailRequests", "checkpointTailTokensEst",
@@ -90,22 +102,27 @@ function enumValue(value: unknown, allowed: ReadonlySet<string>): string {
   return typeof value === "string" && allowed.has(value) ? value : "unknown";
 }
 
-export function semanticLogReport(path: string): SemanticLogReport {
-  const events = readFileSync(path, "utf8")
+export function semanticLogReport(path: string | readonly string[]): SemanticLogReport {
+  // Treat rotated, non-overlapping log segments as one ordered event stream.
+  // Aggregating separate reports loses per-thread continuity and misstates ratios.
+  const paths = typeof path === "string" ? [path] : [...new Set(path)];
+  const events = paths.flatMap(file => readFileSync(file, "utf8")
     .split(/\r?\n/)
     .filter(Boolean)
     .flatMap(line => {
       const decoded = parseJson(line);
       const semantic = decoded ? semanticEventFromRecord(decoded) : undefined;
       return semantic && KNOWN_EVENTS.has(String(semantic.event)) ? [semantic] : [];
-    });
+    }));
 
   const threadSet = new Set<string>();
   const rotationsByThread = new Map<string, number>();
   const epochTurnCounts = new Map<string, Map<number, number>>();
   const skipsByReason: Record<string, number> = {};
+  const validationFailuresByReason: Record<string, number> = {};
   const rejectionsByClass: Record<string, number> = {};
   const fallbacksByTarget: Record<string, number> = {};
+  const fallbacksByReason: Record<string, number> = {};
   const rotatedThreads = new Set<string>();
   const retainedRejectionsByThread = new Map<string, number>();
   let turns = 0;
@@ -148,6 +165,8 @@ export function semanticLogReport(path: string): SemanticLogReport {
       const reason = enumValue(event.reason, SKIP_REASONS);
       increment(skipsByReason, reason);
       if (reason === "no_fit") rotationPreflightNoFit += 1;
+    } else if (type === "semantic_validation_failed") {
+      increment(validationFailuresByReason, enumValue(event.reason, VALIDATION_REASONS));
     } else if (type === "semantic_reject") {
       const rejectionClass = enumValue(event.class, REJECTION_CLASSES);
       increment(rejectionsByClass, rejectionClass);
@@ -160,6 +179,7 @@ export function semanticLogReport(path: string): SemanticLogReport {
       if (threadHash && rotatedThreads.has(threadHash)) rejectionsAfterRotation += 1;
     } else if (type === "semantic_fallback") {
       increment(fallbacksByTarget, enumValue(event.to, FALLBACK_TARGETS));
+      increment(fallbacksByReason, enumValue(event.reason, FALLBACK_REASONS));
     } else if (type === "semantic_cost" && threadHash) {
       // An invalid or partial cost row must not pollute derived ratios. Logs
       // can be truncated or externally supplied, and content is never echoed.
@@ -211,9 +231,11 @@ export function semanticLogReport(path: string): SemanticLogReport {
         : null,
     },
     skipsByReason,
+    validationFailuresByReason,
     rejectionsByClass,
     rejectionsAfterRotation,
     fallbacksByTarget,
+    fallbacksByReason,
     retainedRejectionSignals: {
       total: retainedRejections,
       repeatedByThread,
@@ -224,11 +246,11 @@ export function semanticLogReport(path: string): SemanticLogReport {
 }
 
 if (import.meta.main) {
-  const path = process.argv[2];
-  if (!path) {
-    console.error("Usage: bun run scripts/semantic-log-report.ts <launcher.jsonl>");
+  const paths = process.argv.slice(2);
+  if (paths.length === 0) {
+    console.error("Usage: bun run scripts/semantic-log-report.ts <older-launcher.jsonl> [newer-launcher.jsonl ...]");
     process.exitCode = 2;
   } else {
-    console.log(JSON.stringify(semanticLogReport(path), null, 2));
+    console.log(JSON.stringify(semanticLogReport(paths), null, 2));
   }
 }
